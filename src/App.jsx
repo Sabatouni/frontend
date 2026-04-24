@@ -22,16 +22,41 @@ const DEFAULT_SERVICES = [
   { id: "paintball",  name: "Paintball",  color: "#81B29A", emoji: "🎯" },
   { id: "entry",      name: "Park Entry", color: "#F2CC8F", emoji: "🎟️" },
 ];
-const EXPENSE_CATS = ["Restaurant","Go Kart","Paintball","Park Entry","Utilities","Staff","Maintenance","Other"];
+
+const EXPENSE_CATS = ["Restaurant","Go Kart","Paintball","Park Entry","Utilities","Staff","Maintenance","Marketing","Other"];
+
 const ROLES = { WORKER: "worker", OWNER: "owner" };
-const USERS = {
-  admin:  { password: "admin123",  role: ROLES.OWNER,  name: "Owner"  },
-  worker: { password: "worker123", role: ROLES.WORKER, name: "Worker" },
-};
+
+// ── USER SYSTEM ──────────────────────────────────────────────
+// localStorage-backed user store so workers created in session persist
+function getStoredUsers() {
+  try {
+    const raw = localStorage.getItem("swahili_users");
+    if (raw) return JSON.parse(raw);
+  } catch {}
+  return {
+    admin:  { password: "admin123",  role: ROLES.OWNER,  name: "Owner" },
+    worker: { password: "worker123", role: ROLES.WORKER, name: "Worker" },
+  };
+}
+function saveStoredUsers(users) {
+  try { localStorage.setItem("swahili_users", JSON.stringify(users)); } catch {}
+}
+function getStoredDb() {
+  try {
+    const raw = localStorage.getItem("swahili_db");
+    if (raw) return JSON.parse(raw);
+  } catch {}
+  return null;
+}
+function saveStoredDb(db) {
+  try { localStorage.setItem("swahili_db", JSON.stringify(db)); } catch {}
+}
+
 const TZS = (n) => `TZS ${Number(n).toLocaleString()}`;
 const todayStr = () => new Date().toISOString().split("T")[0];
 
-const PALETTE = ["#E07A5F","#3D405B","#81B29A","#F2CC8F","#9C89B8","#F0A500","#00B4D8","#E63946","#2DC653","#FF6B6B"];
+const PALETTE = ["#E07A5F","#3D405B","#81B29A","#F2CC8F","#9C89B8","#F0A500","#00B4D8","#E63946"];
 
 function seedData(services) {
   const sales = [], expenses = [];
@@ -42,30 +67,63 @@ function seedData(services) {
     services.forEach((s) => {
       const count = Math.floor(Math.random() * 3) + 1;
       for (let i = 0; i < count; i++) {
-        sales.push({ id: `s-${ds}-${s.id}-${i}`, service: s.name, amount: (Math.floor(Math.random() * 20) + 5) * 1000, notes: "", date: ds, createdBy: "worker" });
+        sales.push({ id: `s-${ds}-${s.id}-${i}`, service: s.name, amount: (Math.floor(Math.random() * 20) + 1) * 5000, notes: "", date: ds, createdBy: "admin", deleted: false });
       }
     });
-    if (d % 3 === 0) expenses.push({ id: `e-${ds}`, category: EXPENSE_CATS[Math.floor(Math.random() * 4)], item: ["Tomatoes","Oil drum","Paint cartridge","Kart fuel"][Math.floor(Math.random() * 4)], cost: (Math.floor(Math.random() * 15) + 2) * 1000, date: ds, createdBy: "worker" });
+    if (d % 3 === 0) expenses.push({ id: `e-${ds}`, category: EXPENSE_CATS[Math.floor(Math.random() * 5)], item: "Supplies", cost: (Math.floor(Math.random() * 10) + 1) * 10000, date: ds, createdBy: "admin", deleted: false });
   }
   return { sales, expenses };
 }
 
+// ── APP ───────────────────────────────────────────────────────
 export default function App() {
+  const [users, setUsers] = useState(() => getStoredUsers());
   const [user, setUser] = useState(null);
   const [services, setServices] = useState(DEFAULT_SERVICES);
-  const [db, setDb] = useState(() => seedData(DEFAULT_SERVICES));
+  const [db, setDb] = useState(() => {
+    const stored = getStoredDb();
+    if (stored) return stored;
+    const seeded = seedData(DEFAULT_SERVICES);
+    saveStoredDb(seeded);
+    return seeded;
+  });
   const [page, setPage] = useState("dashboard");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [toast, setToast] = useState(null);
 
-  const showToast = (msg, type = "success") => { setToast({ msg, type }); setTimeout(() => setToast(null), 3000); };
+  const showToast = (msg, type = "success") => {
+    setToast({ msg, type });
+    setTimeout(() => setToast(null), 3000);
+  };
 
   const addService = (newSvc) => {
     setServices(prev => [...prev, newSvc]);
     showToast(`"${newSvc.name}" added ✓`);
   };
 
-  if (!user) return <Login onLogin={setUser} />;
+  // Persist db changes
+  const updateDb = (updater) => {
+    setDb(prev => {
+      const next = typeof updater === "function" ? updater(prev) : updater;
+      saveStoredDb(next);
+      return next;
+    });
+  };
+
+  const addUser = (newUser) => {
+    const updated = { ...users, [newUser.username]: { password: newUser.password, role: newUser.role, name: newUser.name || newUser.username } };
+    setUsers(updated);
+    saveStoredUsers(updated);
+    showToast(`User "${newUser.username}" created ✓`);
+  };
+
+  if (!user) return <Login users={users} onLogin={setUser} />;
+
+  // Only show non-deleted records to all views
+  const visibleDb = {
+    sales:    db.sales.filter(s => !s.deleted),
+    expenses: db.expenses.filter(e => !e.deleted),
+  };
 
   return (
     <div style={{ display:"flex", height:"100vh", fontFamily:"'DM Sans', sans-serif", background:"#F7F5F0", overflow:"hidden" }}>
@@ -76,11 +134,12 @@ export default function App() {
           <button onClick={() => setSidebarOpen(!sidebarOpen)} style={{ background:"none", border:"none", cursor:"pointer", fontSize:20, padding:4, color:"#555" }}>☰</button>
           <div style={{ fontSize:13, color:"#999" }}>{new Date().toLocaleDateString("en-US",{ weekday:"long", year:"numeric", month:"long", day:"numeric" })}</div>
         </div>
-        {page === "dashboard" && user.role === ROLES.OWNER  && <Dashboard db={db} services={services} />}
-        {page === "dashboard" && user.role === ROLES.WORKER && <WorkerHome db={db} user={user} setPage={setPage} />}
-        {page === "sales"     && <SalesPage db={db} setDb={setDb} user={user} showToast={showToast} services={services} addService={addService} />}
-        {page === "expenses"  && <ExpensesPage db={db} setDb={setDb} user={user} showToast={showToast} />}
-        {page === "reports"   && user.role === ROLES.OWNER && <ReportsPage db={db} services={services} />}
+        {page === "dashboard" && user.role === ROLES.OWNER  && <Dashboard db={visibleDb} services={services} />}
+        {page === "dashboard" && user.role === ROLES.WORKER && <WorkerHome db={visibleDb} user={user} setPage={setPage} />}
+        {page === "sales"     && <SalesPage    db={db} visibleDb={visibleDb} updateDb={updateDb} user={user} showToast={showToast} services={services} addService={addService} />}
+        {page === "expenses"  && <ExpensesPage db={db} visibleDb={visibleDb} updateDb={updateDb} user={user} showToast={showToast} />}
+        {page === "reports"   && user.role === ROLES.OWNER && <ReportsPage db={visibleDb} services={services} />}
+        {page === "users"     && user.role === ROLES.OWNER && <UsersPage users={users} onAddUser={addUser} showToast={showToast} />}
       </main>
       {toast && (
         <div style={{ position:"fixed", bottom:28, right:28, zIndex:9999, background: toast.type==="success" ? "#81B29A" : "#E07A5F", color:"#fff", padding:"13px 22px", borderRadius:12, fontWeight:600, fontSize:14, boxShadow:"0 8px 28px rgba(0,0,0,0.18)" }}>
@@ -92,11 +151,16 @@ export default function App() {
   );
 }
 
-function Login({ onLogin }) {
+// ── LOGIN ────────────────────────────────────────────────────
+function Login({ users, onLogin }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
-  const handle = () => { const u = USERS[username]; if (u && u.password === password) onLogin({ username, ...u }); else setError("Invalid credentials."); };
+  const handle = () => {
+    const u = users[username];
+    if (u && u.password === password) onLogin({ username, ...u });
+    else setError("Invalid credentials.");
+  };
   return (
     <div style={{ minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center", background:"linear-gradient(145deg, #1a1c2b 0%, #2f3347 50%, #3a2e1e 100%)", fontFamily:"'DM Sans', sans-serif" }}>
       <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;700&family=Playfair+Display:wght@700&display=swap" rel="stylesheet" />
@@ -109,16 +173,16 @@ function Login({ onLogin }) {
         <input type="password" placeholder="Password" value={password} onChange={e=>setPassword(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handle()} style={{...iS, marginTop:10}} />
         {error && <p style={{ color:"#E07A5F", fontSize:13, marginTop:6 }}>{error}</p>}
         <button onClick={handle} style={{ width:"100%", marginTop:20, padding:"15px", background:"#3D405B", color:"#fff", border:"none", borderRadius:12, fontSize:15, fontWeight:600, cursor:"pointer", fontFamily:"'DM Sans', sans-serif" }}>Sign In</button>
-
       </div>
     </div>
   );
 }
 
+// ── SIDEBAR ──────────────────────────────────────────────────
 function Sidebar({ page, setPage, user, onLogout, open }) {
   const isOwner = user.role === ROLES.OWNER;
   const nav = isOwner
-    ? [{ id:"dashboard",label:"Dashboard",icon:"📊"},{id:"sales",label:"Sales",icon:"💰"},{id:"expenses",label:"Expenses",icon:"🧾"},{id:"reports",label:"Reports",icon:"📈"}]
+    ? [{ id:"dashboard",label:"Dashboard",icon:"📊"},{id:"sales",label:"Sales",icon:"💰"},{id:"expenses",label:"Expenses",icon:"🧾"},{id:"reports",label:"Reports",icon:"📈"},{id:"users",label:"Users",icon:"👥"}]
     : [{ id:"dashboard",label:"Home",icon:"🏠"},{id:"sales",label:"Add Sale",icon:"💰"},{id:"expenses",label:"Add Expense",icon:"🧾"}];
   return (
     <aside style={{ width:open?232:66, minWidth:open?232:66, background:"#2A2D40", color:"#fff", display:"flex", flexDirection:"column", transition:"width .3s,min-width .3s", overflow:"hidden" }}>
@@ -128,14 +192,17 @@ function Sidebar({ page, setPage, user, onLogout, open }) {
       </div>
       <nav style={{ flex:1, padding:"8px 10px" }}>
         {nav.map(item => (
-          <button key={item.id} onClick={()=>setPage(item.id)} style={{ display:"flex", alignItems:"center", gap:10, width:"100%", padding:open?"11px 14px":"11px 7px", marginBottom:3, borderRadius:10, border:"none", cursor:"pointer", background:page===item.id?"#3D405B":"transparent", color:page===item.id?"#fff":"#8B8FA8", fontSize:13, fontWeight:page===item.id?600:400, textAlign:"left", fontFamily:"'DM Sans',sans-serif", justifyContent:open?"flex-start":"center" }}>
+          <button key={item.id} onClick={()=>setPage(item.id)} style={{ display:"flex", alignItems:"center", gap:10, width:"100%", padding:open?"11px 14px":"11px 7px", marginBottom:3, borderRadius:10, border:"none", cursor:"pointer", background:page===item.id?"#3D405B":"transparent", color:page===item.id?"#fff":"#9B9EC0", fontSize:13, fontWeight:page===item.id?600:400, fontFamily:"'DM Sans',sans-serif", transition:"background .15s" }}>
             <span style={{ fontSize:17, flexShrink:0 }}>{item.icon}</span>{open&&item.label}
           </button>
         ))}
       </nav>
       <div style={{ padding:"14px 10px", borderTop:"1px solid #3D405B" }}>
-        {open && <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10 }}><div style={{ width:32, height:32, borderRadius:"50%", background:"#E07A5F", display:"flex", alignItems:"center", justifyContent:"center", fontSize:13, fontWeight:700 }}>{user.name[0]}</div><div><div style={{ fontSize:12, fontWeight:600 }}>{user.name}</div><div style={{ fontSize:10, color:"#8B8FA8", textTransform:"capitalize" }}>{user.role}</div></div></div>}
-        <button onClick={onLogout} style={{ width:"100%", padding:"9px 14px", borderRadius:9, border:"1px solid #3D405B", background:"transparent", color:"#8B8FA8", cursor:"pointer", fontSize:12, fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:7, justifyContent:open?"flex-start":"center" }}>
+        {open && <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10, padding:"0 4px" }}>
+          <div style={{ width:32, height:32, borderRadius:"50%", background:"#3D405B", display:"flex", alignItems:"center", justifyContent:"center", fontSize:13, fontWeight:700, flexShrink:0 }}>{user.name?.[0]?.toUpperCase()}</div>
+          <div><div style={{ fontSize:12, fontWeight:600 }}>{user.name}</div><div style={{ fontSize:10, color:"#8B8FA8", textTransform:"uppercase" }}>{user.role}</div></div>
+        </div>}
+        <button onClick={onLogout} style={{ width:"100%", padding:"9px 14px", borderRadius:9, border:"none", background:"#E07A5F22", color:"#E07A5F", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600, fontSize:12, display:"flex", alignItems:"center", gap:8, justifyContent:open?"flex-start":"center" }}>
           <span>🚪</span>{open&&"Sign Out"}
         </button>
       </div>
@@ -143,6 +210,7 @@ function Sidebar({ page, setPage, user, onLogout, open }) {
   );
 }
 
+// ── STAT CARD ─────────────────────────────────────────────────
 function StatCard({ label, value, sub, color, icon }) {
   return (
     <div style={{ background:"#fff", borderRadius:18, padding:"22px 20px", boxShadow:"0 2px 10px rgba(0,0,0,0.06)", flex:1, minWidth:0, borderTop:`4px solid ${color}` }}>
@@ -153,19 +221,35 @@ function StatCard({ label, value, sub, color, icon }) {
   );
 }
 
+// ── SERVICE BADGE ─────────────────────────────────────────────
 function ServiceBadge({ service, services }) {
   const svc = services ? services.find(s=>s.name===service) : null;
   const color = svc ? svc.color : "#aaa";
   return <span style={{ background:color+"22", color, border:`1px solid ${color}44`, padding:"3px 9px", borderRadius:6, fontSize:11, fontWeight:600 }}>{service}</span>;
 }
 
-// ── ADD SERVICE MODAL ────────────────────────────────────────
+// ── CONFIRM DELETE MODAL ──────────────────────────────────────
+function ConfirmModal({ message, onConfirm, onCancel }) {
+  return (
+    <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.5)", zIndex:2000, display:"flex", alignItems:"center", justifyContent:"center" }} onClick={onCancel}>
+      <div style={{ background:"#fff", borderRadius:18, padding:"32px 28px", width:340, boxShadow:"0 20px 60px rgba(0,0,0,0.25)", textAlign:"center" }} onClick={e=>e.stopPropagation()}>
+        <div style={{ fontSize:36, marginBottom:14 }}>🗑️</div>
+        <p style={{ margin:"0 0 24px", color:"#2A2D40", fontSize:14, lineHeight:1.6 }}>{message}</p>
+        <div style={{ display:"flex", gap:10 }}>
+          <button onClick={onCancel} style={{ flex:1, padding:"12px", borderRadius:10, border:"2px solid #E8E4DF", background:"#fff", color:"#555", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600 }}>Cancel</button>
+          <button onClick={onConfirm} style={{ flex:1, padding:"12px", borderRadius:10, border:"none", background:"#E07A5F", color:"#fff", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600 }}>Delete</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── ADD SERVICE MODAL ─────────────────────────────────────────
 function AddServiceModal({ onAdd, onClose, existing }) {
   const [name, setName] = useState("");
-  const [emoji, setEmoji] = useState("🎪");
+  const [emoji, setEmoji] = useState("🏕️");
   const [color, setColor] = useState(PALETTE[existing.length % PALETTE.length]);
   const [err, setErr] = useState("");
-
   const submit = () => {
     const trimmed = name.trim();
     if (!trimmed) { setErr("Service name required."); return; }
@@ -173,33 +257,27 @@ function AddServiceModal({ onAdd, onClose, existing }) {
     onAdd({ id: trimmed.toLowerCase().replace(/\s+/g,"-") + "-" + Date.now(), name: trimmed, color, emoji });
     onClose();
   };
-
-  const emojis = ["🎪","🏊","🎭","⚽","🎸","🧗","🏄","🎡","🛶","🎠","🏋️","🎳","🤸","🎻","🧩"];
-
+  const emojis = ["🏕️","🎯","🏎️","🎟️","🍽️","🎪","🌊","🎭","🎨","🏊","🚵","🧗","🎣","🏄","🌿"];
   return (
     <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.5)", zIndex:1000, display:"flex", alignItems:"center", justifyContent:"center" }} onClick={onClose}>
       <div style={{ background:"#fff", borderRadius:20, padding:"36px 32px", width:380, boxShadow:"0 20px 60px rgba(0,0,0,0.25)" }} onClick={e=>e.stopPropagation()}>
         <h3 style={{ margin:"0 0 24px", fontFamily:"'Playfair Display',serif", fontSize:20, color:"#2A2D40" }}>Add New Service</h3>
-
         <label style={lS}>Service Name</label>
         <input placeholder="e.g. Swimming Pool" value={name} onChange={e=>{setName(e.target.value);setErr("");}} style={{...iS, marginBottom:4}} />
         {err && <p style={{ color:"#E07A5F", fontSize:12, margin:"4px 0 12px" }}>{err}</p>}
         {!err && <div style={{ marginBottom:16 }} />}
-
         <label style={lS}>Icon</label>
         <div style={{ display:"flex", flexWrap:"wrap", gap:8, marginBottom:18 }}>
           {emojis.map(e => (
             <button key={e} onClick={()=>setEmoji(e)} style={{ width:38, height:38, borderRadius:9, border:`2px solid ${emoji===e?"#3D405B":"#E8E4DF"}`, background:emoji===e?"#3D405B":"#fff", fontSize:18, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" }}>{e}</button>
           ))}
         </div>
-
         <label style={lS}>Color</label>
         <div style={{ display:"flex", flexWrap:"wrap", gap:8, marginBottom:24 }}>
           {PALETTE.map(c => (
             <button key={c} onClick={()=>setColor(c)} style={{ width:32, height:32, borderRadius:8, border:`3px solid ${color===c?"#2A2D40":"transparent"}`, background:c, cursor:"pointer" }} />
           ))}
         </div>
-
         <div style={{ display:"flex", gap:10 }}>
           <button onClick={onClose} style={{ flex:1, padding:"13px", borderRadius:11, border:"2px solid #E8E4DF", background:"#fff", color:"#555", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600 }}>Cancel</button>
           <button onClick={submit} style={{ flex:1, padding:"13px", borderRadius:11, border:"none", background:"#3D405B", color:"#fff", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600, fontSize:14 }}>
@@ -211,7 +289,7 @@ function AddServiceModal({ onAdd, onClose, existing }) {
   );
 }
 
-// ── DASHBOARD ─────────────────────────────────────────────────
+// ── DASHBOARD (OWNER) ─────────────────────────────────────────
 function Dashboard({ db, services }) {
   const { sales, expenses } = db;
   const todaySales = sales.filter(s=>s.date===todayStr()).reduce((a,b)=>a+b.amount,0);
@@ -230,10 +308,10 @@ function Dashboard({ db, services }) {
       <h1 style={{ margin:"0 0 6px", fontFamily:"'Playfair Display',serif", fontSize:28, color:"#2A2D40" }}>Overview</h1>
       <p style={{ margin:"0 0 22px", color:"#888", fontSize:13 }}>This month's performance</p>
       <div style={{ display:"flex", gap:14, marginBottom:18, flexWrap:"wrap" }}>
-        <StatCard label="Today's Sales"    value={TZS(todaySales)} color="#81B29A" icon="💰" sub={`Expenses: ${TZS(todayExp)}`} />
+        <StatCard label="Today's Sales"    value={TZS(todaySales)} color="#81B29A" icon="💵" sub={`Expenses: ${TZS(todayExp)}`} />
         <StatCard label="Monthly Revenue"  value={TZS(monthSales)} color="#E07A5F" icon="📈" />
         <StatCard label="Monthly Expenses" value={TZS(monthExp)}   color="#F2CC8F" icon="🧾" />
-        <StatCard label="Net Profit"       value={TZS(netProfit)}  color={netProfit>=0?"#81B29A":"#E07A5F"} icon="✅" />
+        <StatCard label="Net Profit"       value={TZS(netProfit)}  color={netProfit>=0?"#81B29A":"#E07A5F"} icon={netProfit>=0?"✅":"⚠️"} />
       </div>
       <div style={{ display:"flex", gap:14, marginBottom:18, flexWrap:"wrap" }}>
         <div style={{ background:"#fff", borderRadius:18, padding:22, flex:2, minWidth:280, boxShadow:"0 2px 10px rgba(0,0,0,.06)" }}>
@@ -262,23 +340,24 @@ function Dashboard({ db, services }) {
       <div style={{ background:"#fff", borderRadius:18, padding:22, boxShadow:"0 2px 10px rgba(0,0,0,.06)" }}>
         <h3 style={{ margin:"0 0 14px", fontSize:14, color:"#2A2D40" }}>Recent Transactions</h3>
         <table style={{ width:"100%", borderCollapse:"collapse" }}>
-          <thead><tr style={{ borderBottom:"2px solid #F0EDE8" }}>{["Date","Service","Amount"].map(h=><th key={h} style={{ textAlign:"left",padding:"0 0 10px",fontSize:10,color:"#aaa",fontWeight:600,textTransform:"uppercase",letterSpacing:.5 }}>{h}</th>)}</tr></thead>
-          <tbody>{recent.map(s=><tr key={s.id} style={{ borderBottom:"1px solid #F7F5F0" }}><td style={tS}>{s.date}</td><td style={tS}><ServiceBadge service={s.service} services={services} /></td><td style={{...tS,fontWeight:600}}>{TZS(s.amount)}</td></tr>)}</tbody>
+          <thead><tr style={{ borderBottom:"2px solid #F0EDE8" }}>{["Date","Service","Amount","By"].map(h=><th key={h} style={{ textAlign:"left",padding:"0 0 10px",fontSize:10,color:"#aaa",fontWeight:600,textTransform:"uppercase",letterSpacing:.5 }}>{h}</th>)}</tr></thead>
+          <tbody>{recent.map(s=><tr key={s.id} style={{ borderBottom:"1px solid #F7F5F0" }}><td style={tS}>{s.date}</td><td style={tS}><ServiceBadge service={s.service} services={services} /></td><td style={{...tS,fontWeight:600}}>{TZS(s.amount)}</td><td style={{...tS,color:"#888",fontSize:12}}>{s.createdBy||"—"}</td></tr>)}</tbody>
         </table>
       </div>
     </div>
   );
 }
 
+// ── WORKER HOME ───────────────────────────────────────────────
 function WorkerHome({ db, user, setPage }) {
-  const count = db.sales.filter(s=>s.date===todayStr()).length;
   const todaySales = db.sales.filter(s=>s.date===todayStr()).reduce((a,b)=>a+b.amount,0);
+  const todayCount = db.sales.filter(s=>s.date===todayStr()).length;
   return (
     <div>
       <h1 style={{ margin:"0 0 6px", fontFamily:"'Playfair Display',serif", fontSize:28, color:"#2A2D40" }}>Good day, {user.name} 👋</h1>
       <p style={{ margin:"0 0 26px", color:"#888" }}>What would you like to record today?</p>
       <div style={{ display:"flex", gap:14, marginBottom:26, flexWrap:"wrap" }}>
-        <StatCard label="Today's Sales" value={TZS(todaySales)} color="#81B29A" icon="💰" sub={`${count} transactions recorded`} />
+        <StatCard label="Today's Sales" value={TZS(todaySales)} color="#81B29A" icon="💵" sub={`${todayCount} transaction${todayCount!==1?"s":""}`} />
       </div>
       <div style={{ display:"flex", gap:14, flexWrap:"wrap" }}>
         <button onClick={()=>setPage("sales")} style={{ flex:1,minWidth:180,padding:"34px 26px",borderRadius:20,border:"none",background:"#81B29A",color:"#fff",cursor:"pointer",textAlign:"center",fontFamily:"'DM Sans',sans-serif",boxShadow:"0 8px 26px #81B29A55" }}>
@@ -297,21 +376,27 @@ function WorkerHome({ db, user, setPage }) {
 }
 
 // ── SALES PAGE ────────────────────────────────────────────────
-function SalesPage({ db, setDb, user, showToast, services, addService }) {
+function SalesPage({ db, visibleDb, updateDb, user, showToast, services, addService }) {
   const isOwner = user.role === ROLES.OWNER;
   const [form, setForm] = useState({ service: services[0]?.name || "", amount:"", notes:"", date:todayStr() });
   const [filter, setFilter] = useState({ service:"All", from:"", to:"" });
   const [showModal, setShowModal] = useState(false);
+  const [confirmId, setConfirmId] = useState(null);
 
-  // keep form.service valid if services changes
   const currentServiceNames = services.map(s=>s.name);
   const safeService = currentServiceNames.includes(form.service) ? form.service : (services[0]?.name || "");
 
   const submit = () => {
     if (!form.amount || Number(form.amount)<=0) { showToast("Enter a valid amount","error"); return; }
-    setDb(p=>({...p, sales:[{ id:`s-${Date.now()}`, service:safeService, amount:Number(form.amount), notes:form.notes, date:form.date, createdBy:user.username },...p.sales]}));
+    updateDb(p=>({...p, sales:[{ id:`s-${Date.now()}`, service:safeService, amount:Number(form.amount), notes:form.notes, date:form.date, createdBy:user.username, deleted:false },...p.sales]}));
     setForm(f=>({...f, amount:"", notes:""}));
     showToast("Sale recorded ✓");
+  };
+
+  const softDelete = (id) => {
+    updateDb(p=>({ ...p, sales: p.sales.map(s => s.id===id ? {...s, deleted:true} : s) }));
+    showToast("Sale deleted");
+    setConfirmId(null);
   };
 
   const handleAddService = (newSvc) => {
@@ -319,7 +404,7 @@ function SalesPage({ db, setDb, user, showToast, services, addService }) {
     setForm(f=>({...f, service:newSvc.name}));
   };
 
-  const filtered = db.sales
+  const filtered = visibleDb.sales
     .filter(s=>filter.service==="All"||s.service===filter.service)
     .filter(s=>!filter.from||s.date>=filter.from)
     .filter(s=>!filter.to||s.date<=filter.to)
@@ -329,6 +414,7 @@ function SalesPage({ db, setDb, user, showToast, services, addService }) {
   return (
     <div>
       {showModal && <AddServiceModal onAdd={handleAddService} onClose={()=>setShowModal(false)} existing={services} />}
+      {confirmId && <ConfirmModal message="Delete this sale? This cannot be undone." onConfirm={()=>softDelete(confirmId)} onCancel={()=>setConfirmId(null)} />}
       <h1 style={pT}>Sales</h1>
       <div style={{ display:"flex", gap:20, flexWrap:"wrap", alignItems:"flex-start" }}>
         <div style={fC}>
@@ -365,8 +451,18 @@ function SalesPage({ db, setDb, user, showToast, services, addService }) {
                 <div style={{ marginLeft:"auto", fontWeight:700, color:"#2A2D40", fontSize:13 }}>Total: {TZS(total)}</div>
               </div>
               <table style={{ width:"100%", borderCollapse:"collapse" }}>
-                <thead><tr style={{ borderBottom:"2px solid #F0EDE8" }}>{["Date","Service","Amount","By"].map(h=><th key={h} style={{ textAlign:"left",padding:"0 0 10px",fontSize:10,color:"#aaa",fontWeight:600,textTransform:"uppercase",letterSpacing:.5 }}>{h}</th>)}</tr></thead>
-                <tbody>{filtered.slice(0,40).map(s=><tr key={s.id} style={{ borderBottom:"1px solid #F7F5F0" }}><td style={tS}>{s.date}</td><td style={tS}><ServiceBadge service={s.service} services={services} /></td><td style={{...tS,fontWeight:600}}>{TZS(s.amount)}</td><td style={{...tS,color:"#aaa"}}>{s.createdBy}</td></tr>)}</tbody>
+                <thead><tr style={{ borderBottom:"2px solid #F0EDE8" }}>{["Date","Service","Amount","By",""].map((h,i)=><th key={i} style={{ textAlign:"left",padding:"0 0 10px",fontSize:10,color:"#aaa",fontWeight:600,textTransform:"uppercase",letterSpacing:.5 }}>{h}</th>)}</tr></thead>
+                <tbody>{filtered.slice(0,40).map(s=>(
+                  <tr key={s.id} style={{ borderBottom:"1px solid #F7F5F0" }}>
+                    <td style={tS}>{s.date}</td>
+                    <td style={tS}><ServiceBadge service={s.service} services={services} /></td>
+                    <td style={{...tS,fontWeight:600}}>{TZS(s.amount)}</td>
+                    <td style={{...tS,color:"#888",fontSize:12}}>{s.createdBy||"—"}</td>
+                    <td style={tS}>
+                      <button onClick={()=>setConfirmId(s.id)} style={{ background:"none", border:"1px solid #E07A5F44", color:"#E07A5F", borderRadius:6, padding:"3px 8px", fontSize:11, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>🗑️</button>
+                    </td>
+                  </tr>
+                ))}</tbody>
               </table>
             </div>
           </div>
@@ -377,19 +473,30 @@ function SalesPage({ db, setDb, user, showToast, services, addService }) {
 }
 
 // ── EXPENSES PAGE ─────────────────────────────────────────────
-function ExpensesPage({ db, setDb, user, showToast }) {
+function ExpensesPage({ db, visibleDb, updateDb, user, showToast }) {
   const isOwner = user.role === ROLES.OWNER;
   const [form, setForm] = useState({ category:EXPENSE_CATS[0], item:"", cost:"", date:todayStr() });
+  const [confirmId, setConfirmId] = useState(null);
+
   const submit = () => {
     if (!form.item.trim()) { showToast("Enter an item name","error"); return; }
     if (!form.cost||Number(form.cost)<=0) { showToast("Enter a valid cost","error"); return; }
-    setDb(p=>({...p, expenses:[{ id:`e-${Date.now()}`, category:form.category, item:form.item, cost:Number(form.cost), date:form.date, createdBy:user.username },...p.expenses]}));
+    updateDb(p=>({...p, expenses:[{ id:`e-${Date.now()}`, category:form.category, item:form.item, cost:Number(form.cost), date:form.date, createdBy:user.username, deleted:false },...p.expenses]}));
     setForm(f=>({...f,item:"",cost:""}));
     showToast("Expense recorded ✓");
   };
-  const sorted = [...db.expenses].sort((a,b)=>b.date.localeCompare(a.date));
+
+  const softDelete = (id) => {
+    updateDb(p=>({ ...p, expenses: p.expenses.map(e => e.id===id ? {...e, deleted:true} : e) }));
+    showToast("Expense deleted");
+    setConfirmId(null);
+  };
+
+  const sorted = [...visibleDb.expenses].sort((a,b)=>b.date.localeCompare(a.date));
+
   return (
     <div>
+      {confirmId && <ConfirmModal message="Delete this expense? This cannot be undone." onConfirm={()=>softDelete(confirmId)} onCancel={()=>setConfirmId(null)} />}
       <h1 style={pT}>Expenses</h1>
       <div style={{ display:"flex", gap:20, flexWrap:"wrap", alignItems:"flex-start" }}>
         <div style={fC}>
@@ -407,10 +514,21 @@ function ExpensesPage({ db, setDb, user, showToast }) {
         {isOwner && (
           <div style={{ flex:2, minWidth:0 }}>
             <div style={{ background:"#fff", borderRadius:18, padding:22, boxShadow:"0 2px 10px rgba(0,0,0,.06)" }}>
-              <div style={{ fontWeight:700, color:"#2A2D40", marginBottom:14, fontSize:13 }}>Total: {TZS(db.expenses.reduce((a,b)=>a+b.cost,0))}</div>
+              <div style={{ fontWeight:700, color:"#2A2D40", marginBottom:14, fontSize:13 }}>Total: {TZS(visibleDb.expenses.reduce((a,b)=>a+b.cost,0))}</div>
               <table style={{ width:"100%", borderCollapse:"collapse" }}>
-                <thead><tr style={{ borderBottom:"2px solid #F0EDE8" }}>{["Date","Category","Item","Cost"].map(h=><th key={h} style={{ textAlign:"left",padding:"0 0 10px",fontSize:10,color:"#aaa",fontWeight:600,textTransform:"uppercase",letterSpacing:.5 }}>{h}</th>)}</tr></thead>
-                <tbody>{sorted.slice(0,40).map(e=><tr key={e.id} style={{ borderBottom:"1px solid #F7F5F0" }}><td style={tS}>{e.date}</td><td style={tS}>{e.category}</td><td style={tS}>{e.item}</td><td style={{...tS,fontWeight:600,color:"#E07A5F"}}>{TZS(e.cost)}</td></tr>)}</tbody>
+                <thead><tr style={{ borderBottom:"2px solid #F0EDE8" }}>{["Date","Category","Item","Cost","By",""].map((h,i)=><th key={i} style={{ textAlign:"left",padding:"0 0 10px",fontSize:10,color:"#aaa",fontWeight:600,textTransform:"uppercase",letterSpacing:.5 }}>{h}</th>)}</tr></thead>
+                <tbody>{sorted.slice(0,40).map(e=>(
+                  <tr key={e.id} style={{ borderBottom:"1px solid #F7F5F0" }}>
+                    <td style={tS}>{e.date}</td>
+                    <td style={tS}>{e.category}</td>
+                    <td style={tS}>{e.item}</td>
+                    <td style={{...tS,fontWeight:600,color:"#E07A5F"}}>{TZS(e.cost)}</td>
+                    <td style={{...tS,color:"#888",fontSize:12}}>{e.createdBy||"—"}</td>
+                    <td style={tS}>
+                      <button onClick={()=>setConfirmId(e.id)} style={{ background:"none", border:"1px solid #E07A5F44", color:"#E07A5F", borderRadius:6, padding:"3px 8px", fontSize:11, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>🗑️</button>
+                    </td>
+                  </tr>
+                ))}</tbody>
               </table>
             </div>
           </div>
@@ -425,7 +543,7 @@ function ReportsPage({ db, services }) {
   const [range, setRange] = useState({ from:"", to:"" });
   const [service, setService] = useState("All");
   const getColor = (name) => { const s=services.find(x=>x.name===name); return s?s.color:"#aaa"; };
-  const sales = db.sales.filter(s=>service==="All"||s.service===service).filter(s=>!range.from||s.date>=range.from).filter(s=>!range.to||s.date<=range.to);
+  const sales    = db.sales.filter(s=>service==="All"||s.service===service).filter(s=>!range.from||s.date>=range.from).filter(s=>!range.to||s.date<=range.to);
   const expenses = db.expenses.filter(e=>!range.from||e.date>=range.from).filter(e=>!range.to||e.date<=range.to);
   const dateMap = {};
   sales.forEach(s=>{ dateMap[s.date]=dateMap[s.date]||{date:s.date,Sales:0,Expenses:0}; dateMap[s.date].Sales+=s.amount; });
@@ -435,7 +553,7 @@ function ReportsPage({ db, services }) {
   const totalSales = sales.reduce((a,b)=>a+b.amount,0);
   const totalExp   = expenses.reduce((a,b)=>a+b.cost,0);
   const exportCSV = () => {
-    const rows = [["Date","Service","Amount","Notes"],...sales.map(s=>[s.date,s.service,s.amount,s.notes||""])];
+    const rows = [["Date","Service","Amount","Notes","By"],...sales.map(s=>[s.date,s.service,s.amount,s.notes||"",s.createdBy||""])];
     const blob = new Blob([rows.map(r=>r.join(",")).join("\n")],{type:"text/csv"});
     const a = document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="swahili_sales.csv"; a.click();
   };
@@ -454,14 +572,14 @@ function ReportsPage({ db, services }) {
       <div style={{ display:"flex", gap:14, marginBottom:18, flexWrap:"wrap" }}>
         <StatCard label="Total Revenue"  value={TZS(totalSales)} color="#81B29A" icon="📈" />
         <StatCard label="Total Expenses" value={TZS(totalExp)}   color="#E07A5F" icon="🧾" />
-        <StatCard label="Net Profit"     value={TZS(totalSales-totalExp)} color={totalSales-totalExp>=0?"#81B29A":"#E07A5F"} icon="✅" />
+        <StatCard label="Net Profit"     value={TZS(totalSales-totalExp)} color={totalSales-totalExp>=0?"#81B29A":"#E07A5F"} icon={totalSales-totalExp>=0?"✅":"⚠️"} />
       </div>
       <div style={{ background:"#fff", borderRadius:18, padding:22, marginBottom:16, boxShadow:"0 2px 10px rgba(0,0,0,.06)" }}>
         <h3 style={{ margin:"0 0 18px", fontSize:14 }}>Revenue vs Expenses Over Time</h3>
         <ResponsiveContainer width="100%" height={220}>
           <LineChart data={trend}>
             <CartesianGrid strokeDasharray="3 3" stroke="#F0EDE8" />
-            <XAxis dataKey="date" tick={{ fontSize:10,fill:"#888" }} axisLine={false} tickLine={false} />
+            <XAxis dataKey="date" tick={{ fontSize:10,fill:"#888" }} axisLine={false} tickLine={false} tickFormatter={v=>v.slice(5)} />
             <YAxis tick={{ fontSize:10,fill:"#888" }} axisLine={false} tickLine={false} tickFormatter={v=>`${v/1000}k`} />
             <Tooltip formatter={v=>TZS(v)} contentStyle={{ borderRadius:10,border:"none",boxShadow:"0 4px 20px rgba(0,0,0,.1)",fontSize:12 }} />
             <Legend wrapperStyle={{ fontSize:12 }} />
@@ -497,6 +615,72 @@ function ReportsPage({ db, services }) {
   );
 }
 
+// ── USERS PAGE (OWNER ONLY) ───────────────────────────────────
+function UsersPage({ users, onAddUser, showToast }) {
+  const [form, setForm] = useState({ username:"", password:"", role:ROLES.WORKER, name:"" });
+  const [err, setErr] = useState("");
+
+  const submit = () => {
+    if (!form.username.trim()) { setErr("Username required."); return; }
+    if (!form.password.trim() || form.password.length < 4) { setErr("Password must be at least 4 characters."); return; }
+    if (users[form.username]) { setErr("Username already exists."); return; }
+    onAddUser({ username: form.username.trim(), password: form.password, role: form.role, name: form.name.trim() || form.username.trim() });
+    setForm({ username:"", password:"", role:ROLES.WORKER, name:"" });
+    setErr("");
+  };
+
+  const userList = Object.entries(users).map(([username, data]) => ({ username, ...data }));
+
+  return (
+    <div>
+      <h1 style={pT}>User Management</h1>
+      <div style={{ display:"flex", gap:20, flexWrap:"wrap", alignItems:"flex-start" }}>
+        <div style={fC}>
+          <h3 style={fTi}>Create New User</h3>
+          <label style={lS}>Display Name</label>
+          <input placeholder="e.g. John" value={form.name} onChange={e=>{setForm(f=>({...f,name:e.target.value}));setErr("");}} style={{...iS,marginBottom:14}} />
+          <label style={lS}>Username</label>
+          <input placeholder="e.g. john123" value={form.username} onChange={e=>{setForm(f=>({...f,username:e.target.value.toLowerCase()}));setErr("");}} style={{...iS,marginBottom:14}} />
+          <label style={lS}>Password</label>
+          <input type="password" placeholder="Min 4 characters" value={form.password} onChange={e=>{setForm(f=>({...f,password:e.target.value}));setErr("");}} style={{...iS,marginBottom:14}} />
+          <label style={lS}>Role</label>
+          <select value={form.role} onChange={e=>setForm(f=>({...f,role:e.target.value}))} style={{...iS,marginBottom:22}}>
+            <option value={ROLES.WORKER}>Worker</option>
+            <option value={ROLES.OWNER}>Owner / Admin</option>
+          </select>
+          {err && <p style={{ color:"#E07A5F", fontSize:12, margin:"-14px 0 14px" }}>{err}</p>}
+          <button onClick={submit} style={{...sB,background:"#3D405B"}}>+ Create User</button>
+        </div>
+        <div style={{ flex:2, minWidth:0 }}>
+          <div style={{ background:"#fff", borderRadius:18, padding:22, boxShadow:"0 2px 10px rgba(0,0,0,.06)" }}>
+            <h3 style={{ margin:"0 0 18px", fontSize:14, color:"#2A2D40" }}>All Users ({userList.length})</h3>
+            <table style={{ width:"100%", borderCollapse:"collapse" }}>
+              <thead><tr style={{ borderBottom:"2px solid #F0EDE8" }}>{["Name","Username","Role"].map(h=><th key={h} style={{ textAlign:"left",padding:"0 0 10px",fontSize:10,color:"#aaa",fontWeight:600,textTransform:"uppercase",letterSpacing:.5 }}>{h}</th>)}</tr></thead>
+              <tbody>{userList.map(u=>(
+                <tr key={u.username} style={{ borderBottom:"1px solid #F7F5F0" }}>
+                  <td style={tS}>
+                    <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                      <div style={{ width:32, height:32, borderRadius:"50%", background: u.role===ROLES.OWNER?"#3D405B":"#81B29A", display:"flex", alignItems:"center", justifyContent:"center", color:"#fff", fontSize:13, fontWeight:700, flexShrink:0 }}>{u.name?.[0]?.toUpperCase()||"?"}</div>
+                      <span style={{ fontWeight:500 }}>{u.name}</span>
+                    </div>
+                  </td>
+                  <td style={{...tS,color:"#888"}}>{u.username}</td>
+                  <td style={tS}>
+                    <span style={{ background: u.role===ROLES.OWNER?"#3D405B22":"#81B29A22", color: u.role===ROLES.OWNER?"#3D405B":"#81B29A", border:`1px solid ${u.role===ROLES.OWNER?"#3D405B44":"#81B29A44"}`, padding:"3px 9px", borderRadius:6, fontSize:11, fontWeight:600, textTransform:"uppercase" }}>
+                      {u.role}
+                    </span>
+                  </td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+        </div>gitgi
+      </div>
+    </div>
+  );
+}
+
+// ── SHARED STYLES ─────────────────────────────────────────────
 const iS  = { width:"100%", padding:"12px 14px", border:"2px solid #E8E4DF", borderRadius:11, fontSize:14, outline:"none", background:"#FAFAF8", fontFamily:"'DM Sans',sans-serif", color:"#2A2D40" };
 const seS = { padding:"9px 12px", border:"2px solid #E8E4DF", borderRadius:9, fontSize:12, background:"#FAFAF8", fontFamily:"'DM Sans',sans-serif", color:"#555", cursor:"pointer" };
 const lS  = { display:"block", fontSize:11, fontWeight:600, color:"#888", marginBottom:5, textTransform:"uppercase", letterSpacing:.5 };
