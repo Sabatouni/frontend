@@ -1,16 +1,10 @@
-import { createClient } from '@supabase/supabase-js';
 import { useEffect, useState } from "react";
 import {
   Bar, BarChart, CartesianGrid, Cell, Legend, Line, LineChart,
   Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis
 } from "recharts";
 import api from "./client";
-
-// ── SUPABASE CLIENT ────────────────────────────────────────────
-const supabase = createClient(
-  "[nceyjgayttsaozfqiwtj.supabase.co](https://nceyjgayttsaozfqiwtj.supabase.co)",
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5jZXlqZ2F5dHRzYW96ZnFpd3RqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0MDA1NTAsImV4cCI6MjA5Mjk3NjU1MH0.MtTlxI_fZ5hcVh-IQXT8k0Dp1QvO2J2SgHh009XQXJo"
-);
+import { supabase } from "./supabaseClient";
 
 const LOGO = "/logo.png";
 
@@ -59,12 +53,13 @@ export default function App() {
 
   // ── SUPABASE SALES FETCH ────────────────────────────────────
   const fetchSales = async () => {
+    if (!supabase) return;
     try {
       const { data, error } = await supabase
         .from("sales")
         .select("*")
         .order("date", { ascending: false });
-      
+
       if (error) {
         console.error("Supabase fetch error:", error);
         return;
@@ -185,7 +180,7 @@ export default function App() {
 
   return (
     <div style={{ display:"flex", height:"100vh", fontFamily:"'DM Sans', sans-serif", background:"#F7F5F0", overflow:"hidden" }}>
-      <link href="[fonts.googleapis.com](https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=Playfair+Display:wght@600;700&display=swap)" rel="stylesheet" />
+      <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=Playfair+Display:wght@600;700&display=swap" rel="stylesheet" />
       <Sidebar page={page} setPage={setPage} user={user} onLogout={() => { setUser(null); setPage("dashboard"); }} open={sidebarOpen} />
       <main style={{ flex:1, overflow:"auto", padding:"24px 28px" }}>
         <div style={{ display:"flex", alignItems:"center", gap:14, marginBottom:24 }}>
@@ -233,7 +228,7 @@ function Login({ users, onLogin }) {
 
   return (
     <div style={{ minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center", background:"linear-gradient(145deg, #1a1c2b 0%, #2f3347 50%, #3a2e1e 100%)", fontFamily:"'DM Sans', sans-serif" }}>
-      <link href="[fonts.googleapis.com](https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;700&family=Playfair+Display:wght@700&display=swap)" rel="stylesheet" />
+      <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;700&family=Playfair+Display:wght@700&display=swap" rel="stylesheet" />
       <div style={{ background:"#fff", borderRadius:24, padding:"44px 40px", width:400, boxShadow:"0 32px 80px rgba(0,0,0,0.4)" }}>
         <div style={{ textAlign:"center", marginBottom:32 }}>
           <img src={LOGO} alt="Swahili Tent Village" style={{ width:200, height:"auto", marginBottom:4, mixBlendMode:"multiply" }} />
@@ -332,8 +327,7 @@ function ConfirmModal({ message, onConfirm, onCancel }) {
     <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.5)", zIndex:2000, display:"flex", alignItems:"center", justifyContent:"center" }} onClick={onCancel}>
       <div style={{ background:"#fff", borderRadius:18, padding:"32px 28px", width:340, boxShadow:"0 20px 60px rgba(0,0,0,0.25)", textAlign:"center" }} onClick={e => e.stopPropagation()}>
         <div style={{ fontSize:36, marginBottom:14 }}>🗑️</div>
-        <p style={{ margin:"0 0 24px", color:"#2A2D40", fontSize:14,
-        lineHeight:1.6 }}>{message}</p>
+        <p style={{ margin:"0 0 24px", color:"#2A2D40", fontSize:14, lineHeight:1.6 }}>{message}</p>
         <div style={{ display:"flex", gap:10 }}>
           <button onClick={onCancel}  style={{ flex:1, padding:"12px", borderRadius:10, border:"2px solid #E8E4DF", background:"#fff",     color:"#555", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600 }}>Cancel</button>
           <button onClick={onConfirm} style={{ flex:1, padding:"12px", borderRadius:10, border:"none",             background:"#E07A5F", color:"#fff", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600 }}>Delete</button>
@@ -523,9 +517,13 @@ function SalesPage({ db, user, showToast, services, addService, fetchSales }) {
   const safeService = currentServiceNames.includes(form.service) ? form.service : (services[0]?.name || "");
 
   const submit = async () => {
-    if (!form.amount || Number(form.amount) <= 0) { 
-      showToast("Enter a valid amount", "error"); 
-      return; 
+    if (!form.amount || Number(form.amount) <= 0) {
+      showToast("Enter a valid amount", "error");
+      return;
+    }
+    if (!supabase) {
+      showToast("Database not configured", "error");
+      return;
     }
 
     try {
@@ -553,6 +551,10 @@ function SalesPage({ db, user, showToast, services, addService, fetchSales }) {
   };
 
   const hardDelete = async (id) => {
+    if (!supabase) {
+      showToast("Database not configured", "error");
+      return;
+    }
     try {
       const { error } = await supabase
         .from("sales")
@@ -625,8 +627,7 @@ function SalesPage({ db, user, showToast, services, addService, fetchSales }) {
                 </select>
                 <input type="date" value={filter.from} onChange={e => setFilter(f => ({ ...f, from:e.target.value }))} style={seS} />
                 <input type="date" value={filter.to}   onChange={e => setFilter(f => ({ ...f, to:e.target.value }))}   style={seS} />
-                <div style={{ marginLeft:"auto", fontWeight:700,
-color:"#2A2D40", fontSize:13 }}>Total: {TZS(total)}</div>
+                <div style={{ marginLeft:"auto", fontWeight:700, color:"#2A2D40", fontSize:13 }}>Total: {TZS(total)}</div>
               </div>
               <table style={{ width:"100%", borderCollapse:"collapse" }}>
                 <thead>
