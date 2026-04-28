@@ -1,12 +1,12 @@
-import { useState, useEffect } from "react";
+import { useEffect, useState } from "react";
 import {
   Bar, BarChart, CartesianGrid, Cell, Legend, Line, LineChart,
   Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis
 } from "recharts";
 import api from "./client";
 
-// ⚠️  Paste your existing LOGO base64 constant here — unchanged
-const LOGO = "data:image/png;base64,[YOUR EXISTING LOGO STRING]";
+// Paste your existing LOGO base64 string here — unchanged
+const LOGO = "data:image/png;base64,YOUR_EXISTING_LOGO_STRING_HERE";
 
 const DEFAULT_SERVICES = [
   { id: "restaurant", name: "Restaurant", color: "#E07A5F", emoji: "🍽️" },
@@ -22,7 +22,9 @@ const EXPENSE_CATS = [
 
 const ROLES = { WORKER: "worker", OWNER: "owner" };
 
-// ── USER SYSTEM ──────────────────────────────────────────────
+// ── USER SYSTEM ───────────────────────────────────────────────
+// Users remain in localStorage — they are managed separately from sales/expenses
+// and do not cause cross-device sync issues.
 function getStoredUsers() {
   try {
     const raw = localStorage.getItem("swahili_users");
@@ -36,34 +38,12 @@ function getStoredUsers() {
 function saveStoredUsers(users) {
   try { localStorage.setItem("swahili_users", JSON.stringify(users)); } catch {}
 }
-function getStoredDb() {
-  try {
-    const raw = localStorage.getItem("swahili_db");
-    if (raw) return JSON.parse(raw);
-  } catch {}
-  return null;
-}
-function saveStoredDb(db) {
-  try { localStorage.setItem("swahili_db", JSON.stringify(db)); } catch {}
-}
 
-// seedData kept for reference but no longer called on startup
-function seedData(services) {
-  const sales = [], expenses = [];
-  const now = new Date();
-  for (let d = 29; d >= 0; d--) {
-    const date = new Date(now); date.setDate(now.getDate() - d);
-    const ds = date.toISOString().split("T")[0];
-    services.forEach((s) => {
-      const count = Math.floor(Math.random() * 3) + 1;
-      for (let i = 0; i < count; i++) {
-        sales.push({ id: `s-${ds}-${s.id}-${i}`, service: s.name, amount: (Math.floor(Math.random() * 20) + 1) * 5000, notes: "", date: ds, createdBy: "admin", deleted: false });
-      }
-    });
-    if (d % 3 === 0) expenses.push({ id: `e-${ds}`, category: EXPENSE_CATS[Math.floor(Math.random() * 5)], item: "Supplies", cost: (Math.floor(Math.random() * 10) + 1) * 10000, date: ds, createdBy: "admin", deleted: false });
-  }
-  return { sales, expenses };
-}
+// ── CHANGE 1 ──────────────────────────────────────────────────
+// getStoredDb and saveStoredDb are REMOVED entirely.
+// localStorage must never be used for sales/expenses.
+// Backend (MySQL via Railway) is the only source of truth.
+// ─────────────────────────────────────────────────────────────
 
 const TZS      = (n) => `TZS ${Number(n).toLocaleString()}`;
 const todayStr = ()  => new Date().toISOString().split("T")[0];
@@ -78,31 +58,28 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [toast,       setToast]       = useState(null);
 
-  // ── 1. INITIAL STATE — backend is source of truth, localStorage is cache only
-  const [db, setDb] = useState(() => {
-    const stored = getStoredDb();
-    // Use cache if available so UI loads instantly; polling will refresh it
-    return stored || { sales: [], expenses: [] };
-  });
+  // ── CHANGE 2 ────────────────────────────────────────────────
+  // db starts EMPTY. localStorage is never used as initial data.
+  // The polling useEffect below immediately fills it from the backend.
+  // ────────────────────────────────────────────────────────────
+  const [db, setDb] = useState({ sales: [], expenses: [] });
 
-  // ── 2. REAL-TIME SYNC — polls backend every 5 s ───────────
+  // ── CHANGE 3 ────────────────────────────────────────────────
+  // Polling: backend ALWAYS overwrites local state.
+  // No merging with stale local cache. No saveStoredDb call.
+  // ────────────────────────────────────────────────────────────
   useEffect(() => {
     const fetchAll = () => {
       Promise.all([
         api.get("/api/sales"),
         api.get("/api/expenses"),
-        api.get("/api/users").catch(() => ({ data: null })), // optional endpoint
+        api.get("/api/users").catch(() => ({ data: null })),
       ])
         .then(([salesRes, expensesRes, usersRes]) => {
-          setDb(prev => {
-            const next = {
-              ...prev,
-              // Backend rows never carry deleted:true, so normalise to false
-              sales:    (salesRes.data    || []).map(s => ({ ...s, deleted: false })),
-              expenses: (expensesRes.data || []).map(e => ({ ...e, deleted: false })),
-            };
-            saveStoredDb(next); // keep localStorage as offline cache
-            return next;
+          // Backend is authoritative — overwrite state completely, no merging
+          setDb({
+            sales:    (salesRes.data    || []).map(s => ({ ...s, deleted: false })),
+            expenses: (expensesRes.data || []).map(e => ({ ...e, deleted: false })),
           });
 
           // Supplement local user store from backend if the endpoint exists
@@ -125,12 +102,16 @@ export default function App() {
         .catch(err => console.error("Sync load error:", err));
     };
 
-    fetchAll();                              // immediate on mount
+    fetchAll();                             // immediate on mount
     const interval = setInterval(fetchAll, 5000);
     return () => clearInterval(interval);
   }, []);
 
-  // ── 3. updateDb — detects adds/deletes and calls backend ──
+  // ── CHANGE 4 ────────────────────────────────────────────────
+  // updateDb: no saveStoredDb call. localStorage is never written.
+  // Optimistic update sets React state immediately.
+  // Backend calls (POST/DELETE) happen in parallel — polling reconciles.
+  // ────────────────────────────────────────────────────────────
   const updateDb = (updater) => {
     setDb(prev => {
       const updated = typeof updater === "function" ? updater(prev) : updater;
@@ -140,7 +121,7 @@ export default function App() {
       const prevExpenses = prev.expenses || [];
       const newExpenses  = updated.expenses || [];
 
-      // ── Sales: POST new rows ──────────────────────────────
+      // Sales: POST new rows to backend
       const addedSales = newSales.filter(
         s => !prevSales.some(p => p.id === s.id)
       );
@@ -149,7 +130,7 @@ export default function App() {
           .catch(err => console.error("Sale POST error:", err));
       });
 
-      // ── Sales: DELETE newly soft-deleted rows ─────────────
+      // Sales: DELETE newly soft-deleted rows from backend
       const deletedSales = newSales.filter(
         s => s.deleted && !prevSales.find(p => p.id === s.id)?.deleted
       );
@@ -158,7 +139,7 @@ export default function App() {
           .catch(err => console.error("Sale DELETE error:", err));
       });
 
-      // ── Expenses: POST new rows ───────────────────────────
+      // Expenses: POST new rows to backend
       const addedExpenses = newExpenses.filter(
         e => !prevExpenses.some(p => p.id === e.id)
       );
@@ -167,7 +148,7 @@ export default function App() {
           .catch(err => console.error("Expense POST error:", err));
       });
 
-      // ── Expenses: DELETE newly soft-deleted rows ──────────
+      // Expenses: DELETE newly soft-deleted rows from backend
       const deletedExpenses = newExpenses.filter(
         e => e.deleted && !prevExpenses.find(p => p.id === e.id)?.deleted
       );
@@ -176,7 +157,7 @@ export default function App() {
           .catch(err => console.error("Expense DELETE error:", err));
       });
 
-      saveStoredDb(updated); // keep cache in sync
+      // Return updated state — no localStorage write
       return updated;
     });
   };
@@ -201,8 +182,7 @@ export default function App() {
       },
     };
     setUsers(updated);
-    saveStoredUsers(updated);
-    // Fire-and-forget backend sync (endpoint may not exist — that's fine)
+    saveStoredUsers(updated); // users stay in localStorage — that is fine
     api.post("/api/users", {
       username: newUser.username,
       password: newUser.password,
@@ -246,17 +226,14 @@ export default function App() {
 }
 
 // ── LOGIN ─────────────────────────────────────────────────────
-// ── 4. LOGIN — tries backend JWT, falls back to local auth ───
 function Login({ users, onLogin }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error,    setError]    = useState("");
 
-  // Async so we can await the backend login for JWT token
   const handle = async () => {
     const u = users[username];
     if (u && u.password === password) {
-      // Try to get JWT from backend; if Railway is down, local auth still works
       try {
         const res   = await api.post("/api/auth/login", { username, password });
         const token = res.data?.token || res.data?.accessToken || res.data?.jwt;
@@ -278,26 +255,10 @@ function Login({ users, onLogin }) {
           <img src={LOGO} alt="Swahili Tent Village" style={{ width:200, height:"auto", marginBottom:4, mixBlendMode:"multiply" }} />
           <p style={{ margin:"4px 0 0", color:"#888", fontSize:13, letterSpacing:1 }}>POINT OF SALE</p>
         </div>
-        <input
-          placeholder="Username"
-          value={username}
-          onChange={e => setUsername(e.target.value)}
-          onKeyDown={e => e.key === "Enter" && handle()}
-          style={iS}
-        />
-        <input
-          type="password"
-          placeholder="Password"
-          value={password}
-          onChange={e => setPassword(e.target.value)}
-          onKeyDown={e => e.key === "Enter" && handle()}
-          style={{ ...iS, marginTop:10 }}
-        />
+        <input placeholder="Username" value={username} onChange={e => setUsername(e.target.value)} onKeyDown={e => e.key === "Enter" && handle()} style={iS} />
+        <input type="password" placeholder="Password" value={password} onChange={e => setPassword(e.target.value)} onKeyDown={e => e.key === "Enter" && handle()} style={{ ...iS, marginTop:10 }} />
         {error && <p style={{ color:"#E07A5F", fontSize:13, marginTop:6 }}>{error}</p>}
-        <button
-          onClick={handle}
-          style={{ width:"100%", marginTop:20, padding:"15px", background:"#3D405B", color:"#fff", border:"none", borderRadius:12, fontSize:15, fontWeight:600, cursor:"pointer", fontFamily:"'DM Sans', sans-serif" }}
-        >
+        <button onClick={handle} style={{ width:"100%", marginTop:20, padding:"15px", background:"#3D405B", color:"#fff", border:"none", borderRadius:12, fontSize:15, fontWeight:600, cursor:"pointer", fontFamily:"'DM Sans', sans-serif" }}>
           Sign In
         </button>
       </div>
@@ -330,11 +291,7 @@ function Sidebar({ page, setPage, user, onLogout, open }) {
       </div>
       <nav style={{ flex:1, padding:"8px 10px" }}>
         {nav.map(item => (
-          <button
-            key={item.id}
-            onClick={() => setPage(item.id)}
-            style={{ display:"flex", alignItems:"center", gap:10, width:"100%", padding:open?"11px 14px":"11px 7px", marginBottom:3, borderRadius:10, border:"none", cursor:"pointer", background:page===item.id?"#3D405B":"transparent", color:page===item.id?"#fff":"#9B9EC0", fontSize:13, fontWeight:page===item.id?600:400, fontFamily:"'DM Sans',sans-serif", transition:"background .15s" }}
-          >
+          <button key={item.id} onClick={() => setPage(item.id)} style={{ display:"flex", alignItems:"center", gap:10, width:"100%", padding:open?"11px 14px":"11px 7px", marginBottom:3, borderRadius:10, border:"none", cursor:"pointer", background:page===item.id?"#3D405B":"transparent", color:page===item.id?"#fff":"#9B9EC0", fontSize:13, fontWeight:page===item.id?600:400, fontFamily:"'DM Sans',sans-serif", transition:"background .15s" }}>
             <span style={{ fontSize:17, flexShrink:0 }}>{item.icon}</span>
             {open && item.label}
           </button>
@@ -352,10 +309,7 @@ function Sidebar({ page, setPage, user, onLogout, open }) {
             </div>
           </div>
         )}
-        <button
-          onClick={onLogout}
-          style={{ width:"100%", padding:"9px 14px", borderRadius:9, border:"none", background:"#E07A5F22", color:"#E07A5F", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600, fontSize:12, display:"flex", alignItems:"center", gap:8, justifyContent:open?"flex-start":"center" }}
-        >
+        <button onClick={onLogout} style={{ width:"100%", padding:"9px 14px", borderRadius:9, border:"none", background:"#E07A5F22", color:"#E07A5F", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600, fontSize:12, display:"flex", alignItems:"center", gap:8, justifyContent:open?"flex-start":"center" }}>
           <span>🚪</span>{open && "Sign Out"}
         </button>
       </div>
@@ -396,8 +350,8 @@ function ConfirmModal({ message, onConfirm, onCancel }) {
         <div style={{ fontSize:36, marginBottom:14 }}>🗑️</div>
         <p style={{ margin:"0 0 24px", color:"#2A2D40", fontSize:14, lineHeight:1.6 }}>{message}</p>
         <div style={{ display:"flex", gap:10 }}>
-          <button onClick={onCancel}  style={{ flex:1, padding:"12px", borderRadius:10, border:"2px solid #E8E4DF", background:"#fff",     color:"#555",  cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600 }}>Cancel</button>
-          <button onClick={onConfirm} style={{ flex:1, padding:"12px", borderRadius:10, border:"none",             background:"#E07A5F", color:"#fff",  cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600 }}>Delete</button>
+          <button onClick={onCancel}  style={{ flex:1, padding:"12px", borderRadius:10, border:"2px solid #E8E4DF", background:"#fff",     color:"#555", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600 }}>Cancel</button>
+          <button onClick={onConfirm} style={{ flex:1, padding:"12px", borderRadius:10, border:"none",             background:"#E07A5F", color:"#fff", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600 }}>Delete</button>
         </div>
       </div>
     </div>
@@ -442,8 +396,8 @@ function AddServiceModal({ onAdd, onClose, existing }) {
           ))}
         </div>
         <div style={{ display:"flex", gap:10 }}>
-          <button onClick={onClose}  style={{ flex:1, padding:"13px", borderRadius:11, border:"2px solid #E8E4DF", background:"#fff",    color:"#555", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600 }}>Cancel</button>
-          <button onClick={submit}   style={{ flex:1, padding:"13px", borderRadius:11, border:"none",             background:"#3D405B", color:"#fff", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600, fontSize:14 }}>{emoji} Add Service</button>
+          <button onClick={onClose} style={{ flex:1, padding:"13px", borderRadius:11, border:"2px solid #E8E4DF", background:"#fff",    color:"#555", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600 }}>Cancel</button>
+          <button onClick={submit}  style={{ flex:1, padding:"13px", borderRadius:11, border:"none",             background:"#3D405B", color:"#fff", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600, fontSize:14 }}>{emoji} Add Service</button>
         </div>
       </div>
     </div>
@@ -453,12 +407,12 @@ function AddServiceModal({ onAdd, onClose, existing }) {
 // ── DASHBOARD (OWNER) ──────────────────────────────────────────
 function Dashboard({ db, services }) {
   const { sales, expenses } = db;
-  const todaySales  = sales.filter(s => s.date === todayStr()).reduce((a,b) => a+b.amount, 0);
-  const todayExp    = expenses.filter(e => e.date === todayStr()).reduce((a,b) => a+b.cost, 0);
-  const thisMonth   = new Date().toISOString().slice(0,7);
-  const monthSales  = sales.filter(s => s.date.startsWith(thisMonth)).reduce((a,b) => a+b.amount, 0);
-  const monthExp    = expenses.filter(e => e.date.startsWith(thisMonth)).reduce((a,b) => a+b.cost, 0);
-  const netProfit   = monthSales - monthExp;
+  const todaySales = sales.filter(s => s.date === todayStr()).reduce((a,b) => a+b.amount, 0);
+  const todayExp   = expenses.filter(e => e.date === todayStr()).reduce((a,b) => a+b.cost, 0);
+  const thisMonth  = new Date().toISOString().slice(0,7);
+  const monthSales = sales.filter(s => s.date.startsWith(thisMonth)).reduce((a,b) => a+b.amount, 0);
+  const monthExp   = expenses.filter(e => e.date.startsWith(thisMonth)).reduce((a,b) => a+b.cost, 0);
+  const netProfit  = monthSales - monthExp;
 
   const trend = [];
   for (let i = 6; i >= 0; i--) {
@@ -627,11 +581,7 @@ function SalesPage({ db, visibleDb, updateDb, user, showToast, services, addServ
           <label style={lS}>Service</label>
           <div style={{ display:"flex", flexWrap:"wrap", gap:7, marginBottom:6 }}>
             {services.map(s => (
-              <button
-                key={s.id}
-                onClick={() => setForm(f => ({ ...f, service:s.name }))}
-                style={{ padding:"9px 14px", borderRadius:9, border:"2px solid", borderColor:safeService===s.name?s.color:"#E8E4DF", background:safeService===s.name?s.color:"#fff", color:safeService===s.name?"#fff":"#555", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:5 }}
-              >
+              <button key={s.id} onClick={() => setForm(f => ({ ...f, service:s.name }))} style={{ padding:"9px 14px", borderRadius:9, border:"2px solid", borderColor:safeService===s.name?s.color:"#E8E4DF", background:safeService===s.name?s.color:"#fff", color:safeService===s.name?"#fff":"#555", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:5 }}>
                 <span>{s.emoji}</span>{s.name}
               </button>
             ))}
@@ -699,7 +649,7 @@ function ExpensesPage({ db, visibleDb, updateDb, user, showToast }) {
   const [confirmId, setConfirmId] = useState(null);
 
   const submit = () => {
-    if (!form.item.trim())              { showToast("Enter an item name","error"); return; }
+    if (!form.item.trim())                  { showToast("Enter an item name","error"); return; }
     if (!form.cost || Number(form.cost)<=0) { showToast("Enter a valid cost","error"); return; }
     updateDb(p => ({
       ...p,
@@ -792,7 +742,7 @@ function ReportsPage({ db, services }) {
 
   const trend = Object.values(dateMap).sort((a,b) => a.date.localeCompare(b.date)).slice(-30);
 
-  const byService  = services
+  const byService = services
     .map(s => ({ name:s.name, value: db.sales.filter(x => x.service===s.name && (!range.from||x.date>=range.from) && (!range.to||x.date<=range.to)).reduce((a,b) => a+b.amount, 0) }))
     .filter(x => x.value > 0);
 
@@ -827,8 +777,8 @@ function ReportsPage({ db, services }) {
         <button onClick={() => setRange({ from:"", to:"" })} style={{ ...seS, background:"#F0EDE8", cursor:"pointer", border:"none" }}>Reset</button>
       </div>
       <div style={{ display:"flex", gap:14, marginBottom:18, flexWrap:"wrap" }}>
-        <StatCard label="Total Revenue"  value={TZS(totalSales)}           color="#81B29A" icon="📈" />
-        <StatCard label="Total Expenses" value={TZS(totalExp)}             color="#E07A5F" icon="🧾" />
+        <StatCard label="Total Revenue"  value={TZS(totalSales)}            color="#81B29A" icon="📈" />
+        <StatCard label="Total Expenses" value={TZS(totalExp)}              color="#E07A5F" icon="🧾" />
         <StatCard label="Net Profit"     value={TZS(totalSales - totalExp)} color={totalSales-totalExp>=0?"#81B29A":"#E07A5F"} icon={totalSales-totalExp>=0?"✅":"⚠️"} />
       </div>
       <div style={{ background:"#fff", borderRadius:18, padding:22, marginBottom:16, boxShadow:"0 2px 10px rgba(0,0,0,.06)" }}>
@@ -885,15 +835,14 @@ function ReportsPage({ db, services }) {
 }
 
 // ── USERS PAGE (OWNER ONLY) ────────────────────────────────────
-// ── 5. Fixed: removed stray "gitgi" text ──────────────────────
 function UsersPage({ users, onAddUser, showToast }) {
   const [form, setForm] = useState({ username:"", password:"", role:ROLES.WORKER, name:"" });
   const [err,  setErr]  = useState("");
 
   const submit = () => {
-    if (!form.username.trim())                       { setErr("Username required."); return; }
+    if (!form.username.trim())                            { setErr("Username required."); return; }
     if (!form.password.trim() || form.password.length < 4) { setErr("Password must be at least 4 characters."); return; }
-    if (users[form.username])                        { setErr("Username already exists."); return; }
+    if (users[form.username])                             { setErr("Username already exists."); return; }
     onAddUser({ username:form.username.trim(), password:form.password, role:form.role, name:form.name.trim() || form.username.trim() });
     setForm({ username:"", password:"", role:ROLES.WORKER, name:"" });
     setErr("");
