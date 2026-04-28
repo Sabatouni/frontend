@@ -6,7 +6,7 @@ import {
 import api from "./client";
 
 // Paste your existing LOGO base64 string here — unchanged
-const LOGO = "/logo.png";
+const LOGO = "/local.png";
 
 const DEFAULT_SERVICES = [
   { id: "restaurant", name: "Restaurant", color: "#E07A5F", emoji: "🍽️" },
