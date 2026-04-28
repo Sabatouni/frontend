@@ -3,9 +3,15 @@ import {
   Bar, BarChart, CartesianGrid, Cell, Legend, Line, LineChart,
   Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis
 } from "recharts";
+import { createClient } from '@supabase/supabase-js';
 import api from "./client";
 
-// Paste your existing LOGO base64 string here — unchanged
+// ── SUPABASE CLIENT ────────────────────────────────────────────
+const supabase = createClient(
+  "[nceyjgayttsaozfqiwtj.supabase.co](https://nceyjgayttsaozfqiwtj.supabase.co)",
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5jZXlqZ2F5dHRzYW96ZnFpd3RqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0MDA1NTAsImV4cCI6MjA5Mjk3NjU1MH0.MtTlxI_fZ5hcVh-IQXT8k0Dp1QvO2J2SgHh009XQXJo"
+);
+
 const LOGO = "/logo.png";
 
 const DEFAULT_SERVICES = [
@@ -22,9 +28,6 @@ const EXPENSE_CATS = [
 
 const ROLES = { WORKER: "worker", OWNER: "owner" };
 
-// ── USER SYSTEM ───────────────────────────────────────────────
-// Users remain in localStorage — they are managed separately from sales/expenses
-// and do not cause cross-device sync issues.
 function getStoredUsers() {
   try {
     const raw = localStorage.getItem("swahili_users");
@@ -35,15 +38,10 @@ function getStoredUsers() {
     worker: { password: "worker123", role: ROLES.WORKER, name: "Worker" },
   };
 }
+
 function saveStoredUsers(users) {
   try { localStorage.setItem("swahili_users", JSON.stringify(users)); } catch {}
 }
-
-// ── CHANGE 1 ──────────────────────────────────────────────────
-// getStoredDb and saveStoredDb are REMOVED entirely.
-// localStorage must never be used for sales/expenses.
-// Backend (MySQL via Railway) is the only source of truth.
-// ─────────────────────────────────────────────────────────────
 
 const TZS      = (n) => `TZS ${Number(n).toLocaleString()}`;
 const todayStr = ()  => new Date().toISOString().split("T")[0];
@@ -57,32 +55,45 @@ export default function App() {
   const [page,        setPage]        = useState("dashboard");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [toast,       setToast]       = useState(null);
-
-  // ── CHANGE 2 ────────────────────────────────────────────────
-  // db starts EMPTY. localStorage is never used as initial data.
-  // The polling useEffect below immediately fills it from the backend.
-  // ────────────────────────────────────────────────────────────
   const [db, setDb] = useState({ sales: [], expenses: [] });
 
-  // ── CHANGE 3 ────────────────────────────────────────────────
-  // Polling: backend ALWAYS overwrites local state.
-  // No merging with stale local cache. No saveStoredDb call.
-  // ────────────────────────────────────────────────────────────
+  // ── SUPABASE SALES FETCH ────────────────────────────────────
+  const fetchSales = async () => {
+    try {
+      const { data, error } = await supabase
+        .from("sales")
+        .select("*")
+        .order("date", { ascending: false });
+      
+      if (error) {
+        console.error("Supabase fetch error:", error);
+        return;
+      }
+
+      const salesWithDateStrings = (data || []).map(sale => ({
+        ...sale,
+        date: new Date(sale.date).toISOString().split("T")[0]
+      }));
+
+      setDb(prev => ({ ...prev, sales: salesWithDateStrings }));
+    } catch (err) {
+      console.error("Sales fetch error:", err);
+    }
+  };
+
+  // ── API POLLING (EXPENSES & USERS ONLY) ─────────────────────
   useEffect(() => {
-    const fetchAll = () => {
+    const fetchExpensesAndUsers = () => {
       Promise.all([
-        api.get("/api/sales"),
         api.get("/api/expenses"),
         api.get("/api/users").catch(() => ({ data: null })),
       ])
-        .then(([salesRes, expensesRes, usersRes]) => {
-          // Backend is authoritative — overwrite state completely, no merging
-          setDb({
-            sales:    (salesRes.data    || []).map(s => ({ ...s, deleted: false })),
+        .then(([expensesRes, usersRes]) => {
+          setDb(prev => ({
+            ...prev,
             expenses: (expensesRes.data || []).map(e => ({ ...e, deleted: false })),
-          });
+          }));
 
-          // Supplement local user store from backend if the endpoint exists
           if (usersRes?.data && Array.isArray(usersRes.data)) {
             const backendUsers = {};
             usersRes.data.forEach(u => {
@@ -99,47 +110,22 @@ export default function App() {
             }
           }
         })
-        .catch(err => console.error("Sync load error:", err));
+        .catch(err => console.error("API sync error:", err));
     };
 
-    fetchAll();                             // immediate on mount
-    const interval = setInterval(fetchAll, 5000);
+    fetchSales();
+    fetchExpensesAndUsers();
+    const interval = setInterval(fetchExpensesAndUsers, 5000);
     return () => clearInterval(interval);
   }, []);
 
-  // ── CHANGE 4 ────────────────────────────────────────────────
-  // updateDb: no saveStoredDb call. localStorage is never written.
-  // Optimistic update sets React state immediately.
-  // Backend calls (POST/DELETE) happen in parallel — polling reconciles.
-  // ────────────────────────────────────────────────────────────
+  // ── UPDATE DB (EXPENSES ONLY) ───────────────────────────────
   const updateDb = (updater) => {
     setDb(prev => {
       const updated = typeof updater === "function" ? updater(prev) : updater;
-
-      const prevSales    = prev.sales    || [];
-      const newSales     = updated.sales || [];
       const prevExpenses = prev.expenses || [];
       const newExpenses  = updated.expenses || [];
 
-      // Sales: POST new rows to backend
-      const addedSales = newSales.filter(
-        s => !prevSales.some(p => p.id === s.id)
-      );
-      addedSales.forEach(sale => {
-        api.post("/api/sales", sale)
-          .catch(err => console.error("Sale POST error:", err));
-      });
-
-      // Sales: DELETE newly soft-deleted rows from backend
-      const deletedSales = newSales.filter(
-        s => s.deleted && !prevSales.find(p => p.id === s.id)?.deleted
-      );
-      deletedSales.forEach(sale => {
-        api.delete(`/api/sales/${sale.id}`)
-          .catch(err => console.error("Sale DELETE error:", err));
-      });
-
-      // Expenses: POST new rows to backend
       const addedExpenses = newExpenses.filter(
         e => !prevExpenses.some(p => p.id === e.id)
       );
@@ -148,7 +134,6 @@ export default function App() {
           .catch(err => console.error("Expense POST error:", err));
       });
 
-      // Expenses: DELETE newly soft-deleted rows from backend
       const deletedExpenses = newExpenses.filter(
         e => e.deleted && !prevExpenses.find(p => p.id === e.id)?.deleted
       );
@@ -157,7 +142,6 @@ export default function App() {
           .catch(err => console.error("Expense DELETE error:", err));
       });
 
-      // Return updated state — no localStorage write
       return updated;
     });
   };
@@ -182,7 +166,7 @@ export default function App() {
       },
     };
     setUsers(updated);
-    saveStoredUsers(updated); // users stay in localStorage — that is fine
+    saveStoredUsers(updated);
     api.post("/api/users", {
       username: newUser.username,
       password: newUser.password,
@@ -195,13 +179,13 @@ export default function App() {
   if (!user) return <Login users={users} onLogin={setUser} />;
 
   const visibleDb = {
-    sales:    db.sales.filter(s => !s.deleted),
+    sales:    db.sales,
     expenses: db.expenses.filter(e => !e.deleted),
   };
 
   return (
     <div style={{ display:"flex", height:"100vh", fontFamily:"'DM Sans', sans-serif", background:"#F7F5F0", overflow:"hidden" }}>
-      <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=Playfair+Display:wght@600;700&display=swap" rel="stylesheet" />
+      <link href="[fonts.googleapis.com](https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=Playfair+Display:wght@600;700&display=swap)" rel="stylesheet" />
       <Sidebar page={page} setPage={setPage} user={user} onLogout={() => { setUser(null); setPage("dashboard"); }} open={sidebarOpen} />
       <main style={{ flex:1, overflow:"auto", padding:"24px 28px" }}>
         <div style={{ display:"flex", alignItems:"center", gap:14, marginBottom:24 }}>
@@ -210,7 +194,7 @@ export default function App() {
         </div>
         {page === "dashboard" && user.role === ROLES.OWNER  && <Dashboard db={visibleDb} services={services} />}
         {page === "dashboard" && user.role === ROLES.WORKER && <WorkerHome db={visibleDb} user={user} setPage={setPage} />}
-        {page === "sales"     && <SalesPage    db={db} visibleDb={visibleDb} updateDb={updateDb} user={user} showToast={showToast} services={services} addService={addService} />}
+        {page === "sales"     && <SalesPage db={visibleDb} user={user} showToast={showToast} services={services} addService={addService} fetchSales={fetchSales} />}
         {page === "expenses"  && <ExpensesPage db={db} visibleDb={visibleDb} updateDb={updateDb} user={user} showToast={showToast} />}
         {page === "reports"   && user.role === ROLES.OWNER && <ReportsPage db={visibleDb} services={services} />}
         {page === "users"     && user.role === ROLES.OWNER && <UsersPage users={users} onAddUser={addUser} showToast={showToast} />}
@@ -249,7 +233,7 @@ function Login({ users, onLogin }) {
 
   return (
     <div style={{ minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center", background:"linear-gradient(145deg, #1a1c2b 0%, #2f3347 50%, #3a2e1e 100%)", fontFamily:"'DM Sans', sans-serif" }}>
-      <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;700&family=Playfair+Display:wght@700&display=swap" rel="stylesheet" />
+      <link href="[fonts.googleapis.com](https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;700&family=Playfair+Display:wght@700&display=swap)" rel="stylesheet" />
       <div style={{ background:"#fff", borderRadius:24, padding:"44px 40px", width:400, boxShadow:"0 32px 80px rgba(0,0,0,0.4)" }}>
         <div style={{ textAlign:"center", marginBottom:32 }}>
           <img src={LOGO} alt="Swahili Tent Village" style={{ width:200, height:"auto", marginBottom:4, mixBlendMode:"multiply" }} />
@@ -348,7 +332,8 @@ function ConfirmModal({ message, onConfirm, onCancel }) {
     <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.5)", zIndex:2000, display:"flex", alignItems:"center", justifyContent:"center" }} onClick={onCancel}>
       <div style={{ background:"#fff", borderRadius:18, padding:"32px 28px", width:340, boxShadow:"0 20px 60px rgba(0,0,0,0.25)", textAlign:"center" }} onClick={e => e.stopPropagation()}>
         <div style={{ fontSize:36, marginBottom:14 }}>🗑️</div>
-        <p style={{ margin:"0 0 24px", color:"#2A2D40", fontSize:14, lineHeight:1.6 }}>{message}</p>
+        <p style={{ margin:"0 0 24px", color:"#2A2D40", fontSize:14,
+        lineHeight:1.6 }}>{message}</p>
         <div style={{ display:"flex", gap:10 }}>
           <button onClick={onCancel}  style={{ flex:1, padding:"12px", borderRadius:10, border:"2px solid #E8E4DF", background:"#fff",     color:"#555", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600 }}>Cancel</button>
           <button onClick={onConfirm} style={{ flex:1, padding:"12px", borderRadius:10, border:"none",             background:"#E07A5F", color:"#fff", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600 }}>Delete</button>
@@ -479,7 +464,7 @@ function Dashboard({ db, services }) {
         <table style={{ width:"100%", borderCollapse:"collapse" }}>
           <thead>
             <tr style={{ borderBottom:"2px solid #F0EDE8" }}>
-              {["Date","Service","Amount","By"].map(h => (
+              {["Date","Service","Amount"].map(h => (
                 <th key={h} style={{ textAlign:"left", padding:"0 0 10px", fontSize:10, color:"#aaa", fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
               ))}
             </tr>
@@ -490,7 +475,6 @@ function Dashboard({ db, services }) {
                 <td style={tS}>{s.date}</td>
                 <td style={tS}><ServiceBadge service={s.service} services={services} /></td>
                 <td style={{ ...tS, fontWeight:600 }}>{TZS(s.amount)}</td>
-                <td style={{ ...tS, color:"#888", fontSize:12 }}>{s.createdBy || "—"}</td>
               </tr>
             ))}
           </tbody>
@@ -527,10 +511,10 @@ function WorkerHome({ db, user, setPage }) {
   );
 }
 
-// ── SALES PAGE ─────────────────────────────────────────────────
-function SalesPage({ db, visibleDb, updateDb, user, showToast, services, addService }) {
+// ── SALES PAGE (SUPABASE) ──────────────────────────────────────
+function SalesPage({ db, user, showToast, services, addService, fetchSales }) {
   const isOwner = user.role === ROLES.OWNER;
-  const [form,      setForm]      = useState({ service: services[0]?.name || "", amount:"", notes:"", date:todayStr() });
+  const [form,      setForm]      = useState({ service: services[0]?.name || "", amount:"", date:todayStr() });
   const [filter,    setFilter]    = useState({ service:"All", from:"", to:"" });
   const [showModal, setShowModal] = useState(false);
   const [confirmId, setConfirmId] = useState(null);
@@ -538,23 +522,56 @@ function SalesPage({ db, visibleDb, updateDb, user, showToast, services, addServ
   const currentServiceNames = services.map(s => s.name);
   const safeService = currentServiceNames.includes(form.service) ? form.service : (services[0]?.name || "");
 
-  const submit = () => {
-    if (!form.amount || Number(form.amount) <= 0) { showToast("Enter a valid amount", "error"); return; }
-    updateDb(p => ({
-      ...p,
-      sales: [
-        { id:`s-${Date.now()}`, service:safeService, amount:Number(form.amount), notes:form.notes, date:form.date, createdBy:user.username, deleted:false },
-        ...p.sales,
-      ],
-    }));
-    setForm(f => ({ ...f, amount:"", notes:"" }));
-    showToast("Sale recorded ✓");
+  const submit = async () => {
+    if (!form.amount || Number(form.amount) <= 0) { 
+      showToast("Enter a valid amount", "error"); 
+      return; 
+    }
+
+    try {
+      const { error } = await supabase
+        .from("sales")
+        .insert([{
+          service: safeService,
+          amount: Number(form.amount),
+          date: new Date(form.date).toISOString()
+        }]);
+
+      if (error) {
+        console.error("Supabase insert error:", error);
+        showToast("Failed to save sale", "error");
+        return;
+      }
+
+      await fetchSales();
+      setForm(f => ({ ...f, amount:"" }));
+      showToast("Sale recorded ✓");
+    } catch (err) {
+      console.error("Sale insert error:", err);
+      showToast("Failed to save sale", "error");
+    }
   };
 
-  const softDelete = (id) => {
-    updateDb(p => ({ ...p, sales: p.sales.map(s => s.id===id ? { ...s, deleted:true } : s) }));
-    showToast("Sale deleted");
-    setConfirmId(null);
+  const hardDelete = async (id) => {
+    try {
+      const { error } = await supabase
+        .from("sales")
+        .delete()
+        .eq("id", id);
+
+      if (error) {
+        console.error("Supabase delete error:", error);
+        showToast("Failed to delete sale", "error");
+        return;
+      }
+
+      await fetchSales();
+      showToast("Sale deleted");
+      setConfirmId(null);
+    } catch (err) {
+      console.error("Sale delete error:", err);
+      showToast("Failed to delete sale", "error");
+    }
   };
 
   const handleAddService = (newSvc) => {
@@ -562,7 +579,7 @@ function SalesPage({ db, visibleDb, updateDb, user, showToast, services, addServ
     setForm(f => ({ ...f, service:newSvc.name }));
   };
 
-  const filtered = visibleDb.sales
+  const filtered = db.sales
     .filter(s => filter.service==="All" || s.service===filter.service)
     .filter(s => !filter.from || s.date >= filter.from)
     .filter(s => !filter.to   || s.date <= filter.to)
@@ -573,13 +590,13 @@ function SalesPage({ db, visibleDb, updateDb, user, showToast, services, addServ
   return (
     <div>
       {showModal && <AddServiceModal onAdd={handleAddService} onClose={() => setShowModal(false)} existing={services} />}
-      {confirmId && <ConfirmModal message="Delete this sale? This cannot be undone." onConfirm={() => softDelete(confirmId)} onCancel={() => setConfirmId(null)} />}
+      {confirmId && <ConfirmModal message="Delete this sale? This cannot be undone." onConfirm={() => hardDelete(confirmId)} onCancel={() => setConfirmId(null)} />}
       <h1 style={pT}>Sales</h1>
       <div style={{ display:"flex", gap:20, flexWrap:"wrap", alignItems:"flex-start" }}>
         <div style={fC}>
           <h3 style={fTi}>Record a Sale</h3>
           <label style={lS}>Service</label>
-          <div style={{ display:"flex", flexWrap:"wrap", gap:7, marginBottom:6 }}>
+          <div style={{ display:"flex", flexWrap:"wrap", gap:7, marginBottom:18 }}>
             {services.map(s => (
               <button key={s.id} onClick={() => setForm(f => ({ ...f, service:s.name }))} style={{ padding:"9px 14px", borderRadius:9, border:"2px solid", borderColor:safeService===s.name?s.color:"#E8E4DF", background:safeService===s.name?s.color:"#fff", color:safeService===s.name?"#fff":"#555", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:5 }}>
                 <span>{s.emoji}</span>{s.name}
@@ -595,9 +612,7 @@ function SalesPage({ db, visibleDb, updateDb, user, showToast, services, addServ
           <label style={lS}>Amount (TZS)</label>
           <input type="number" placeholder="e.g. 15000" value={form.amount} onChange={e => setForm(f => ({ ...f, amount:e.target.value }))} style={{ ...iS, fontSize:22, fontWeight:700, marginBottom:14 }} />
           <label style={lS}>Date</label>
-          <input type="date" value={form.date} onChange={e => setForm(f => ({ ...f, date:e.target.value }))} style={{ ...iS, marginBottom:14 }} />
-          <label style={lS}>Notes (optional)</label>
-          <input placeholder="e.g. Group of 5" value={form.notes} onChange={e => setForm(f => ({ ...f, notes:e.target.value }))} style={{ ...iS, marginBottom:22 }} />
+          <input type="date" value={form.date} onChange={e => setForm(f => ({ ...f, date:e.target.value }))} style={{ ...iS, marginBottom:22 }} />
           <button onClick={submit} style={sB}>✓ Record Sale</button>
         </div>
         {isOwner && (
@@ -610,12 +625,13 @@ function SalesPage({ db, visibleDb, updateDb, user, showToast, services, addServ
                 </select>
                 <input type="date" value={filter.from} onChange={e => setFilter(f => ({ ...f, from:e.target.value }))} style={seS} />
                 <input type="date" value={filter.to}   onChange={e => setFilter(f => ({ ...f, to:e.target.value }))}   style={seS} />
-                <div style={{ marginLeft:"auto", fontWeight:700, color:"#2A2D40", fontSize:13 }}>Total: {TZS(total)}</div>
+                <div style={{ marginLeft:"auto", fontWeight:700,
+color:"#2A2D40", fontSize:13 }}>Total: {TZS(total)}</div>
               </div>
               <table style={{ width:"100%", borderCollapse:"collapse" }}>
                 <thead>
                   <tr style={{ borderBottom:"2px solid #F0EDE8" }}>
-                    {["Date","Service","Amount","By",""].map((h,i) => (
+                    {["Date","Service","Amount",""].map((h,i) => (
                       <th key={i} style={{ textAlign:"left", padding:"0 0 10px", fontSize:10, color:"#aaa", fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
                     ))}
                   </tr>
@@ -626,7 +642,6 @@ function SalesPage({ db, visibleDb, updateDb, user, showToast, services, addServ
                       <td style={tS}>{s.date}</td>
                       <td style={tS}><ServiceBadge service={s.service} services={services} /></td>
                       <td style={{ ...tS, fontWeight:600 }}>{TZS(s.amount)}</td>
-                      <td style={{ ...tS, color:"#888", fontSize:12 }}>{s.createdBy || "—"}</td>
                       <td style={tS}>
                         <button onClick={() => setConfirmId(s.id)} style={{ background:"none", border:"1px solid #E07A5F44", color:"#E07A5F", borderRadius:6, padding:"3px 8px", fontSize:11, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>🗑️</button>
                       </td>
@@ -751,8 +766,8 @@ function ReportsPage({ db, services }) {
 
   const exportCSV = () => {
     const rows = [
-      ["Date","Service","Amount","Notes","By"],
-      ...sales.map(s => [s.date, s.service, s.amount, s.notes||"", s.createdBy||""]),
+      ["Date","Service","Amount"],
+      ...sales.map(s => [s.date, s.service, s.amount]),
     ];
     const blob = new Blob([rows.map(r => r.join(",")).join("\n")], { type:"text/csv" });
     const a = document.createElement("a");
@@ -910,7 +925,8 @@ function UsersPage({ users, onAddUser, showToast }) {
 }
 
 // ── SHARED STYLES ──────────────────────────────────────────────
-const iS  = { width:"100%", padding:"12px 14px", border:"2px solid #E8E4DF", borderRadius:11, fontSize:14, outline:"none", background:"#FAFAF8", fontFamily:"'DM Sans',sans-serif", color:"#2A2D40" };
+const iS  = { width:"100%", padding:"12px 14px", border:"2px solid #E8E4DF", borderRadius:11, fontSize:14, outline:"none", background:"#FAFAF8
+", fontFamily:"'DM Sans',sans-serif", color:"#2A2D40" };
 const seS = { padding:"9px 12px", border:"2px solid #E8E4DF", borderRadius:9, fontSize:12, background:"#FAFAF8", fontFamily:"'DM Sans',sans-serif", color:"#555", cursor:"pointer" };
 const lS  = { display:"block", fontSize:11, fontWeight:600, color:"#888", marginBottom:5, textTransform:"uppercase", letterSpacing:.5 };
 const fC  = { background:"#fff", borderRadius:18, padding:22, width:320, flexShrink:0, boxShadow:"0 2px 10px rgba(0,0,0,.06)" };
