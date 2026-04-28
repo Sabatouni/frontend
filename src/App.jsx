@@ -333,11 +333,10 @@ function SalesPage({ db, setDb, user, showToast, services, addService }) {
 
 const DEFAULT_SERVICES = [
   { id: "restaurant", name: "Restaurant", color: "#E07A5F", emoji: "🍽️" },
-  { id: "gokart",     name: "Go Kart",    color: "#3D405B", emoji: "🏎️" },
-  { id: "paintball",  name: "Paintball",  color: "#81B29A", emoji: "🎯" },
-  { id: "entry",      name: "Park Entry", color: "#F2CC8F", emoji: "🎟️" },
+  { id: "gokart", name: "Go Kart", color: "#3D405B", emoji: "🏎" },
+  { id: "paintball", name: "Paintball", color: "#81B29A", emoji: "🎯" },
+  { id: "entry", name: "Park Entry", color: "#F2CC8F", emoji: "🎟️" },
 ];
-
 const EXPENSE_CATS = [
   "Restaurant","Go Kart","Paintball","Park Entry",
   "Utilities","Staff","Maintenance","Marketing","Other",
