@@ -1,9 +1,9 @@
+import { createClient } from '@supabase/supabase-js';
 import { useEffect, useState } from "react";
 import {
   Bar, BarChart, CartesianGrid, Cell, Legend, Line, LineChart,
   Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis
 } from "recharts";
-import { createClient } from '@supabase/supabase-js';
 import api from "./client";
 
 // ── SUPABASE CLIENT ────────────────────────────────────────────
@@ -925,8 +925,7 @@ function UsersPage({ users, onAddUser, showToast }) {
 }
 
 // ── SHARED STYLES ──────────────────────────────────────────────
-const iS  = { width:"100%", padding:"12px 14px", border:"2px solid #E8E4DF", borderRadius:11, fontSize:14, outline:"none", background:"#FAFAF8
-", fontFamily:"'DM Sans',sans-serif", color:"#2A2D40" };
+const iS  = { width:"100%", padding:"12px 14px", border:"2px solid #E8E4DF", borderRadius:11, fontSize:14, outline:"none", background:"#FAFAF8", fontFamily:"'DM Sans',sans-serif", color:"#2A2D40" };
 const seS = { padding:"9px 12px", border:"2px solid #E8E4DF", borderRadius:9, fontSize:12, background:"#FAFAF8", fontFamily:"'DM Sans',sans-serif", color:"#555", cursor:"pointer" };
 const lS  = { display:"block", fontSize:11, fontWeight:600, color:"#888", marginBottom:5, textTransform:"uppercase", letterSpacing:.5 };
 const fC  = { background:"#fff", borderRadius:18, padding:22, width:320, flexShrink:0, boxShadow:"0 2px 10px rgba(0,0,0,.06)" };
