@@ -6,7 +6,331 @@ import {
 import api from "./client";
 
 // Paste your existing LOGO base64 string here — unchanged
-const LOGO = "data:image/png;base64,YOUR_EXISTING_LOGO_STRING_HERE";
+const LOGO = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAtAAAAHgCAIAAAADp837AAAAAXNSR0IArs4c6QAAAIRlWElmTU0AKgAAAAgABQESAAMAAAABAAEAAAEaAAUAAAABAAAASgEbAAUAAAABAAAAUgEoAAMAAAABAAIAAIdpAAQAAAABAAAAWgAAAAAAAABIAAAAAQAAAEgAAAABAAOgAQADAAAAAQABAACgAgAEAAAAAQAAAtCgAwAEAAAAAQAAAeAAAAAAphlalgAAAAlwSFlzAAALEwAACxMBAJqcGAAAABxpRE9UAAAAAgAAAAAAAADwAAAAKAAAAPAAAADwAAC93gv3Dm8AAEAASURBVHgB7N0HdFNXvi9+407vNQkhgRRIgNCLAeMONu7GvWKwcQEDNi64995770UustxkW1aXbVmSu40bvSUhbTKTN+XeO/fP27KBkEzmrbnr3cu983/fs/YSR9KRdM7nbLx/Z7cjI4MFAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIAABCEAAAhCAAAQgAAEIQAACEIAABCAAAQhAAAIQgAAEIACB/3SBRbLyJP3iaxfJyCySkZeTkZP9OZHX5OYT2ZSkhfU3H+c/RD63kGQXycjOb/jLb/7Fz+DJWxR4dWJen6GXK3+zCwvndGFzkgdIWlh/9Y/MokUkkdfIQk4xSVggAAEIQAAC/4CANNpYREqZN5b5EkYaMpCi5WUAIV1RWCSjLC+HgOMNqX+e1TdP5Ov139h9WXKKFWWlAcXrROJOEnYg4PgNLbwEAQhAAAL/uICsLCleSOHy28vrUoesyMoskpeVk5OR/WV6Wdvx5pbzscpCxIIr4N+GfXuv/vLE/BxHkNd/sSxUV8iTs0zSmx8iW8nJSfPI6/SLz+EJBCAAAQhA4B8RICWJtDD55fKqaFkkvbqVlVOQk5dbRAIIaWn1y2jj5+DjzSIKAccvOf9bn/3yxLyuqHhjn16GGgtNYAubLwSXC5HHwpaysjIk/Sqn/G3OeeNrsQoBCEAAAhB4Q+BXRQh5Zz4CWaSkpKSgoCQnXRTk5RVJWiRteSFhh/zfSS+rNOajjZ8vpN/4Kaz+dwi8GXD8+vffDDUUSKPZfJK+KCsrT847eZw/6dKPycuTV+YrOl59yUJU+uoZ/oUABCAAAQj8BwVIwEFKGiWlxcrKS0giYcd838CFwok8SgOOhcffijwWwg4EHP9B9P+6zX874Hgz1CBn83W0QSqzFMnZXzjjZIUEmiQDvHqUJ5HI6z0lAccbz16/jBUIQAACEIDAbwosFEhvvrWItJ8oLl6yYss77+/c9flHH3+6Zu16acfSl1u+WVb9XFAtknYqJYmEIy8bX/72i9/8Eay/JYHfCDikUeN8+vn0zccc8y/Ky0lrN5SUV6xcvWnzO+++9/7mLVvXrtukoLhEXkHpFwEHaWT5ZW/jt3RE+BkIQAACEPinFPh1XCBLog2S1q3ffPiIirmFlYm5xb5DB1esWf2ykPp12PFzofUq4CAxB2o4/sfkhdcn4+Ue/Wa0sRB/zIeSZCjsYoV1mzbu3P25iurp02oahw4f3blrj6LSUnmFxfOVHy+/iHQuRcDxP+Y0Y0cgAAEI/I8XeB1vvOrMQXoGKpDL2S1b39c1MIyIic4pKgiKCDljeObd7e8oLCeFzPy1MXkknyQljrzyIlnS5vIy7HjVyCJ9k1z9/h8ugBd6irz9XocLo3L+9nfnG5LIm789Zod0X3h9cU9WFBUV/8ef2Jd9cf4m9Fs4fy/Pl7yc8qvTKR2KQpL8CrmNWzec1Dx5+ar7DX/fgOCQqze89x06vH7DFhJwkDP+mo50KJZmASwQgAAEIACBf0TgjYBjofiQFkgKisprNmy0cbAvrixtY7RR6Q0ZxannHY02fLBKccV8dLEQTZAL4/kA5HXM8SrgkLaq/IMBBynAFpZ/ZG//77f5P/8WeVfaTXY+vCDrCz+38CLpzvA65vi/343/9G9YOC6yh2RZ2P+F9ZcBx8vf+znaUFJc9jrUkHbFmM8HCooySzcoHNc65BfhU99aS+2gFpQV3QwMOHDk6Np1G2TlpL15XncjRcDxn34S8YUQgAAE/v8ssFBskOLm1fUqKXxkSWv9yrVrtPR0YtPjW5ktbFF3M7MutTjKO/zy7mPbV22WX6jRWEQuj8nmLys9pBfNCwHH/NDZlwHH62L7V4gLBeSbjy8LyF9t97ae/r39/NXv/4Ob/epTb+0p2b0Fxp/3cz6SeLUDPwccigpLFk6eguIi6WxusjJKi2Xee3/NeWfdoITredXpraymTh69rLbMO+Dm4ePHVq1eOz8jLfn6l01mCDheqeJfCEAAAhD4BwRez109H3BIow2S5JQUV6xbRerVQ+NDOvktklk+S0KrbM1MKw1xvmZySP1j5XXz9RykYWG+rJr/FFl7M+CQtu9L0y9rCxb26OficP45efp6+Qd2+b9kEzIMmOzqm19Ndok8JQXsmy+SdbKZggKJrv5JFulBLCwL0Yb0NM0nsiJDog1SqyE953Iy73+4UuvMgYveJrk1sa3c6t7xnr5xbkVjuae3574jB5avXjU/Iy0Cjlec+BcCEIAABP5DAgryLweV/BxwkCteZaW1W9YamOtFJAcXUjK6RY2z3wyMPmZSuXkZFcFeoTYqup+t3ionQ2o4Fgov6XdIy7M3ajikYyulZdo/57JQT0AeSdhBIgzSnrIQfywczd9GIf/tR/mreTLI3kpDA/k3z8BCwPE62pBVUJB7HW28u03ZwOSYj79dfKE3a4Qy8pA9fI/bI2rNLEm5dOXC/mP7SY0Xajj+288ydgACEIDAP7EAmUN0odJ9/kqYlElkblEFpaVL3v/4fUvn8wm5kVkVsYWNCfSBstEn9OlvmJ0DRQ3MjOjsa7pWxzd/tFx26Xw9BvkcGUw7PzJWVkZBXoZU0sspkN6nf79bISkRF5b/XrtXe/GyHuAf36XXH/zVyn/v4bz562TH3giM3ow2SMwxH4jMR4myCjIf7Vxt56Sdkuld3RAvuU8jJ7pTVF7TmV1GzcypTPWPvHla5/TajRtIviDZgwRgCxlmIee8+YtYhwAEIAABCPxdAdIKQhoSFoqQ+VoKMgZDYfGKJcfVjl0P8qQyK/smOzqE5VWdCdXMOJowvWekqFNcUN+TnlDga+umv+fIh8vWKM63w5ACThpz/GbAsdAMQQZ3kGXhWpy0SpCVhfU3ysW/u5//uW8sRAnkdxcWsnuv93Bhr5YtW/bOO+98+umnH3/88aZNm5SVSWWOdNwHeZd8ZGF94Ut+9fifu5//0W9b2ENiSxZyRAu7Ov8lbwYcJNqQHgI568tXyh48ssPVwyQrP4BGz+jhFZJT3NyfUc9KaxEUM0T17MG28sYiMxvTje9uIlPBScPKVwEHucfbL5qg/qP7iu0hAAEIQOD/KQFS+Pwq4CAdOJauWmbrYpOSH9chqOeOUMee9Hz5L5LJbzuofcm1PTHFLSEVbbFUdn5JQ7LbDbvdhz5evmbp/HjJ3wg4SJlHCr/FixcvX7585cqVK1asWLp0KXlKinCykPjjddFICsu3IP86Pngz1CBhxJIlSxb2inTmWLNmzd69e8+fP3/jxo3r168bGhru2LGDbEB2lewzeST7+fp7frXyFg7hN3+CHA7BJHHS6tWr165dSx4JODmi+Y1JePHrgINETctXKB88/KnXDbv84oiaxgRKc3wzPbmWHcOdLr/zA/fB70X9t9t7RLT6jqrL1y5t2fbukmVLSavK64BDSQ7TcPzmqcCLEIAABP45BeRkFF4nxUVKi+WXKCkoK8orkRkTZKWhAuk2oSAnq0QmVJCVk06J8XrrhbfJFgtJUVaGpIX6jNcvkmhjoW6DjCshI0/kZZYqyixbKb9u85ot16951jXlUzmZuTSv7G6nwn6b2ln7/n8LYHyXXTUZksh0im6xzud61QgjbqbZ7Dr53pqtq2SVyMCHpUqK61av3LJm9YaNG9Zs27bpoz1rj6l/clJvl475ISsPLUPnk8dNd54036Nhc+TDw5vfP7BlxbvLZaQzjS1eJL+cfPz1vr1eeVX7Mn/+Fp4sFKDz6+QQSPmvSDqPzB+psrzCisXLyeGQCU8J1Py0p7KrVqwk265fv56EC5vf2fDOuxv37/302MEvdn30weef7tz9xaF3tu9ev/2Ldz4//P6efR99vkP9xIcBLqfacuxut3iPU5No6T7XHM8eP/Lp1k8+XLr1XZkN6+Q2rpdZLrf+vTWb31nx7pYVn322/cCBfR/v2r3to8+WLVfa8s568nNSzSVkB2SWKC8m/WMUpPd4JyW07MY1GxbLKcnLyK5QXkL2WXp6Xve9JdvJS+/WSs7K/MG9PHdkM5LIViTJyJAYgoSEKxY+uOSdxRt2r96l/uEx491HDT49brRT1/awlZumjauGlvHuPUfXf/bxh1vWbVimuGqx/CZF2XdkZDbIyKyWWbxEebPigXMfeqWbZLGupLGdIzvMMkTOLV9HiF5ENT32TONYJLXapTZ6NjKzad1VN32vf7x915plm+RkFsvJkLwn7bMjjWHkpHsh3TfZRST+II9kfeHEKZJcS1rn5uvPSFYk2VJRXkaJtLEtWi5NMiSrkAORdighbyqQ3CtDotVXHY1lSDsPuXkPmdl0/oilR40FAhCAAAT+iwWUSA9O0nhO7tf66k/5QlGkrER6/JEaftIxUJqktdvzb5CiYGFVur00yFhEuoUqykrb3UlZRm79Sr6KPJJ18sqrD5GyQ05ZbokSKRxlFq+QX75+5Wpra5O6ptzxJ92jX1N7n+VUDl4Np2mHtpyunAqomPArGvJKZzuldjoUsW9k0W76pVzceXT7uvc2yS9eLk+mjpJfvGrVmpOnjnp5ucZn+WQUByYX+6eU+ec0hKXVBmQ0BjX05RR1JN5MdnPwNt9zcpe086m0mCVdBEh59rLEer2ycLzkipzssXSn34g2yCGTzZYqSoeXLF+sTB4XNiYBGalHWTgzpEFkyRLljRvXr9+47rPdu84YaIaE+8fFhQT6e0WF3/LzveF40fXydV8Tp8sn9M2+UD1xzkwrLfHKYE/yXU70aJPHBC1ujp3PakyLDrtibGO0T/3E1oN739v/mZqx9nGtI7rnTjk4mnhccQwM8QuKCHO7cV1D++ROMh38Jx+sXrN87bqVy5YtIRU6ZK9WLCOlrDQMIuUoCTuWKkiPlBTPL4+WlLzzxyVPSlqy/vcDjkWLpOW0dGwJ+fBSma37N591UgvJvZbREJ5SF5hedyunMSS7LjCzIqCAEtbQmRodEWCkf+adzVuXKK5brLxFafGmxas2rX533Unjg55xFmntV1O7nZOZtsVjnvWPAigP/SO7dRPZ50sHvdhPsgaeUoYfdLT0VDo5W7737paVS1aRqFQ6rkWBhByvdpjM+jHPvvBIcpqyotIyZekhkx0kj6/fJQdPohBylmVllygqriATgZChuSRWJn1bSfZTlCf5VJpLySZvpv/i/174eghAAAIQeCVA/rKTRMqXJUtl1qyV2/bB6n0Ht59S+4JMOa2ufURbV0XXQFXPUE373KnT2kdV1A58sUdl18cHt239bMuGHWtXb125bKOy4mr5RWSWJ6VF0hKd1HFIkzypFJEn/Smkf+4XCsL5np7SQmKZkty61coqJ3YlpvsJJqjjX3dP/L5D8GUFbSa1/X5G7uDFsgn3urvXSoYuxXUYpXRYl3FvVnFjnG4aHdc5sGXHu+9t/2DP/n2a2hruVy6mZcS2CvLnvuU8+nM/e6qiqCskucErs8W7ghsl+pLaLMrPqIvQs1GTXu6SAkx6PSytEvg/p1cwL/+VFlMkTlEmdRzSD65aRSYmk5E2JSyS2bh5w2GVI6aWZnYXbN293M7bmuWX5ZVQ8tLyY8qrs/pFXcMjvHZ6Q1ZhVmRKQnkLrbKNVtVaXd+az2Fm3u5PvccPnaJfmemK/n6i8uFYPYOeX16fm1dXmFyZG1+c7h8f4HrDKSUnvG+gjcFpyC9Ly63IqqBWNHfWRyQE+wVfv+LtRpK1g+UH27du+/B9pcWK69aRwcTzZfAi+SUKpEiWXSyvLD1wst8LhfN8RCUNrV4hLBS95M2fkxwJOObrthRlVn+gdNp8f0iex8DTlkZRajknMrPlZk6rX4s4fewZbea77rEnbZVVGTGxAZdcHHXP6X3+xYHN77//4Z4dKroHrsbZJDddzWV7xLSZxXQblU5erpi7kiq0rhgLb5hOoN/PlXxPHX7eLr7TUtuaYeugu36DIglIX+4Pua8OmXJWQUZ5qfQmf9L6NhI3SPMVOQskXJLmNFKHoSi3YunidauWbVmz6r2Naz94751Pd2zb8/kX+/YfPnLs5KnT6mqqaqdVTh4/fPTAocP7du7asf3D9zZtXLNyBWlvk1NUkFYRkYQFAhCAAATekgAZ2EgSKUC3bFlx6Ogn5y01vLxtgiJcMgsCcooDCyuDSiihpQ3BBTX+6cVXEnJcgsJu+Ph6XPZwdHAyt7A2NjbR1dHVUNc4dUzl8N69u7due2/VqlXkDqAvr0+l19ykekEaiJAQRFlOaamCwsplChvXK+/avcn1mikZBJtHDcuk3Uqi3ohrvpbJCMgYMM8cMC8ZtSsdtUtjGyZ3Geb2OBUwvKq58V6R9oc0d2/fs/W45jEyljIlK66OWpbd6E8fyRv7njb6fUP3XGYp72YizSm+wYE2ltA8lFrBSLC7ek6WBAnSgIMMQiUF1c/F7RvrZD/J668fyYp0uARpVyL1B+STpA5DSUlh/8F9h47s19LVPHryiKaeJokw4jMT/MJ9E7Li2zgtQ7MSOr/dJ+pyQl6waKLr4dcjtI7S4qoM0Rj/u798xxzkURj1aSWxcalXigtcmVSvwQ43UZO1iOoharnZUOIeH2MXkeiZUZ5QSa9s7W0XTPKe/uFOc3dpal7wxD3+kx8n8ynJHsHOBZQctqR7/MFQl6DtVvTNpq76iKRw0gP3lMbJj3bt+GL/Xi0tre3btysqKm/atEV62ORIyEJumTbfF5UcyxtH/fO1/uuAYz72mK8EWCbz2Yl3LwbqZzTflHxbl8/wjm10ILD14vCRH+qnfmrhzhXXcqJbOgup7QU5JfFu1xyPaR7Yd2qX5WW9iPwrWa0+GZ2uGWyH3H7b/CH7vGHbdLFVYq9pSvf1pA6vKIpLStON3ObA/PqQiBR3Td095P59y5fKkJhj6RIF5cXzg4RJM9brOwkvks5NQjp5rFu3hkRXuz77+KTqcU0tVV19TZIDzSzO2diZXHCxdPOw94uwDIq1i0xxic1wj033jE25Ep10JTLey+2quZ2jvpbOsZ0731u+4mX4SKrosEAAAhCAwFsSUJJfv2zJpm1bd+rqnguNCKQ0lbAEFK6kkiHM6OyLbe8NbOm71tzr2sCzq2WbV/UYd4tvdfUHtAn86YKgzv7Inv6E7v60bn5mCSU8JdvHy8/exFzr4PHPt23fsmLtcnLzeUWFjbIyaxbJrFSUXb1YcfUypeUrli9ds2bJe9uW27vqFjfFdEgKWoczy3khKe0eMY1OKb3nIrvVEjkauRLDnAH9
+
+const DEFAULT_SERVICES = [
+  { id: "restaurant", name: "Restaurant", color: "#E07A5F", emoji: "🍽️" },
+  { id: "gokart",     name: "Go Kart",    color: "#3D405B", emoji: "🏎️" },
+  { id: "paintball",  name: "Paintball",  color: "#81B29A", emoji: "🎯" },
+  { id: "entry",      name: "Park Entry", color: "#F2CC8F", emoji: "🎟️" },
+];
+const EXPENSE_CATS = ["Restaurant","Go Kart","Paintball","Park Entry","Utilities","Staff","Maintenance","Other"];
+const ROLES = { WORKER: "worker", OWNER: "owner" };
+const USERS = {
+  admin:  { password: "admin123",  role: ROLES.OWNER,  name: "Owner"  },
+  worker: { password: "worker123", role: ROLES.WORKER, name: "Worker" },
+};
+const TZS = (n) => `TZS ${Number(n).toLocaleString()}`;
+const todayStr = () => new Date().toISOString().split("T")[0];
+
+const PALETTE = ["#E07A5F","#3D405B","#81B29A","#F2CC8F","#9C89B8","#F0A500","#00B4D8","#E63946","#2DC653","#FF6B6B"];
+
+function seedData(services) {
+  const sales = [], expenses = [];
+  const now = new Date();
+  for (let d = 29; d >= 0; d--) {
+    const date = new Date(now); date.setDate(now.getDate() - d);
+    const ds = date.toISOString().split("T")[0];
+    services.forEach((s) => {
+      const count = Math.floor(Math.random() * 3) + 1;
+      for (let i = 0; i < count; i++) {
+        sales.push({ id: `s-${ds}-${s.id}-${i}`, service: s.name, amount: (Math.floor(Math.random() * 20) + 5) * 1000, notes: "", date: ds, createdBy: "worker" });
+      }
+    });
+    if (d % 3 === 0) expenses.push({ id: `e-${ds}`, category: EXPENSE_CATS[Math.floor(Math.random() * 4)], item: ["Tomatoes","Oil drum","Paint cartridge","Kart fuel"][Math.floor(Math.random() * 4)], cost: (Math.floor(Math.random() * 15) + 2) * 1000, date: ds, createdBy: "worker" });
+  }
+  return { sales, expenses };
+}
+
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [services, setServices] = useState(DEFAULT_SERVICES);
+  const [db, setDb] = useState(() => seedData(DEFAULT_SERVICES));
+  const [page, setPage] = useState("dashboard");
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [toast, setToast] = useState(null);
+
+  const showToast = (msg, type = "success") => { setToast({ msg, type }); setTimeout(() => setToast(null), 3000); };
+
+  const addService = (newSvc) => {
+    setServices(prev => [...prev, newSvc]);
+    showToast(`"${newSvc.name}" added ✓`);
+  };
+
+  if (!user) return <Login onLogin={setUser} />;
+
+  return (
+    <div style={{ display:"flex", height:"100vh", fontFamily:"'DM Sans', sans-serif", background:"#F7F5F0", overflow:"hidden" }}>
+      <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=Playfair+Display:wght@600;700&display=swap" rel="stylesheet" />
+      <Sidebar page={page} setPage={setPage} user={user} onLogout={() => { setUser(null); setPage("dashboard"); }} open={sidebarOpen} />
+      <main style={{ flex:1, overflow:"auto", padding:"24px 28px" }}>
+        <div style={{ display:"flex", alignItems:"center", gap:14, marginBottom:24 }}>
+          <button onClick={() => setSidebarOpen(!sidebarOpen)} style={{ background:"none", border:"none", cursor:"pointer", fontSize:20, padding:4, color:"#555" }}>☰</button>
+          <div style={{ fontSize:13, color:"#999" }}>{new Date().toLocaleDateString("en-US",{ weekday:"long", year:"numeric", month:"long", day:"numeric" })}</div>
+        </div>
+        {page === "dashboard" && user.role === ROLES.OWNER  && <Dashboard db={db} services={services} />}
+        {page === "dashboard" && user.role === ROLES.WORKER && <WorkerHome db={db} user={user} setPage={setPage} />}
+        {page === "sales"     && <SalesPage db={db} setDb={setDb} user={user} showToast={showToast} services={services} addService={addService} />}
+        {page === "expenses"  && <ExpensesPage db={db} setDb={setDb} user={user} showToast={showToast} />}
+        {page === "reports"   && user.role === ROLES.OWNER && <ReportsPage db={db} services={services} />}
+      </main>
+      {toast && (
+        <div style={{ position:"fixed", bottom:28, right:28, zIndex:9999, background: toast.type==="success" ? "#81B29A" : "#E07A5F", color:"#fff", padding:"13px 22px", borderRadius:12, fontWeight:600, fontSize:14, boxShadow:"0 8px 28px rgba(0,0,0,0.18)" }}>
+          {toast.msg}
+        </div>
+      )}
+      <style>{`* { box-sizing:border-box; } ::-webkit-scrollbar { width:5px; } ::-webkit-scrollbar-thumb { background:#D4CFC7; border-radius:3px; }`}</style>
+    </div>
+  );
+}
+
+function Login({ onLogin }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const handle = () => { const u = USERS[username]; if (u && u.password === password) onLogin({ username, ...u }); else setError("Invalid credentials."); };
+  return (
+    <div style={{ minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center", background:"linear-gradient(145deg, #1a1c2b 0%, #2f3347 50%, #3a2e1e 100%)", fontFamily:"'DM Sans', sans-serif" }}>
+      <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;700&family=Playfair+Display:wght@700&display=swap" rel="stylesheet" />
+      <div style={{ background:"#fff", borderRadius:24, padding:"44px 40px", width:400, boxShadow:"0 32px 80px rgba(0,0,0,0.4)" }}>
+        <div style={{ textAlign:"center", marginBottom:32 }}>
+          <img src={LOGO} alt="Swahili Tent Village" style={{ width:200, height:"auto", marginBottom:4, mixBlendMode:"multiply" }} />
+          <p style={{ margin:"4px 0 0", color:"#888", fontSize:13, letterSpacing:1 }}>POINT OF SALE</p>
+        </div>
+        <input placeholder="Username" value={username} onChange={e=>setUsername(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handle()} style={iS} />
+        <input type="password" placeholder="Password" value={password} onChange={e=>setPassword(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handle()} style={{...iS, marginTop:10}} />
+        {error && <p style={{ color:"#E07A5F", fontSize:13, marginTop:6 }}>{error}</p>}
+        <button onClick={handle} style={{ width:"100%", marginTop:20, padding:"15px", background:"#3D405B", color:"#fff", border:"none", borderRadius:12, fontSize:15, fontWeight:600, cursor:"pointer", fontFamily:"'DM Sans', sans-serif" }}>Sign In</button>
+
+      </div>
+    </div>
+  );
+}
+
+function Sidebar({ page, setPage, user, onLogout, open }) {
+  const isOwner = user.role === ROLES.OWNER;
+  const nav = isOwner
+    ? [{ id:"dashboard",label:"Dashboard",icon:"📊"},{id:"sales",label:"Sales",icon:"💰"},{id:"expenses",label:"Expenses",icon:"🧾"},{id:"reports",label:"Reports",icon:"📈"}]
+    : [{ id:"dashboard",label:"Home",icon:"🏠"},{id:"sales",label:"Add Sale",icon:"💰"},{id:"expenses",label:"Add Expense",icon:"🧾"}];
+  return (
+    <aside style={{ width:open?232:66, minWidth:open?232:66, background:"#2A2D40", color:"#fff", display:"flex", flexDirection:"column", transition:"width .3s,min-width .3s", overflow:"hidden" }}>
+      <div style={{ padding:open?"22px 16px 12px":"22px 10px 12px", display:"flex", alignItems:"center", justifyContent:"center", flexDirection:"column", gap:6, borderBottom:"1px solid #3D405B" }}>
+        <img src={LOGO} alt="logo" style={{ width:open?110:42, height:"auto", transition:"width .3s", objectFit:"contain", mixBlendMode:"screen" }} />
+        {open && <div style={{ fontSize:10, color:"#8B8FA8", textAlign:"center", marginTop:2 }}>{isOwner?"Owner Dashboard":"Worker Panel"}</div>}
+      </div>
+      <nav style={{ flex:1, padding:"8px 10px" }}>
+        {nav.map(item => (
+          <button key={item.id} onClick={()=>setPage(item.id)} style={{ display:"flex", alignItems:"center", gap:10, width:"100%", padding:open?"11px 14px":"11px 7px", marginBottom:3, borderRadius:10, border:"none", cursor:"pointer", background:page===item.id?"#3D405B":"transparent", color:page===item.id?"#fff":"#8B8FA8", fontSize:13, fontWeight:page===item.id?600:400, textAlign:"left", fontFamily:"'DM Sans',sans-serif", justifyContent:open?"flex-start":"center" }}>
+            <span style={{ fontSize:17, flexShrink:0 }}>{item.icon}</span>{open&&item.label}
+          </button>
+        ))}
+      </nav>
+      <div style={{ padding:"14px 10px", borderTop:"1px solid #3D405B" }}>
+        {open && <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10 }}><div style={{ width:32, height:32, borderRadius:"50%", background:"#E07A5F", display:"flex", alignItems:"center", justifyContent:"center", fontSize:13, fontWeight:700 }}>{user.name[0]}</div><div><div style={{ fontSize:12, fontWeight:600 }}>{user.name}</div><div style={{ fontSize:10, color:"#8B8FA8", textTransform:"capitalize" }}>{user.role}</div></div></div>}
+        <button onClick={onLogout} style={{ width:"100%", padding:"9px 14px", borderRadius:9, border:"1px solid #3D405B", background:"transparent", color:"#8B8FA8", cursor:"pointer", fontSize:12, fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:7, justifyContent:open?"flex-start":"center" }}>
+          <span>🚪</span>{open&&"Sign Out"}
+        </button>
+      </div>
+    </aside>
+  );
+}
+
+function StatCard({ label, value, sub, color, icon }) {
+  return (
+    <div style={{ background:"#fff", borderRadius:18, padding:"22px 20px", boxShadow:"0 2px 10px rgba(0,0,0,0.06)", flex:1, minWidth:0, borderTop:`4px solid ${color}` }}>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:10 }}><span style={{ fontSize:12, color:"#888", fontWeight:500 }}>{label}</span><span style={{ fontSize:22 }}>{icon}</span></div>
+      <div style={{ fontSize:21, fontWeight:700, color:"#2A2D40", fontFamily:"'Playfair Display',serif" }}>{value}</div>
+      {sub && <div style={{ fontSize:11, color:"#aaa", marginTop:5 }}>{sub}</div>}
+    </div>
+  );
+}
+
+function ServiceBadge({ service, services }) {
+  const svc = services ? services.find(s=>s.name===service) : null;
+  const color = svc ? svc.color : "#aaa";
+  return <span style={{ background:color+"22", color, border:`1px solid ${color}44`, padding:"3px 9px", borderRadius:6, fontSize:11, fontWeight:600 }}>{service}</span>;
+}
+
+// ── ADD SERVICE MODAL ────────────────────────────────────────
+function AddServiceModal({ onAdd, onClose, existing }) {
+  const [name, setName] = useState("");
+  const [emoji, setEmoji] = useState("🎪");
+  const [color, setColor] = useState(PALETTE[existing.length % PALETTE.length]);
+  const [err, setErr] = useState("");
+
+  const submit = () => {
+    const trimmed = name.trim();
+    if (!trimmed) { setErr("Service name required."); return; }
+    if (existing.some(s => s.name.toLowerCase() === trimmed.toLowerCase())) { setErr("A service with this name already exists."); return; }
+    onAdd({ id: trimmed.toLowerCase().replace(/\s+/g,"-") + "-" + Date.now(), name: trimmed, color, emoji });
+    onClose();
+  };
+
+  const emojis = ["🎪","🏊","🎭","⚽","🎸","🧗","🏄","🎡","🛶","🎠","🏋️","🎳","🤸","🎻","🧩"];
+
+  return (
+    <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.5)", zIndex:1000, display:"flex", alignItems:"center", justifyContent:"center" }} onClick={onClose}>
+      <div style={{ background:"#fff", borderRadius:20, padding:"36px 32px", width:380, boxShadow:"0 20px 60px rgba(0,0,0,0.25)" }} onClick={e=>e.stopPropagation()}>
+        <h3 style={{ margin:"0 0 24px", fontFamily:"'Playfair Display',serif", fontSize:20, color:"#2A2D40" }}>Add New Service</h3>
+
+        <label style={lS}>Service Name</label>
+        <input placeholder="e.g. Swimming Pool" value={name} onChange={e=>{setName(e.target.value);setErr("");}} style={{...iS, marginBottom:4}} />
+        {err && <p style={{ color:"#E07A5F", fontSize:12, margin:"4px 0 12px" }}>{err}</p>}
+        {!err && <div style={{ marginBottom:16 }} />}
+
+        <label style={lS}>Icon</label>
+        <div style={{ display:"flex", flexWrap:"wrap", gap:8, marginBottom:18 }}>
+          {emojis.map(e => (
+            <button key={e} onClick={()=>setEmoji(e)} style={{ width:38, height:38, borderRadius:9, border:`2px solid ${emoji===e?"#3D405B":"#E8E4DF"}`, background:emoji===e?"#3D405B":"#fff", fontSize:18, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" }}>{e}</button>
+          ))}
+        </div>
+
+        <label style={lS}>Color</label>
+        <div style={{ display:"flex", flexWrap:"wrap", gap:8, marginBottom:24 }}>
+          {PALETTE.map(c => (
+            <button key={c} onClick={()=>setColor(c)} style={{ width:32, height:32, borderRadius:8, border:`3px solid ${color===c?"#2A2D40":"transparent"}`, background:c, cursor:"pointer" }} />
+          ))}
+        </div>
+
+        <div style={{ display:"flex", gap:10 }}>
+          <button onClick={onClose} style={{ flex:1, padding:"13px", borderRadius:11, border:"2px solid #E8E4DF", background:"#fff", color:"#555", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600 }}>Cancel</button>
+          <button onClick={submit} style={{ flex:1, padding:"13px", borderRadius:11, border:"none", background:"#3D405B", color:"#fff", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600, fontSize:14 }}>
+            {emoji} Add Service
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── DASHBOARD ─────────────────────────────────────────────────
+function Dashboard({ db, services }) {
+  const { sales, expenses } = db;
+  const todaySales = sales.filter(s=>s.date===todayStr()).reduce((a,b)=>a+b.amount,0);
+  const todayExp   = expenses.filter(e=>e.date===todayStr()).reduce((a,b)=>a+b.cost,0);
+  const thisMonth  = new Date().toISOString().slice(0,7);
+  const monthSales = sales.filter(s=>s.date.startsWith(thisMonth)).reduce((a,b)=>a+b.amount,0);
+  const monthExp   = expenses.filter(e=>e.date.startsWith(thisMonth)).reduce((a,b)=>a+b.cost,0);
+  const netProfit  = monthSales - monthExp;
+  const trend = [];
+  for (let i=6;i>=0;i--) { const d=new Date(); d.setDate(d.getDate()-i); const ds=d.toISOString().split("T")[0]; trend.push({ day:d.toLocaleDateString("en-US",{weekday:"short"}), Sales:sales.filter(x=>x.date===ds).reduce((a,b)=>a+b.amount,0), Expenses:expenses.filter(x=>x.date===ds).reduce((a,b)=>a+b.cost,0) }); }
+  const byService = services.map(s=>({ name:s.name, value:sales.filter(x=>x.service===s.name&&x.date.startsWith(thisMonth)).reduce((a,b)=>a+b.amount,0) })).filter(x=>x.value>0);
+  const getColor = (name) => { const s=services.find(x=>x.name===name); return s?s.color:"#aaa"; };
+  const recent = [...sales].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,5);
+  return (
+    <div>
+      <h1 style={{ margin:"0 0 6px", fontFamily:"'Playfair Display',serif", fontSize:28, color:"#2A2D40" }}>Overview</h1>
+      <p style={{ margin:"0 0 22px", color:"#888", fontSize:13 }}>This month's performance</p>
+      <div style={{ display:"flex", gap:14, marginBottom:18, flexWrap:"wrap" }}>
+        <StatCard label="Today's Sales"    value={TZS(todaySales)} color="#81B29A" icon="💰" sub={`Expenses: ${TZS(todayExp)}`} />
+        <StatCard label="Monthly Revenue"  value={TZS(monthSales)} color="#E07A5F" icon="📈" />
+        <StatCard label="Monthly Expenses" value={TZS(monthExp)}   color="#F2CC8F" icon="🧾" />
+        <StatCard label="Net Profit"       value={TZS(netProfit)}  color={netProfit>=0?"#81B29A":"#E07A5F"} icon="✅" />
+      </div>
+      <div style={{ display:"flex", gap:14, marginBottom:18, flexWrap:"wrap" }}>
+        <div style={{ background:"#fff", borderRadius:18, padding:22, flex:2, minWidth:280, boxShadow:"0 2px 10px rgba(0,0,0,.06)" }}>
+          <h3 style={{ margin:"0 0 18px", fontSize:14, color:"#2A2D40" }}>Sales vs Expenses — Last 7 Days</h3>
+          <ResponsiveContainer width="100%" height={190}>
+            <BarChart data={trend} barSize={13}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#F0EDE8" />
+              <XAxis dataKey="day" tick={{ fontSize:11,fill:"#888" }} axisLine={false} tickLine={false} />
+              <YAxis tick={{ fontSize:10,fill:"#888" }} axisLine={false} tickLine={false} tickFormatter={v=>`${v/1000}k`} />
+              <Tooltip formatter={v=>TZS(v)} contentStyle={{ borderRadius:10,border:"none",boxShadow:"0 4px 20px rgba(0,0,0,.1)",fontSize:12 }} />
+              <Bar dataKey="Sales"    fill="#81B29A" radius={[5,5,0,0]} />
+              <Bar dataKey="Expenses" fill="#E07A5F" radius={[5,5,0,0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+        <div style={{ background:"#fff", borderRadius:18, padding:22, flex:1, minWidth:200, boxShadow:"0 2px 10px rgba(0,0,0,.06)" }}>
+          <h3 style={{ margin:"0 0 14px", fontSize:14, color:"#2A2D40" }}>Revenue by Service</h3>
+          <ResponsiveContainer width="100%" height={150}>
+            <PieChart><Pie data={byService} dataKey="value" cx="50%" cy="50%" outerRadius={62} innerRadius={32} paddingAngle={3}>
+              {byService.map((e,i)=><Cell key={i} fill={getColor(e.name)} />)}
+            </Pie><Tooltip formatter={v=>TZS(v)} contentStyle={{ borderRadius:10,border:"none",fontSize:12 }} /></PieChart>
+          </ResponsiveContainer>
+          {byService.map(s=><div key={s.name} style={{ display:"flex",alignItems:"center",gap:6,fontSize:11,color:"#666",marginTop:5 }}><span style={{ width:9,height:9,borderRadius:2,background:getColor(s.name),display:"inline-block" }} />{s.name}</div>)}
+        </div>
+      </div>
+      <div style={{ background:"#fff", borderRadius:18, padding:22, boxShadow:"0 2px 10px rgba(0,0,0,.06)" }}>
+        <h3 style={{ margin:"0 0 14px", fontSize:14, color:"#2A2D40" }}>Recent Transactions</h3>
+        <table style={{ width:"100%", borderCollapse:"collapse" }}>
+          <thead><tr style={{ borderBottom:"2px solid #F0EDE8" }}>{["Date","Service","Amount"].map(h=><th key={h} style={{ textAlign:"left",padding:"0 0 10px",fontSize:10,color:"#aaa",fontWeight:600,textTransform:"uppercase",letterSpacing:.5 }}>{h}</th>)}</tr></thead>
+          <tbody>{recent.map(s=><tr key={s.id} style={{ borderBottom:"1px solid #F7F5F0" }}><td style={tS}>{s.date}</td><td style={tS}><ServiceBadge service={s.service} services={services} /></td><td style={{...tS,fontWeight:600}}>{TZS(s.amount)}</td></tr>)}</tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function WorkerHome({ db, user, setPage }) {
+  const count = db.sales.filter(s=>s.date===todayStr()).length;
+  const todaySales = db.sales.filter(s=>s.date===todayStr()).reduce((a,b)=>a+b.amount,0);
+  return (
+    <div>
+      <h1 style={{ margin:"0 0 6px", fontFamily:"'Playfair Display',serif", fontSize:28, color:"#2A2D40" }}>Good day, {user.name} 👋</h1>
+      <p style={{ margin:"0 0 26px", color:"#888" }}>What would you like to record today?</p>
+      <div style={{ display:"flex", gap:14, marginBottom:26, flexWrap:"wrap" }}>
+        <StatCard label="Today's Sales" value={TZS(todaySales)} color="#81B29A" icon="💰" sub={`${count} transactions recorded`} />
+      </div>
+      <div style={{ display:"flex", gap:14, flexWrap:"wrap" }}>
+        <button onClick={()=>setPage("sales")} style={{ flex:1,minWidth:180,padding:"34px 26px",borderRadius:20,border:"none",background:"#81B29A",color:"#fff",cursor:"pointer",textAlign:"center",fontFamily:"'DM Sans',sans-serif",boxShadow:"0 8px 26px #81B29A55" }}>
+          <span style={{ fontSize:34,marginBottom:10,display:"block" }}>💰</span>
+          <span style={{ fontSize:16,fontWeight:700,display:"block" }}>Record Sale</span>
+          <span style={{ fontSize:12,opacity:.8,marginTop:4,display:"block" }}>Restaurant, Go Kart, Paintball...</span>
+        </button>
+        <button onClick={()=>setPage("expenses")} style={{ flex:1,minWidth:180,padding:"34px 26px",borderRadius:20,border:"none",background:"#E07A5F",color:"#fff",cursor:"pointer",textAlign:"center",fontFamily:"'DM Sans',sans-serif",boxShadow:"0 8px 26px #E07A5F55" }}>
+          <span style={{ fontSize:34,marginBottom:10,display:"block" }}>🧾</span>
+          <span style={{ fontSize:16,fontWeight:700,display:"block" }}>Record Expense</span>
+          <span style={{ fontSize:12,opacity:.8,marginTop:4,display:"block" }}>Supplies, purchases, costs...</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── SALES PAGE ────────────────────────────────────────────────
+function SalesPage({ db, setDb, user, showToast, services, addService }) {
+  const isOwner = user.role === ROLES.OWNER;
+  const [form, setForm] = useState({ service: services[0]?.name || "", amount:"", notes:"", date:todayStr() });
+  const [filter, setFilter] = useState({ service:"All", from:"", to:"" });
+  const [showModal, setShowModal] = useState(false);
+
+  // keep form.service valid if services changes
+  const currentServiceNames = services.map(s=>s.name);
+  const safeService = currentServiceNames.includes(form.service) ? form.service : (services[0]?.name || "");
+
+  const submit = () => {
+    if (!form.amount || Number(form.amount)<=0) { showToast("Enter a valid amount","error"); return; }
+    setDb(p=>({...p, sales:[{ id:`s-${Date.now()}`, service:safeService, amount:Number(form.amount), notes:form.notes, date:form.date, createdBy:user.username },...p.sales]}));
+    setForm(f=>({...f, amount:"", notes:""}));
+    showToast("Sale recorded ✓");
+  };
+
+  const handleAddService = (newSvc) => {
+    addService(newSvc);
+    setForm(f=>({...f, service:newSvc.name}));
+  };
+
+  const filtered = db.sales
+    .filter(s=>filter.service==="All"||s.service===filter.service)
+    .filter(s=>!filter.from||s.date>=filter.from)
+    .filter(s=>!filter.to||s.date<=filter.to)
+    .sort((a,b)=>b.date.localeCompare(a.date));
+  const total = filtered.reduce((a,b)=>a+b.amount,0);
+
+  return (
+    <div>
+      {showModal && <AddServiceModal onAdd={handleAddService} onClose={()=>setShowModal(false)} existing={services} />}
+      <h1 style={pT}>Sales</h1>
+      <div style={{ display:"flex", gap:20, flexWrap:"wrap", alignItems:"flex-start" }}>
+        <div style={fC}>
+          <h3 style={fTi}>Record a Sale</h3>
+          <label style={lS}>Service</label>
+          <div style={{ display:"flex", flexWrap:"wrap", gap:7, marginBottom:6 }}>
+            {services.map(s=>(
+              <button key={s.id} onClick={()=>setForm(f=>({...f,service:s.name}))} style={{ padding:"9px 14px", borderRadius:9, border:"2px solid", borderColor:safeService===s.name?s.color:"#E8E4DF", background:safeService===s.name?s.color:"#fff", color:safeService===s.name?"#fff":"#555", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:5 }}>
+                <span>{s.emoji}</span>{s.name}
+
 
 const DEFAULT_SERVICES = [
   { id: "restaurant", name: "Restaurant", color: "#E07A5F", emoji: "🍽️" },
