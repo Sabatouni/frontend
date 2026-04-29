@@ -39,6 +39,10 @@ function saveStoredUsers(users) {
 
 const TZS      = (n) => `TZS ${Number(n).toLocaleString()}`;
 const todayStr = ()  => new Date().toISOString().split("T")[0];
+const toDateStr = (v) => {
+  if (!v) return "";
+  try { return new Date(v).toISOString().split("T")[0]; } catch { return String(v).split("T")[0]; }
+};
 const PALETTE  = ["#E07A5F","#3D405B","#81B29A","#F2CC8F","#9C89B8","#F0A500","#00B4D8","#E63946"];
 
 // ── APP ───────────────────────────────────────────────────────
@@ -51,7 +55,7 @@ export default function App() {
   const [toast,       setToast]       = useState(null);
   const [db, setDb] = useState({ sales: [], expenses: [] });
 
-  // ── SUPABASE SALES FETCH ────────────────────────────────────
+  // ── SUPABASE: SALES FETCH ───────────────────────────────────
   const fetchSales = async () => {
     if (!supabase) return;
     try {
@@ -61,34 +65,53 @@ export default function App() {
         .order("date", { ascending: false });
 
       if (error) {
-        console.error("Supabase fetch error:", error);
+        console.error("Supabase sales fetch error:", error);
         return;
       }
 
-      const salesWithDateStrings = (data || []).map(sale => ({
-        ...sale,
-        date: new Date(sale.date).toISOString().split("T")[0]
+      const normalized = (data || []).map(s => ({
+        ...s,
+        amount: Number(s.amount),
+        date:   toDateStr(s.date),
       }));
 
-      setDb(prev => ({ ...prev, sales: salesWithDateStrings }));
+      setDb(prev => ({ ...prev, sales: normalized }));
     } catch (err) {
       console.error("Sales fetch error:", err);
     }
   };
 
-  // ── API POLLING (EXPENSES & USERS ONLY) ─────────────────────
-  useEffect(() => {
-    const fetchExpensesAndUsers = () => {
-      Promise.all([
-        api.get("/api/expenses"),
-        api.get("/api/users").catch(() => ({ data: null })),
-      ])
-        .then(([expensesRes, usersRes]) => {
-          setDb(prev => ({
-            ...prev,
-            expenses: (expensesRes.data || []).map(e => ({ ...e, deleted: false })),
-          }));
+  // ── SUPABASE: EXPENSES FETCH ────────────────────────────────
+  const fetchExpenses = async () => {
+    if (!supabase) return;
+    try {
+      const { data, error } = await supabase
+        .from("expenses")
+        .select("*")
+        .order("date", { ascending: false });
 
+      if (error) {
+        console.error("Supabase expenses fetch error:", error);
+        return;
+      }
+
+      const normalized = (data || []).map(e => ({
+        ...e,
+        cost: Number(e.cost),
+        date: toDateStr(e.date),
+      }));
+
+      setDb(prev => ({ ...prev, expenses: normalized }));
+    } catch (err) {
+      console.error("Expenses fetch error:", err);
+    }
+  };
+
+  // ── SYNC LOOP (5s POLLING) ──────────────────────────────────
+  useEffect(() => {
+    const syncUsers = () => {
+      api.get("/api/users")
+        .then(usersRes => {
           if (usersRes?.data && Array.isArray(usersRes.data)) {
             const backendUsers = {};
             usersRes.data.forEach(u => {
@@ -105,41 +128,19 @@ export default function App() {
             }
           }
         })
-        .catch(err => console.error("API sync error:", err));
+        .catch(err => console.warn("Users sync skipped:", err.message));
     };
 
-    fetchSales();
-    fetchExpensesAndUsers();
-    const interval = setInterval(fetchExpensesAndUsers, 5000);
+    const syncAll = () => {
+      fetchSales();
+      fetchExpenses();
+      syncUsers();
+    };
+
+    syncAll();
+    const interval = setInterval(syncAll, 5000);
     return () => clearInterval(interval);
   }, []);
-
-  // ── UPDATE DB (EXPENSES ONLY) ───────────────────────────────
-  const updateDb = (updater) => {
-    setDb(prev => {
-      const updated = typeof updater === "function" ? updater(prev) : updater;
-      const prevExpenses = prev.expenses || [];
-      const newExpenses  = updated.expenses || [];
-
-      const addedExpenses = newExpenses.filter(
-        e => !prevExpenses.some(p => p.id === e.id)
-      );
-      addedExpenses.forEach(exp => {
-        api.post("/api/expenses", exp)
-          .catch(err => console.error("Expense POST error:", err));
-      });
-
-      const deletedExpenses = newExpenses.filter(
-        e => e.deleted && !prevExpenses.find(p => p.id === e.id)?.deleted
-      );
-      deletedExpenses.forEach(exp => {
-        api.delete(`/api/expenses/${exp.id}`)
-          .catch(err => console.error("Expense DELETE error:", err));
-      });
-
-      return updated;
-    });
-  };
 
   const showToast = (msg, type = "success") => {
     setToast({ msg, type });
@@ -173,11 +174,6 @@ export default function App() {
 
   if (!user) return <Login users={users} onLogin={setUser} />;
 
-  const visibleDb = {
-    sales:    db.sales,
-    expenses: db.expenses.filter(e => !e.deleted),
-  };
-
   return (
     <div style={{ display:"flex", height:"100vh", fontFamily:"'DM Sans', sans-serif", background:"#F7F5F0", overflow:"hidden" }}>
       <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=Playfair+Display:wght@600;700&display=swap" rel="stylesheet" />
@@ -187,11 +183,11 @@ export default function App() {
           <button onClick={() => setSidebarOpen(!sidebarOpen)} style={{ background:"none", border:"none", cursor:"pointer", fontSize:20, padding:4, color:"#555" }}>☰</button>
           <div style={{ fontSize:13, color:"#999" }}>{new Date().toLocaleDateString("en-US",{ weekday:"long", year:"numeric", month:"long", day:"numeric" })}</div>
         </div>
-        {page === "dashboard" && user.role === ROLES.OWNER  && <Dashboard db={visibleDb} services={services} />}
-        {page === "dashboard" && user.role === ROLES.WORKER && <WorkerHome db={visibleDb} user={user} setPage={setPage} />}
-        {page === "sales"     && <SalesPage db={visibleDb} user={user} showToast={showToast} services={services} addService={addService} fetchSales={fetchSales} />}
-        {page === "expenses"  && <ExpensesPage db={db} visibleDb={visibleDb} updateDb={updateDb} user={user} showToast={showToast} />}
-        {page === "reports"   && user.role === ROLES.OWNER && <ReportsPage db={visibleDb} services={services} />}
+        {page === "dashboard" && user.role === ROLES.OWNER  && <Dashboard db={db} services={services} />}
+        {page === "dashboard" && user.role === ROLES.WORKER && <WorkerHome db={db} user={user} setPage={setPage} />}
+        {page === "sales"     && <SalesPage    db={db} user={user} showToast={showToast} services={services} addService={addService} fetchSales={fetchSales} />}
+        {page === "expenses"  && <ExpensesPage db={db} user={user} showToast={showToast} fetchExpenses={fetchExpenses} />}
+        {page === "reports"   && user.role === ROLES.OWNER && <ReportsPage db={db} services={services} />}
         {page === "users"     && user.role === ROLES.OWNER && <UsersPage users={users} onAddUser={addUser} showToast={showToast} />}
       </main>
       {toast && (
@@ -386,11 +382,11 @@ function AddServiceModal({ onAdd, onClose, existing }) {
 // ── DASHBOARD (OWNER) ──────────────────────────────────────────
 function Dashboard({ db, services }) {
   const { sales, expenses } = db;
-  const todaySales = sales.filter(s => s.date === todayStr()).reduce((a,b) => a+b.amount, 0);
-  const todayExp   = expenses.filter(e => e.date === todayStr()).reduce((a,b) => a+b.cost, 0);
+  const todaySales = sales.filter(s => s.date === todayStr()).reduce((a,b) => a + Number(b.amount), 0);
+  const todayExp   = expenses.filter(e => e.date === todayStr()).reduce((a,b) => a + Number(b.cost), 0);
   const thisMonth  = new Date().toISOString().slice(0,7);
-  const monthSales = sales.filter(s => s.date.startsWith(thisMonth)).reduce((a,b) => a+b.amount, 0);
-  const monthExp   = expenses.filter(e => e.date.startsWith(thisMonth)).reduce((a,b) => a+b.cost, 0);
+  const monthSales = sales.filter(s => s.date.startsWith(thisMonth)).reduce((a,b) => a + Number(b.amount), 0);
+  const monthExp   = expenses.filter(e => e.date.startsWith(thisMonth)).reduce((a,b) => a + Number(b.cost), 0);
   const netProfit  = monthSales - monthExp;
 
   const trend = [];
@@ -399,13 +395,13 @@ function Dashboard({ db, services }) {
     const ds = d.toISOString().split("T")[0];
     trend.push({
       day:      d.toLocaleDateString("en-US", { weekday:"short" }),
-      Sales:    sales.filter(x => x.date === ds).reduce((a,b) => a+b.amount, 0),
-      Expenses: expenses.filter(x => x.date === ds).reduce((a,b) => a+b.cost, 0),
+      Sales:    sales.filter(x => x.date === ds).reduce((a,b) => a + Number(b.amount), 0),
+      Expenses: expenses.filter(x => x.date === ds).reduce((a,b) => a + Number(b.cost), 0),
     });
   }
 
   const byService = services
-    .map(s => ({ name:s.name, value: sales.filter(x => x.service===s.name && x.date.startsWith(thisMonth)).reduce((a,b) => a+b.amount, 0) }))
+    .map(s => ({ name:s.name, value: sales.filter(x => x.service===s.name && x.date.startsWith(thisMonth)).reduce((a,b) => a + Number(b.amount), 0) }))
     .filter(x => x.value > 0);
 
   const getColor = (name) => { const s = services.find(x => x.name===name); return s ? s.color : "#aaa"; };
@@ -480,7 +476,7 @@ function Dashboard({ db, services }) {
 
 // ── WORKER HOME ────────────────────────────────────────────────
 function WorkerHome({ db, user, setPage }) {
-  const todaySales = db.sales.filter(s => s.date === todayStr()).reduce((a,b) => a+b.amount, 0);
+  const todaySales = db.sales.filter(s => s.date === todayStr()).reduce((a,b) => a + Number(b.amount), 0);
   const todayCount = db.sales.filter(s => s.date === todayStr()).length;
   return (
     <div>
@@ -531,12 +527,12 @@ function SalesPage({ db, user, showToast, services, addService, fetchSales }) {
         .from("sales")
         .insert([{
           service: safeService,
-          amount: Number(form.amount),
-          date: new Date(form.date).toISOString()
+          amount:  Number(form.amount),
+          date:    new Date(form.date).toISOString(),
         }]);
 
       if (error) {
-        console.error("Supabase insert error:", error);
+        console.error("Supabase sales insert error:", error);
         showToast("Failed to save sale", "error");
         return;
       }
@@ -562,7 +558,7 @@ function SalesPage({ db, user, showToast, services, addService, fetchSales }) {
         .eq("id", id);
 
       if (error) {
-        console.error("Supabase delete error:", error);
+        console.error("Supabase sales delete error:", error);
         showToast("Failed to delete sale", "error");
         return;
       }
@@ -587,7 +583,7 @@ function SalesPage({ db, user, showToast, services, addService, fetchSales }) {
     .filter(s => !filter.to   || s.date <= filter.to)
     .sort((a,b) => b.date.localeCompare(a.date));
 
-  const total = filtered.reduce((a,b) => a+b.amount, 0);
+  const total = filtered.reduce((a,b) => a + Number(b.amount), 0);
 
   return (
     <div>
@@ -658,75 +654,111 @@ function SalesPage({ db, user, showToast, services, addService, fetchSales }) {
   );
 }
 
-// ── EXPENSES PAGE ──────────────────────────────────────────────
-function ExpensesPage({ db, visibleDb, updateDb, user, showToast }) {
+// ── EXPENSES PAGE (SUPABASE) ───────────────────────────────────
+function ExpensesPage({ db, user, showToast, fetchExpenses }) {
   const isOwner = user.role === ROLES.OWNER;
-  const [form,      setForm]      = useState({ category:EXPENSE_CATS[0], item:"", cost:"", date:todayStr() });
+  const [form,      setForm]      = useState({ category: EXPENSE_CATS[0], item: "", cost: "", date: todayStr() });
   const [confirmId, setConfirmId] = useState(null);
 
-  const submit = () => {
-    if (!form.item.trim())                  { showToast("Enter an item name","error"); return; }
-    if (!form.cost || Number(form.cost)<=0) { showToast("Enter a valid cost","error"); return; }
-    updateDb(p => ({
-      ...p,
-      expenses: [
-        { id:`e-${Date.now()}`, category:form.category, item:form.item, cost:Number(form.cost), date:form.date, createdBy:user.username, deleted:false },
-        ...p.expenses,
-      ],
-    }));
-    setForm(f => ({ ...f, item:"", cost:"" }));
-    showToast("Expense recorded ✓");
+  const submit = async () => {
+    if (!form.item.trim())                    { showToast("Enter an item name", "error"); return; }
+    if (!form.cost || Number(form.cost) <= 0) { showToast("Enter a valid cost",  "error"); return; }
+    if (!supabase)                            { showToast("Database not configured", "error"); return; }
+
+    try {
+      const { error } = await supabase
+        .from("expenses")
+        .insert([{
+          category:   form.category,
+          item:       form.item.trim(),
+          cost:       Number(form.cost),
+          date:       new Date(form.date).toISOString(),
+          created_by: user.username,
+        }]);
+
+      if (error) {
+        console.error("Supabase expenses insert error:", error);
+        showToast("Failed to save expense", "error");
+        return;
+      }
+
+      await fetchExpenses();
+      setForm(f => ({ ...f, item: "", cost: "" }));
+      showToast("Expense recorded ✓");
+    } catch (err) {
+      console.error("Expense insert error:", err);
+      showToast("Failed to save expense", "error");
+    }
   };
 
-  const softDelete = (id) => {
-    updateDb(p => ({ ...p, expenses: p.expenses.map(e => e.id===id ? { ...e, deleted:true } : e) }));
-    showToast("Expense deleted");
-    setConfirmId(null);
+  const hardDelete = async (id) => {
+    if (!supabase) { showToast("Database not configured", "error"); return; }
+
+    try {
+      const { error } = await supabase
+        .from("expenses")
+        .delete()
+        .eq("id", id);
+
+      if (error) {
+        console.error("Supabase expenses delete error:", error);
+        showToast("Failed to delete expense", "error");
+        return;
+      }
+
+      await fetchExpenses();
+      showToast("Expense deleted");
+      setConfirmId(null);
+    } catch (err) {
+      console.error("Expense delete error:", err);
+      showToast("Failed to delete expense", "error");
+    }
   };
 
-  const sorted = [...visibleDb.expenses].sort((a,b) => b.date.localeCompare(a.date));
+  const sorted = [...db.expenses].sort((a, b) => b.date.localeCompare(a.date));
+  const total  = db.expenses.reduce((a, b) => a + Number(b.cost), 0);
 
   return (
     <div>
-      {confirmId && <ConfirmModal message="Delete this expense? This cannot be undone." onConfirm={() => softDelete(confirmId)} onCancel={() => setConfirmId(null)} />}
+      {confirmId && <ConfirmModal message="Delete this expense? This cannot be undone." onConfirm={() => hardDelete(confirmId)} onCancel={() => setConfirmId(null)} />}
       <h1 style={pT}>Expenses</h1>
       <div style={{ display:"flex", gap:20, flexWrap:"wrap", alignItems:"flex-start" }}>
         <div style={fC}>
           <h3 style={fTi}>Record an Expense</h3>
           <label style={lS}>Category</label>
-          <select value={form.category} onChange={e => setForm(f => ({ ...f, category:e.target.value }))} style={{ ...iS, marginBottom:14 }}>
+          <select value={form.category} onChange={e => setForm(f => ({ ...f, category: e.target.value }))} style={{ ...iS, marginBottom:14 }}>
             {EXPENSE_CATS.map(c => <option key={c}>{c}</option>)}
           </select>
           <label style={lS}>Item / Description</label>
-          <input placeholder="e.g. Potato sack" value={form.item} onChange={e => setForm(f => ({ ...f, item:e.target.value }))} style={{ ...iS, marginBottom:14 }} />
+          <input placeholder="e.g. Potato sack" value={form.item} onChange={e => setForm(f => ({ ...f, item: e.target.value }))} style={{ ...iS, marginBottom:14 }} />
           <label style={lS}>Cost (TZS)</label>
-          <input type="number" placeholder="e.g. 20000" value={form.cost} onChange={e => setForm(f => ({ ...f, cost:e.target.value }))} style={{ ...iS, fontSize:22, fontWeight:700, marginBottom:14 }} />
+          <input type="number" placeholder="e.g. 20000" value={form.cost} onChange={e => setForm(f => ({ ...f, cost: e.target.value }))} style={{ ...iS, fontSize:22, fontWeight:700, marginBottom:14 }} />
           <label style={lS}>Date</label>
-          <input type="date" value={form.date} onChange={e => setForm(f => ({ ...f, date:e.target.value }))} style={{ ...iS, marginBottom:22 }} />
+          <input type="date" value={form.date} onChange={e => setForm(f => ({ ...f, date: e.target.value }))} style={{ ...iS, marginBottom:22 }} />
           <button onClick={submit} style={{ ...sB, background:"#E07A5F" }}>✓ Record Expense</button>
         </div>
         {isOwner && (
           <div style={{ flex:2, minWidth:0 }}>
             <div style={{ background:"#fff", borderRadius:18, padding:22, boxShadow:"0 2px 10px rgba(0,0,0,.06)" }}>
               <div style={{ fontWeight:700, color:"#2A2D40", marginBottom:14, fontSize:13 }}>
-                Total: {TZS(visibleDb.expenses.reduce((a,b) => a+b.cost, 0))}
+                Total: {TZS(total)}
               </div>
               <table style={{ width:"100%", borderCollapse:"collapse" }}>
                 <thead>
                   <tr style={{ borderBottom:"2px solid #F0EDE8" }}>
-                    {["Date","Category","Item","Cost","By",""].map((h,i) => (
+                    {["Date","Category","Item","Cost","By",""].map((h, i) => (
                       <th key={i} style={{ textAlign:"left", padding:"0 0 10px", fontSize:10, color:"#aaa", fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {sorted.slice(0,40).map(e => (
+                  {sorted.slice(0, 40).map(e => (
                     <tr key={e.id} style={{ borderBottom:"1px solid #F7F5F0" }}>
                       <td style={tS}>{e.date}</td>
                       <td style={tS}>{e.category}</td>
                       <td style={tS}>{e.item}</td>
                       <td style={{ ...tS, fontWeight:600, color:"#E07A5F" }}>{TZS(e.cost)}</td>
-                      <td style={{ ...tS, color:"#888", fontSize:12 }}>{e.createdBy || "—"}</td>
+                      <td style={{ ...tS, color:"#888", fontSize:12 }}>{e.created_by || "—"}</td>
                       <td style={tS}>
                         <button onClick={() => setConfirmId(e.id)} style={{ background:"none", border:"1px solid #E07A5F44", color:"#E07A5F", borderRadius:6, padding:"3px 8px", fontSize:11, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>🗑️</button>
                       </td>
@@ -753,22 +785,22 @@ function ReportsPage({ db, services }) {
   const expenses = db.expenses.filter(e => !range.from || e.date >= range.from).filter(e => !range.to || e.date <= range.to);
 
   const dateMap = {};
-  sales.forEach(s    => { dateMap[s.date] = dateMap[s.date] || { date:s.date, Sales:0, Expenses:0 }; dateMap[s.date].Sales    += s.amount; });
-  expenses.forEach(e => { dateMap[e.date] = dateMap[e.date] || { date:e.date, Sales:0, Expenses:0 }; dateMap[e.date].Expenses += e.cost;   });
+  sales.forEach(s    => { dateMap[s.date] = dateMap[s.date] || { date:s.date, Sales:0, Expenses:0 }; dateMap[s.date].Sales    += Number(s.amount); });
+  expenses.forEach(e => { dateMap[e.date] = dateMap[e.date] || { date:e.date, Sales:0, Expenses:0 }; dateMap[e.date].Expenses += Number(e.cost);   });
 
   const trend = Object.values(dateMap).sort((a,b) => a.date.localeCompare(b.date)).slice(-30);
 
   const byService = services
-    .map(s => ({ name:s.name, value: db.sales.filter(x => x.service===s.name && (!range.from||x.date>=range.from) && (!range.to||x.date<=range.to)).reduce((a,b) => a+b.amount, 0) }))
+    .map(s => ({ name:s.name, value: db.sales.filter(x => x.service===s.name && (!range.from||x.date>=range.from) && (!range.to||x.date<=range.to)).reduce((a,b) => a + Number(b.amount), 0) }))
     .filter(x => x.value > 0);
 
-  const totalSales = sales.reduce((a,b) => a+b.amount, 0);
-  const totalExp   = expenses.reduce((a,b) => a+b.cost, 0);
+  const totalSales = sales.reduce((a,b) => a + Number(b.amount), 0);
+  const totalExp   = expenses.reduce((a,b) => a + Number(b.cost),   0);
 
   const exportCSV = () => {
     const rows = [
       ["Date","Service","Amount"],
-      ...sales.map(s => [s.date, s.service, s.amount]),
+      ...sales.map(s => [s.date, s.service, Number(s.amount)]),
     ];
     const blob = new Blob([rows.map(r => r.join(",")).join("\n")], { type:"text/csv" });
     const a = document.createElement("a");
@@ -856,9 +888,9 @@ function UsersPage({ users, onAddUser, showToast }) {
   const [err,  setErr]  = useState("");
 
   const submit = () => {
-    if (!form.username.trim())                            { setErr("Username required."); return; }
+    if (!form.username.trim())                             { setErr("Username required."); return; }
     if (!form.password.trim() || form.password.length < 4) { setErr("Password must be at least 4 characters."); return; }
-    if (users[form.username])                             { setErr("Username already exists."); return; }
+    if (users[form.username])                              { setErr("Username already exists."); return; }
     onAddUser({ username:form.username.trim(), password:form.password, role:form.role, name:form.name.trim() || form.username.trim() });
     setForm({ username:"", password:"", role:ROLES.WORKER, name:"" });
     setErr("");
