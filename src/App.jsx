@@ -8,8 +8,9 @@ import {
 } from "recharts"
 import * as XLSX from "xlsx"
 import { useAuth } from "./context/AuthContext"
-import Login from "./Login"
-import { supabase } from "./supabaseClient"
+
+import { supabase } from "./api/supabaseClient"
+import Login from "./pages/Login"
 
 const TZS = (n) => `TZS ${Number(n || 0).toLocaleString()}`
 const todayStr = () => new Date().toISOString().split("T")[0]
