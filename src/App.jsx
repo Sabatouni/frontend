@@ -7,15 +7,18 @@ import {
   PieChart,
   ResponsiveContainer,
   Tooltip,
-  XAxis, YAxis,
+  XAxis,
+  YAxis,
 } from "recharts"
-import "./App.css"
-import { useAuth } from "./AuthContext"
-import Login from "./Login"
-import { supabase } from "./supabaseClient"
+import { supabase } from "./api/supabaseClient"
+import { useAuth } from "./context/AuthContext"
+import Login from "./pages/Login"
+
+const TZS = (n) => `TZS ${Number(n || 0).toLocaleString()}`
 
 export default function App() {
-  const { user, role } = useAuth()
+  const { user } = useAuth()
+  const isAdmin = user?.role === "owner"
 
   const [sales, setSales] = useState([])
   const [expenses, setExpenses] = useState([])
@@ -23,22 +26,16 @@ export default function App() {
   const [users, setUsers] = useState([])
   const [page, setPage] = useState("dashboard")
 
-  const [newSale, setNewSale] = useState({ service_id: "", amount: "" })
+  const [newSale, setNewSale] = useState({ service: "", amount: "" })
   const [newExpense, setNewExpense] = useState({ category: "", cost: "" })
 
   const [showAddService, setShowAddService] = useState(false)
-  const [newService, setNewService] = useState({ name: "", color: "#8884d8" })
+  const [newService, setNewService] = useState({ name: "", color: "#81B29A" })
 
-  // ---- Fetch from Supabase ----
+  // 🔄 FETCH DATA
   const fetchAll = async () => {
-    const { data: s } = await supabase
-      .from("sales")
-      .select("*")
-      .order("date", { ascending: false })
-    const { data: e } = await supabase
-      .from("expenses")
-      .select("*")
-      .order("date", { ascending: false })
+    const { data: s } = await supabase.from("sales").select("*").order("date", { ascending: false })
+    const { data: e } = await supabase.from("expenses").select("*").order("date", { ascending: false })
     const { data: srv } = await supabase.from("services").select("*")
     const { data: u } = await supabase.from("users").select("*")
 
@@ -54,109 +51,104 @@ export default function App() {
     return () => clearInterval(i)
   }, [])
 
-  // ---- Event listeners for Add Service ----
-  useEffect(() => {
-    const openModal = () => setShowAddService(true)
-    window.addEventListener("openAddService", openModal)
-    return () => window.removeEventListener("openAddService", openModal)
-  }, [])
-
-  // ---- Insert Operations ----
+  // 🟢 ADD SALE
   const handleAddSale = async () => {
-    if (!newSale.service_id || !newSale.amount) return
+    if (!newSale.service || !newSale.amount) return
+
     await supabase.from("sales").insert([
       {
-        service_id: newSale.service_id,
+        service: newSale.service,
         amount: Number(newSale.amount),
         date: new Date().toISOString(),
-        user_id: user.id,
+        user_id: user?.id,
       },
     ])
-    setNewSale({ service_id: "", amount: "" })
+
+    setNewSale({ service: "", amount: "" })
     fetchAll()
   }
 
+  // 🔴 ADD EXPENSE
   const handleAddExpense = async () => {
     if (!newExpense.category || !newExpense.cost) return
+
     await supabase.from("expenses").insert([
       {
         category: newExpense.category,
         cost: Number(newExpense.cost),
         date: new Date().toISOString(),
-        user_id: user.id,
+        user_id: user?.id,
       },
     ])
+
     setNewExpense({ category: "", cost: "" })
     fetchAll()
   }
 
+  // ➕ ADD SERVICE
   const handleAddService = async () => {
     if (!newService.name) return
+
     await supabase.from("services").insert([
       {
-        id: newService.name.toLowerCase(),
+        id: newService.name.toLowerCase().replace(/\s+/g, "-"),
         name: newService.name,
         color: newService.color,
       },
     ])
-    setNewService({ name: "", color: "#8884d8" })
+
     setShowAddService(false)
+    setNewService({ name: "", color: "#81B29A" })
     fetchAll()
   }
 
-  // ---- Derived Calculations ----
+  // 📊 CALCULATIONS
   const totalSales = sales.reduce((a, s) => a + Number(s.amount || 0), 0)
   const totalExpenses = expenses.reduce((a, e) => a + Number(e.cost || 0), 0)
   const netProfit = totalSales - totalExpenses
 
   if (!user) return <Login />
 
-  // ---- UI ----
   return (
     <div className="app">
+
       {/* SIDEBAR */}
       <aside className="sidebar">
-        <h2>POS System</h2>
-        <button type="button" onClick={() => setPage("dashboard")}>
-          Dashboard
-        </button>
-        <button type="button" onClick={() => setPage("sales")}>
-          Sales
-        </button>
-        <button type="button" onClick={() => setPage("expenses")}>
-          Expenses
-        </button>
-        <button type="button" onClick={() => setPage("reports")}>
-          Reports
-        </button>
+        <h2>Swahili POS</h2>
+
+        <button type="button" onClick={() => setPage("dashboard")}>Dashboard</button>
+        <button type="button" onClick={() => setPage("sales")}>Sales</button>
+        <button type="button" onClick={() => setPage("expenses")}>Expenses</button>
+        <button type="button" onClick={() => setPage("reports")}>Reports</button>
       </aside>
 
-      {/* MAIN CONTENT */}
+      {/* MAIN */}
       <main>
+
+        {/* DASHBOARD */}
         {page === "dashboard" && (
-          <div className="dashboard">
+          <>
             <h1>Dashboard</h1>
+
             <div className="cards">
-              <div className="card">Total Sales: ${totalSales}</div>
-              <div className="card">Total Expenses: ${totalExpenses}</div>
-              <div className="card">Net Profit: ${netProfit}</div>
+              <div>Total Sales: {TZS(totalSales)}</div>
+              <div>Total Expenses: {TZS(totalExpenses)}</div>
+              <div>Profit: {TZS(netProfit)}</div>
             </div>
 
-            <div className="charts">
+            <div style={{ display: "flex" }}>
               <ResponsiveContainer width="50%" height={300}>
                 <PieChart>
                   <Pie
-                    data={services.map(srv => ({
-                      name: srv.name,
-                      value: sales.filter(s => s.service_id === srv.id)
-                                  .reduce((a, b) => a + Number(b.amount || 0), 0),
+                    data={services.map(s => ({
+                      name: s.name,
+                      value: sales.filter(x => x.service === s.id)
+                        .reduce((a, b) => a + Number(b.amount || 0), 0),
                     }))}
                     dataKey="value"
-                    outerRadius={80}
-                    label
                   >
                     {services.map((s, i) => (
-                      <Cell key={i} fill={s.color || "#8884d8"} />
+                      <Cell key={i} fill={s.color || "#999"} />
                     ))}
                   </Pie>
                   <Tooltip />
@@ -164,55 +156,42 @@ export default function App() {
               </ResponsiveContainer>
 
               <ResponsiveContainer width="50%" height={300}>
-                <LineChart data={sales.slice(0, 10).reverse()}>
+                <LineChart data={sales.slice(0, 10)}>
                   <XAxis dataKey="date" />
                   <YAxis />
                   <Tooltip />
-                  <Line type="monotone" dataKey="amount" stroke="#8884d8" />
+                  <Line dataKey="amount" stroke="#81B29A" />
                 </LineChart>
               </ResponsiveContainer>
             </div>
-          </div>
+          </>
         )}
 
+        {/* SALES */}
         {page === "sales" && (
-          <div className="sales-page">
+          <>
             <h1>Sales</h1>
-            <div className="form">
-              <select
-                value={newSale.service_id}
-                onChange={(e) =>
-                  setNewSale({ ...newSale, service_id: e.target.value })
-                }
-              >
-                <option value="">Select service</option>
-                {services.map((srv) => (
-                  <option key={srv.id} value={srv.id}>
-                    {srv.name}
-                  </option>
-                ))}
-              </select>
-              <input
-                type="number"
-                placeholder="Amount"
-                value={newSale.amount}
-                onChange={(e) =>
-                  setNewSale({ ...newSale, amount: e.target.value })
-                }
-              />
-              <button type="button" onClick={handleAddSale}>
-                Add Sale
+
+            <select onChange={e => setNewSale({ ...newSale, service: e.target.value })}>
+              <option value="">Select service</option>
+              {services.map(s => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            </select>
+
+            <input
+              type="number"
+              placeholder="Amount"
+              onChange={e => setNewSale({ ...newSale, amount: e.target.value })}
+            />
+
+            <button type="button" onClick={handleAddSale}>Add Sale</button>
+
+            {isAdmin && (
+              <button type="button" onClick={() => setShowAddService(true)}>
+                + Add Service
               </button>
-              {role === "admin" && (
-                <button
-                  type="button"
-                  className="secondary"
-                  onClick={() => window.dispatchEvent(new Event("openAddService"))}
-                >
-                  Add Service
-                </button>
-              )}
-            </div>
+            )}
 
             <table>
               <thead>
@@ -220,111 +199,80 @@ export default function App() {
                   <th>Date</th>
                   <th>Service</th>
                   <th>Amount</th>
-                  <th>User</th>
                 </tr>
               </thead>
               <tbody>
-                {sales.map((s, i) => (
-                  <tr key={i}>
+                {sales.map(s => (
+                  <tr key={s.id}>
                     <td>{new Date(s.date).toLocaleDateString()}</td>
-                    <td>{services.find(x => x.id === s.service_id)?.name || "—"}</td>
-                    <td>${Number(s.amount)}</td>
-                    <td>{users.find(x => x.id === s.user_id)?.name || "—"}</td>
+                    <td>{services.find(x => x.id === s.service)?.name}</td>
+                    <td>{TZS(s.amount)}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
-          </div>
+          </>
         )}
 
+        {/* EXPENSES */}
         {page === "expenses" && (
-          <div className="expenses-page">
+          <>
             <h1>Expenses</h1>
-            <div className="form">
-              <input
-                type="text"
-                placeholder="Category"
-                value={newExpense.category}
-                onChange={(e) =>
-                  setNewExpense({ ...newExpense, category: e.target.value })
-                }
-              />
-              <input
-                type="number"
-                placeholder="Cost"
-                value={newExpense.cost}
-                onChange={(e) =>
-                  setNewExpense({ ...newExpense, cost: e.target.value })
-                }
-              />
-              <button type="button" onClick={handleAddExpense}>
-                Add Expense
-              </button>
-            </div>
+
+            <input
+              placeholder="Category"
+              onChange={e => setNewExpense({ ...newExpense, category: e.target.value })}
+            />
+
+            <input
+              type="number"
+              placeholder="Cost"
+              onChange={e => setNewExpense({ ...newExpense, cost: e.target.value })}
+            />
+
+            <button type="button" onClick={handleAddExpense}>
+              Add Expense
+            </button>
 
             <table>
-              <thead>
-                <tr>
-                  <th>Date</th>
-                  <th>Category</th>
-                  <th>Cost</th>
-                  <th>User</th>
-                </tr>
-              </thead>
               <tbody>
-                {expenses.map((e, i) => (
-                  <tr key={i}>
-                    <td>{new Date(e.date).toLocaleDateString()}</td>
+                {expenses.map(e => (
+                  <tr key={e.id}>
                     <td>{e.category}</td>
-                    <td>${Number(e.cost)}</td>
-                    <td>{users.find(x => x.id === e.user_id)?.name || "—"}</td>
+                    <td>{TZS(e.cost)}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
-          </div>
+          </>
         )}
 
+        {/* REPORTS */}
         {page === "reports" && (
-          <div className="reports-page">
+          <>
             <h1>Reports</h1>
-            <p>Total Sales: ${totalSales}</p>
-            <p>Total Expenses: ${totalExpenses}</p>
-            <p>Net Profit: ${netProfit}</p>
-            {/* CSV / Excel export can be added here based on your existing lib */}
-          </div>
+            <p>Total Sales: {TZS(totalSales)}</p>
+            <p>Total Expenses: {TZS(totalExpenses)}</p>
+            <p>Profit: {TZS(netProfit)}</p>
+          </>
         )}
+
       </main>
 
-      {/* MODAL: Add Service */}
-      {showAddService && role === "admin" && (
-        <div className="modal-overlay">
-          <div className="modal">
-            <h2>Add New Service</h2>
-            <input
-              type="text"
-              placeholder="Service name"
-              value={newService.name}
-              onChange={(e) =>
-                setNewService({ ...newService, name: e.target.value })
-              }
-            />
-            <input
-              type="color"
-              value={newService.color}
-              onChange={(e) =>
-                setNewService({ ...newService, color: e.target.value })
-              }
-            />
-            <div className="actions">
-              <button type="button" onClick={handleAddService}>
-                Save
-              </button>
-              <button type="button" className="secondary" onClick={() => setShowAddService(false)}>
-                Cancel
-              </button>
-            </div>
-          </div>
+      {/* ADD SERVICE MODAL */}
+      {showAddService && isAdmin && (
+        <div className="modal">
+          <input
+            placeholder="Service name"
+            onChange={e => setNewService({ ...newService, name: e.target.value })}
+          />
+          <input
+            type="color"
+            value={newService.color}
+            onChange={e => setNewService({ ...newService, color: e.target.value })}
+          />
+          <button onClick={handleAddService}>Save</button>
+          <button onClick={() => setShowAddService(false)}>Cancel</button>
         </div>
       )}
     </div>
