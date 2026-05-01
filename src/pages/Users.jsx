@@ -1,65 +1,177 @@
 import { useEffect, useState } from "react";
-import { api } from "../api/client.js";
+import { supabase } from "../api/supabaseClient";
 
+const API = "http://localhost:3001/admin";
 const ROLES = ["WORKER", "ADMIN"];
 
 export default function Users() {
-  const [items, setItems] = useState([]);
-  const [form, setForm] = useState({ username: "", password: "", fullName: "", role: "WORKER" });
+  const [users, setUsers] = useState([]);
   const [err, setErr] = useState("");
 
-  async function load() { try { setItems(await api.listUsers()); } catch (e) { setErr(e.message); } }
-  useEffect(() => { load(); }, []);
-
-  async function submit(e) {
-    e.preventDefault(); setErr("");
-    try { await api.register(form); setForm({ username: "", password: "", fullName: "", role: "WORKER" }); load(); }
-    catch (e) { setErr(e.message); }
+  // 🔑 Get access token
+  async function getToken() {
+    const { data } = await supabase.auth.getSession();
+    return data.session?.access_token;
   }
 
-  async function toggleActive(u)  { try { await api.setUserActive(u.id, !u.active); load(); } catch (e) { setErr(e.message); } }
-  async function changeRole(u, r) { try { await api.setUserRole(u.id, r); load(); } catch (e) { setErr(e.message); } }
-  async function resetPw(u) {
-    const pw = prompt(`New password for ${u.username} (min 6 chars):`);
-    if (!pw) return;
-    try { await api.resetUserPassword(u.id, pw); alert("Password reset."); } catch (e) { setErr(e.message); }
+  // 🔄 Load users
+  async function load() {
+    try {
+      const token = await getToken();
+
+      const res = await fetch(`${API}/users`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to load users");
+
+      setUsers(data);
+    } catch (e) {
+      setErr(e.message);
+    }
+  }
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  // 🔄 Change role
+  async function changeRole(id, role) {
+    try {
+      const token = await getToken();
+
+      const res = await fetch(`${API}/role`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ userId: id, role }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+
+      load();
+    } catch (e) {
+      setErr(e.message);
+    }
+  }
+
+  // 🔄 Enable / disable
+  async function toggleActive(id, active) {
+    try {
+      const token = await getToken();
+
+      const res = await fetch(`${API}/active`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ userId: id, active }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+
+      load();
+    } catch (e) {
+      setErr(e.message);
+    }
+  }
+
+  // 🔄 Reset password
+  async function reset(email) {
+    try {
+      const token = await getToken();
+
+      const res = await fetch(`${API}/reset-password`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ email }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+
+      alert("Password reset email sent");
+    } catch (e) {
+      setErr(e.message);
+    }
   }
 
   return (
     <>
-      <h2 style={{ marginTop: 0 }}>Create user</h2>
-      <form className="panel" onSubmit={submit}>
-        <div className="form-grid">
-          <label>Username<input required minLength={3} value={form.username} onChange={(e)=>setForm({...form, username: e.target.value})}/></label>
-          <label>Password<input type="password" required minLength={6} value={form.password} onChange={(e)=>setForm({...form, password: e.target.value})}/></label>
-          <label>Full name<input value={form.fullName} onChange={(e)=>setForm({...form, fullName: e.target.value})}/></label>
-          <label>Role<select value={form.role} onChange={(e)=>setForm({...form, role: e.target.value})}>{ROLES.map(r=><option key={r}>{r}</option>)}</select></label>
-        </div>
-        {err && <div className="error">{err}</div>}
-        <button className="primary" type="submit" style={{ marginTop: 12 }}>Create</button>
-      </form>
+      <h2 style={{ marginTop: 0 }}>Users</h2>
 
-      <h2>All users</h2>
+      {err && <div className="error">{err}</div>}
+
       <div className="panel" style={{ padding: 0 }}>
         <table>
-          <thead><tr><th>Username</th><th>Name</th><th>Role</th><th>Active</th><th>Created</th><th></th></tr></thead>
+          <thead>
+            <tr>
+              <th>Email</th>
+              <th>Role</th>
+              <th>Active</th>
+              <th>Created</th>
+              <th></th>
+            </tr>
+          </thead>
+
           <tbody>
-            {items.map((u) => (
+            {users.map((u) => (
               <tr key={u.id}>
-                <td>{u.username}</td><td>{u.fullName}</td>
+                <td>{u.email}</td>
+
                 <td>
-                  <select value={u.role} onChange={(e)=>changeRole(u, e.target.value)}>
-                    {ROLES.map(r=><option key={r}>{r}</option>)}
+                  <select
+                    value={u.user_metadata?.role || "WORKER"}
+                    onChange={(e) =>
+                      changeRole(u.id, e.target.value)
+                    }
+                  >
+                    {ROLES.map((r) => (
+                      <option key={r}>{r}</option>
+                    ))}
                   </select>
                 </td>
-                <td>{u.active ? "yes" : "no"}</td>
-                <td>{u.createdAt ? new Date(u.createdAt).toLocaleDateString() : ""}</td>
+
+                <td>{u.banned ? "no" : "yes"}</td>
+
+                <td>
+                  {u.created_at
+                    ? new Date(u.created_at).toLocaleDateString()
+                    : ""}
+                </td>
+
                 <td className="row">
-                  <button onClick={()=>toggleActive(u)}>{u.active ? "Disable" : "Enable"}</button>
-                  <button onClick={()=>resetPw(u)}>Reset password</button>
+                  <button
+                    onClick={() => toggleActive(u.id, !u.banned)}
+                  >
+                    {u.banned ? "Enable" : "Disable"}
+                  </button>
+
+                  <button onClick={() => reset(u.email)}>
+                    Reset Password
+                  </button>
                 </td>
               </tr>
             ))}
+
+            {users.length === 0 && (
+              <tr>
+                <td colSpan={5} className="muted" style={{ padding: 18 }}>
+                  No users found.
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
