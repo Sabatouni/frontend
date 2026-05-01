@@ -2,30 +2,43 @@ import { useEffect, useState } from "react";
 import { supabase } from "../api/supabaseClient";
 import { useAuth } from "../context/AuthContext.jsx";
 
-const PAY = ["CASH", "CARD", "MOBILE", "OTHER"];
+const todayStr = () => new Date().toISOString().split("T")[0];
+const TZS = (n) => `TZS ${Number(n || 0).toLocaleString()}`;
 
 export default function Sales() {
   const { isAdmin } = useAuth();
-  const [items, setItems] = useState([]);
+
+  const [sales, setSales] = useState([]);
+  const [services, setServices] = useState([]);
   const [form, setForm] = useState({
-    productName: "",
-    quantity: 1,
-    unitPrice: 0,
-    paymentMethod: "CASH",
+    service: "",
+    amount: "",
+    date: todayStr(),
+    note: "",
   });
+
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
 
-  // 🔄 Load sales
+  // 🔄 Load everything
   async function load() {
     try {
-      const { data, error } = await supabase
+      const { data: salesData } = await supabase
         .from("sales")
         .select("*")
         .order("date", { ascending: false });
 
-      if (error) throw error;
-      setItems(data || []);
+      const { data: servicesData } = await supabase
+        .from("services")
+        .select("*");
+
+      setSales(salesData || []);
+      setServices(servicesData || []);
+
+      // auto select first service
+      if (servicesData?.length && !form.service) {
+        setForm((f) => ({ ...f, service: servicesData[0].id }));
+      }
     } catch (e) {
       setErr(e.message);
     }
@@ -42,27 +55,26 @@ export default function Sales() {
     setBusy(true);
 
     try {
-      const total =
-        Number(form.quantity) * Number(form.unitPrice);
+      if (!form.amount || Number(form.amount) <= 0) {
+        throw new Error("Enter valid amount");
+      }
 
       const { error } = await supabase.from("sales").insert([
         {
-          item: form.productName,
-          quantity: Number(form.quantity),
-          unit_price: Number(form.unitPrice),
-          total: total,
-          payment_method: form.paymentMethod,
-          date: new Date().toISOString(),
+          service: form.service,
+          amount: Number(form.amount),
+          note: form.note,
+          date: new Date(form.date).toISOString(),
         },
       ]);
 
       if (error) throw error;
 
       setForm({
-        productName: "",
-        quantity: 1,
-        unitPrice: 0,
-        paymentMethod: "CASH",
+        service: services[0]?.id || "",
+        amount: "",
+        date: todayStr(),
+        note: "",
       });
 
       load();
@@ -91,64 +103,90 @@ export default function Sales() {
     }
   }
 
+  // 🎨 get service color
+  function getColor(id) {
+    return services.find((s) => s.id === id)?.color || "#999";
+  }
+
   return (
     <>
       <h2 style={{ marginTop: 0 }}>Record a sale</h2>
 
+      {/* ➕ ADD SERVICE BUTTON */}
+      {isAdmin && (
+        <button
+          onClick={() =>
+            window.dispatchEvent(new Event("openAddService"))
+          }
+          style={{
+            marginBottom: 12,
+            padding: "10px 14px",
+            background: "#3D405B",
+            color: "#fff",
+            border: "none",
+            borderRadius: 8,
+            cursor: "pointer",
+            fontWeight: 600,
+          }}
+        >
+          ➕ Add Service
+        </button>
+      )}
+
+      {/* FORM */}
       <form className="panel" onSubmit={submit}>
         <div className="form-grid">
-          <label>
-            Product
-            <input
-              required
-              value={form.productName}
-              onChange={(e) =>
-                setForm({ ...form, productName: e.target.value })
-              }
-            />
-          </label>
 
           <label>
-            Quantity
-            <input
-              type="number"
-              min="1"
-              required
-              value={form.quantity}
-              onChange={(e) =>
-                setForm({ ...form, quantity: e.target.value })
-              }
-            />
-          </label>
-
-          <label>
-            Unit price
-            <input
-              type="number"
-              min="0"
-              step="0.01"
-              required
-              value={form.unitPrice}
-              onChange={(e) =>
-                setForm({ ...form, unitPrice: e.target.value })
-              }
-            />
-          </label>
-
-          <label>
-            Payment
+            Service
             <select
-              value={form.paymentMethod}
+              value={form.service}
               onChange={(e) =>
-                setForm({ ...form, paymentMethod: e.target.value })
+                setForm({ ...form, service: e.target.value })
               }
             >
-              {PAY.map((p) => (
-                <option key={p}>{p}</option>
+              {services.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
               ))}
             </select>
           </label>
+
+          <label>
+            Amount
+            <input
+              type="number"
+              required
+              value={form.amount}
+              onChange={(e) =>
+                setForm({ ...form, amount: e.target.value })
+              }
+            />
+          </label>
+
+          <label>
+            Date
+            <input
+              type="date"
+              value={form.date}
+              onChange={(e) =>
+                setForm({ ...form, date: e.target.value })
+              }
+            />
+          </label>
         </div>
+
+        <label>
+          Notes
+          <input
+            value={form.note}
+            onChange={(e) =>
+              setForm({ ...form, note: e.target.value })
+            }
+            placeholder="Optional..."
+          />
+        </label>
 
         {err && <div className="error">{err}</div>}
 
@@ -162,31 +200,45 @@ export default function Sales() {
         </button>
       </form>
 
+      {/* TABLE */}
       <h2>Recent sales</h2>
 
       <div className="panel" style={{ padding: 0 }}>
         <table>
           <thead>
             <tr>
-              <th>When</th>
-              <th>Product</th>
-              <th>Qty</th>
-              <th>Unit</th>
-              <th>Total</th>
-              <th>Pay</th>
+              <th>Date</th>
+              <th>Service</th>
+              <th>Amount</th>
+              <th>Note</th>
               {isAdmin && <th></th>}
             </tr>
           </thead>
 
           <tbody>
-            {items.map((s) => (
+            {sales.map((s) => (
               <tr key={s.id}>
-                <td>{new Date(s.date).toLocaleString()}</td>
-                <td>{s.item}</td>
-                <td>{s.quantity}</td>
-                <td>{Number(s.unit_price).toFixed(2)}</td>
-                <td>{Number(s.total).toFixed(2)}</td>
-                <td>{s.payment_method}</td>
+                <td>{new Date(s.date).toLocaleDateString()}</td>
+
+                <td>
+                  <span
+                    style={{
+                      background: getColor(s.service) + "22",
+                      color: getColor(s.service),
+                      padding: "4px 8px",
+                      borderRadius: 6,
+                      fontWeight: 600,
+                    }}
+                  >
+                    {services.find(x => x.id === s.service)?.name || s.service}
+                  </span>
+                </td>
+
+                <td style={{ fontWeight: 600 }}>
+                  {TZS(s.amount)}
+                </td>
+
+                <td>{s.note || "—"}</td>
 
                 {isAdmin && (
                   <td>
@@ -201,13 +253,9 @@ export default function Sales() {
               </tr>
             ))}
 
-            {items.length === 0 && (
+            {sales.length === 0 && (
               <tr>
-                <td
-                  colSpan={isAdmin ? 7 : 6}
-                  className="muted"
-                  style={{ padding: 18 }}
-                >
+                <td colSpan={isAdmin ? 5 : 4} className="muted">
                   No sales yet.
                 </td>
               </tr>
