@@ -1,38 +1,66 @@
-import axios from "axios";
+const BASE = (import.meta.env.VITE_API_BASE_URL || "http://localhost:8080").replace(/\/+$/, "");
+const TOKEN_KEY = "stv_token";
 
-/**
- * In production (Vercel), set VITE_API_URL to your Railway backend URL:
- *   VITE_API_URL=https://swahili-pos-production.up.railway.app
- *
- * Locally, leave it unset — Vite's dev proxy forwards /api/* to localhost:8080.
- */
-const api = axios.create({
-  baseURL: import.meta.env.VITE_API_URL ?? "",
-  headers: {
-    "Content-Type": "application/json",
-  },
-});
+export const tokenStore = {
+  get: () => localStorage.getItem(TOKEN_KEY),
+  set: (t) => localStorage.setItem(TOKEN_KEY, t),
+  clear: () => localStorage.removeItem(TOKEN_KEY),
+};
 
-// Attach JWT on every request automatically
-api.interceptors.request.use((config) => {
-  const token = localStorage.getItem("jwt_token");
-  if (token) {
-    config.headers.Authorization = `Bearer ${token}`;
+let onUnauthorized = null;
+export const setUnauthorizedHandler = (fn) => { onUnauthorized = fn; };
+
+async function request(path, { method = "GET", body, auth = true } = {}) {
+  const headers = { "Content-Type": "application/json", Accept: "application/json" };
+  const token = tokenStore.get();
+  if (auth && token) headers.Authorization = `Bearer ${token}`;
+
+  const res = await fetch(`${BASE}${path}`, {
+    method,
+    headers,
+    body: body == null ? undefined : JSON.stringify(body),
+  });
+
+  if (res.status === 401 && auth) {
+    tokenStore.clear();
+    if (onUnauthorized) onUnauthorized();
+    throw new Error("Session expired. Please log in again.");
   }
-  return config;
-});
 
-// On 401, clear stored credentials and redirect to login
-api.interceptors.response.use(
-  (response) => response,
-  (error) => {
-    if (error.response?.status === 401) {
-      localStorage.removeItem("jwt_token");
-      localStorage.removeItem("user");
-      window.location.href = "/login";
-    }
-    return Promise.reject(error);
+  const text = await res.text();
+  const data = text ? JSON.parse(text) : null;
+
+  if (!res.ok) {
+    const msg = (data && (data.message || data.error)) || `Request failed (${res.status})`;
+    const err = new Error(msg);
+    err.status = res.status;
+    err.fields = data?.fields;
+    throw err;
   }
-);
+  return data;
+}
 
-export default api;
+export const api = {
+  login:    (username, password) => request("/api/auth/login", { method: "POST", body: { username, password }, auth: false }),
+  register: (payload) => request("/api/auth/register", { method: "POST", body: payload }),
+
+  dashboard: () => request("/api/dashboard/summary"),
+
+  listSales:   (page = 0, size = 50) => request(`/api/sales?page=${page}&size=${size}`),
+  createSale:  (payload) => request("/api/sales", { method: "POST", body: payload }),
+  deleteSale:  (id) => request(`/api/sales/${id}`, { method: "DELETE" }),
+
+  listExpenses:  (page = 0, size = 50) => request(`/api/expenses?page=${page}&size=${size}`),
+  createExpense: (payload) => request("/api/expenses", { method: "POST", body: payload }),
+  deleteExpense: (id) => request(`/api/expenses/${id}`, { method: "DELETE" }),
+
+  listProducts:  (activeOnly = true) => request(`/api/products?activeOnly=${activeOnly}`),
+  createProduct: (payload) => request("/api/products", { method: "POST", body: payload }),
+  updateProduct: (id, payload) => request(`/api/products/${id}`, { method: "PUT", body: payload }),
+  deleteProduct: (id) => request(`/api/products/${id}`, { method: "DELETE" }),
+
+  listUsers:        () => request("/api/users"),
+  setUserActive:    (id, active) => request(`/api/users/${id}/active`, { method: "PATCH", body: { active } }),
+  setUserRole:      (id, role) => request(`/api/users/${id}/role`, { method: "PATCH", body: { role } }),
+  resetUserPassword:(id, password) => request(`/api/users/${id}/reset-password`, { method: "POST", body: { password } }),
+};
