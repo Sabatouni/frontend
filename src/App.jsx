@@ -1,57 +1,44 @@
 import { useEffect, useState } from "react";
 import {
-  Cell, Pie, PieChart,
-  ResponsiveContainer, Tooltip
+  Cell,
+  Pie,
+  PieChart,
+  ResponsiveContainer,
+  Tooltip
 } from "recharts";
-import * as XLSX from "xlsx";
 import { supabase } from "./api/supabaseClient";
 import { useAuth } from "./context/AuthContext";
 import Login from "./pages/Login";
 
-const LOGO = "/logo.png";
-
-const todayStr = () => new Date().toISOString().split("T")[0];
 const TZS = (n) => `TZS ${Number(n || 0).toLocaleString()}`;
+const today = () => new Date().toISOString().split("T")[0];
 
 export default function App() {
   const { user, logout } = useAuth();
-  const isAdmin = user?.role === "owner";
-
-  const [db, setDb] = useState({
-    sales: [],
-    expenses: [],
-    services: [],
-    users: []
-  });
+  const isOwner = user?.role === "owner";
 
   const [page, setPage] = useState("dashboard");
   const [toast, setToast] = useState(null);
-  const [showAddServiceModal, setShowAddServiceModal] = useState(false);
 
-  const fetchAll = async () => {
-    const { data: sales } = await supabase.from("sales").select("*").order("date", { ascending: false });
-    const { data: expenses } = await supabase.from("expenses").select("*").order("date", { ascending: false });
-    const { data: services } = await supabase.from("services").select("*");
-    const { data: users } = await supabase.from("users").select("*");
+  const [sales, setSales] = useState([]);
+  const [expenses, setExpenses] = useState([]);
+  const [services, setServices] = useState([]);
 
-    setDb({
-      sales: sales || [],
-      expenses: expenses || [],
-      services: services || [],
-      users: users || []
-    });
-  };
+  // 🔄 FETCH FROM SUPABASE
+  async function load() {
+    const { data: s } = await supabase.from("sales").select("*").order("date", { ascending: false });
+    const { data: e } = await supabase.from("expenses").select("*").order("date", { ascending: false });
+    const { data: srv } = await supabase.from("services").select("*");
+
+    setSales(s || []);
+    setExpenses(e || []);
+    setServices(srv || []);
+  }
 
   useEffect(() => {
-    fetchAll();
-    const i = setInterval(fetchAll, 5000);
+    load();
+    const i = setInterval(load, 5000);
     return () => clearInterval(i);
-  }, []);
-
-  useEffect(() => {
-    const handler = () => setShowAddServiceModal(true);
-    window.addEventListener("openAddService", handler);
-    return () => window.removeEventListener("openAddService", handler);
   }, []);
 
   const showToast = (msg, type = "success") => {
@@ -62,81 +49,56 @@ export default function App() {
   if (!user) return <Login />;
 
   return (
-    <div style={{ display: "flex", height: "100vh", background: "#F7F5F0", fontFamily: "'DM Sans', sans-serif" }}>
+    <div style={{ display: "flex", height: "100vh", background: "#F7F5F0", fontFamily: "DM Sans" }}>
 
       {/* SIDEBAR */}
-      <aside style={{
-        width: 240,
-        background: "#2A2D40",
-        color: "#fff",
-        padding: 20,
-        display: "flex",
-        flexDirection: "column"
-      }}>
-        <img src={LOGO} style={{ width: "100%", marginBottom: 20 }} />
+      <aside style={{ width: 240, background: "#2A2D40", color: "#fff", padding: 20 }}>
+        <img src="/logo.png" style={{ width: "100%", marginBottom: 20 }} />
 
         {[
           { id: "dashboard", label: "📊 Dashboard" },
           { id: "sales", label: "💰 Sales" },
           { id: "expenses", label: "🧾 Expenses" },
-          { id: "reports", label: "📈 Reports" }
+          { id: "reports", label: "📈 Reports" },
         ].map(item => (
-          <button key={item.id}
+          <button
+            key={item.id}
+            type="button"
             onClick={() => setPage(item.id)}
             style={{
-              width: "100%",
-              padding: "12px 14px",
-              marginBottom: 8,
+              width: "100%", padding: 10, marginBottom: 8,
               background: page === item.id ? "#3D405B" : "transparent",
-              color: "#fff",
-              border: "none",
-              borderRadius: 8,
-              cursor: "pointer",
-              textAlign: "left",
-              fontWeight: page === item.id ? 600 : 400
-            }}>
+              color: "#fff", border: "none", borderRadius: 6, cursor: "pointer"
+            }}
+          >
             {item.label}
           </button>
         ))}
 
-        {isAdmin && (
-          <button onClick={() => setPage("users")}
-            style={{ marginTop: 6 }}>
+        {isOwner && (
+          <button type="button" onClick={() => setPage("users")} style={{ width: "100%", marginTop: 10 }}>
             👥 Users
           </button>
         )}
 
-        <button onClick={logout} style={{ marginTop: "auto" }}>
+        <button onClick={logout} style={{ marginTop: 20, width: "100%" }}>
           Logout
         </button>
       </aside>
 
       {/* MAIN */}
       <main style={{ flex: 1, padding: 28, overflowY: "auto" }}>
-        {page === "dashboard" && <Dashboard db={db} />}
-        {page === "sales" && <SalesPage db={db} refresh={fetchAll} showToast={showToast} isAdmin={isAdmin} />}
-        {page === "expenses" && <ExpensesPage />}
-        {page === "reports" && isAdmin && <ReportsPage db={db} showToast={showToast} />}
-        {page === "users" && isAdmin && <UsersPage db={db} />}
+        {page === "dashboard" && <Dashboard sales={sales} expenses={expenses} services={services} />}
+        {page === "sales" && <SalesPage services={services} refresh={load} showToast={showToast} />}
+        {page === "expenses" && <ExpensesPage refresh={load} showToast={showToast} />}
+        {page === "reports" && isOwner && <ReportsPage sales={sales} expenses={expenses} services={services} />}
       </main>
-
-      {showAddServiceModal && (
-        <AddServiceModal
-          onClose={() => setShowAddServiceModal(false)}
-          showToast={showToast}
-          refresh={fetchAll}
-        />
-      )}
 
       {toast && (
         <div style={{
-          position: "fixed",
-          bottom: 20,
-          right: 20,
-          background: "#81B29A",
-          color: "#fff",
-          padding: "12px 18px",
-          borderRadius: 10
+          position: "fixed", bottom: 20, right: 20,
+          background: "#81B29A", color: "#fff",
+          padding: "12px 18px", borderRadius: 8
         }}>
           {toast.msg}
         </div>
@@ -147,27 +109,28 @@ export default function App() {
 
 /* ================= DASHBOARD ================= */
 
-function Dashboard({ db }) {
-  const totalSales = db.sales.reduce((a, b) => a + Number(b.amount), 0);
-  const totalExp = db.expenses.reduce((a, b) => a + Number(b.cost), 0);
+function Dashboard({ sales, expenses, services }) {
+  const totalSales = sales.reduce((a, b) => a + Number(b.amount), 0);
+  const totalExp = expenses.reduce((a, b) => a + Number(b.cost), 0);
 
-  const data = db.services.map(s => ({
+  const data = services.map(s => ({
     name: s.name,
-    value: db.sales.filter(x => x.service === s.id).reduce((a, b) => a + Number(b.amount), 0),
+    value: sales.filter(x => x.service === s.id)
+      .reduce((a, b) => a + Number(b.amount), 0),
     color: s.color
   })).filter(x => x.value > 0);
 
   return (
     <div>
-      <h1 style={{ fontSize: 28, marginBottom: 20 }}>Overview</h1>
+      <h1>Dashboard</h1>
 
-      <div style={{ display: "flex", gap: 14, marginBottom: 20 }}>
-        <StatCard label="Revenue" value={TZS(totalSales)} color="#81B29A" />
-        <StatCard label="Expenses" value={TZS(totalExp)} color="#E07A5F" />
-        <StatCard label="Profit" value={TZS(totalSales - totalExp)} color="#3D405B" />
+      <div style={{ display: "flex", gap: 10 }}>
+        <StatCard label="Revenue" value={TZS(totalSales)} />
+        <StatCard label="Expenses" value={TZS(totalExp)} />
+        <StatCard label="Profit" value={TZS(totalSales - totalExp)} />
       </div>
 
-      <div style={{ background: "#fff", padding: 20, borderRadius: 16 }}>
+      <div style={{ background: "#fff", padding: 20, marginTop: 20 }}>
         <ResponsiveContainer width="100%" height={250}>
           <PieChart>
             <Pie data={data} dataKey="value">
@@ -181,16 +144,10 @@ function Dashboard({ db }) {
   );
 }
 
-function StatCard({ label, value, color }) {
+function StatCard({ label, value }) {
   return (
-    <div style={{
-      flex: 1,
-      background: "#fff",
-      padding: 20,
-      borderRadius: 16,
-      borderTop: `4px solid ${color}`
-    }}>
-      <div style={{ color: "#888", fontSize: 12 }}>{label}</div>
+    <div style={{ background: "#fff", padding: 20, borderRadius: 10, flex: 1 }}>
+      <div>{label}</div>
       <h2>{value}</h2>
     </div>
   );
@@ -198,55 +155,55 @@ function StatCard({ label, value, color }) {
 
 /* ================= SALES ================= */
 
-function SalesPage({ db, refresh, showToast, isAdmin }) {
-  const [form, setForm] = useState({
-    service: "",
-    amount: "",
-    date: todayStr(),
-    note: ""
-  });
+function SalesPage({ services, refresh, showToast }) {
+  const [form, setForm] = useState({ service: "", amount: "", date: today(), note: "" });
 
-  const submit = async () => {
-    if (!form.amount) return;
-
-    await supabase.from("sales").insert([{
-      ...form,
-      amount: Number(form.amount)
-    }]);
-
+  async function submit() {
+    await supabase.from("sales").insert([
+      { ...form, amount: Number(form.amount) }
+    ]);
     showToast("Sale added");
     refresh();
-  };
+  }
 
   return (
     <div>
-      <h1 style={{ fontSize: 28 }}>Sales</h1>
+      <h1>Sales</h1>
 
-      {isAdmin && (
-        <button onClick={() => window.dispatchEvent(new Event("openAddService"))}>
-          ➕ Add Service
-        </button>
-      )}
+      <select onChange={e => setForm(f => ({ ...f, service: e.target.value }))}>
+        {services.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+      </select>
 
-      {/* SERVICE BUTTONS */}
-      <div style={{ display: "flex", gap: 8, margin: "16px 0" }}>
-        {db.services.map(s => (
-          <button key={s.id}
-            onClick={() => setForm(f => ({ ...f, service: s.id }))}
-            style={{
-              padding: "8px 14px",
-              borderRadius: 10,
-              background: form.service === s.id ? s.color : "#fff",
-              color: form.service === s.id ? "#fff" : "#555",
-              border: "2px solid #ddd"
-            }}>
-            {s.name}
-          </button>
-        ))}
-      </div>
+      <button onClick={() => window.dispatchEvent(new Event("openAddService"))}>
+        + Add Service
+      </button>
 
-      <input placeholder="Amount"
-        onChange={e => setForm(f => ({ ...f, amount: e.target.value }))} />
+      <input placeholder="Amount" onChange={e => setForm(f => ({ ...f, amount: e.target.value }))} />
+
+      <button onClick={submit}>Save</button>
+    </div>
+  );
+}
+
+/* ================= EXPENSES ================= */
+
+function ExpensesPage({ refresh, showToast }) {
+  const [form, setForm] = useState({ item: "", cost: "", date: today() });
+
+  async function submit() {
+    await supabase.from("expenses").insert([
+      { ...form, cost: Number(form.cost) }
+    ]);
+    showToast("Expense added");
+    refresh();
+  }
+
+  return (
+    <div>
+      <h1>Expenses</h1>
+
+      <input placeholder="Item" onChange={e => setForm(f => ({ ...f, item: e.target.value }))} />
+      <input placeholder="Cost" onChange={e => setForm(f => ({ ...f, cost: e.target.value }))} />
 
       <button onClick={submit}>Save</button>
     </div>
@@ -255,53 +212,11 @@ function SalesPage({ db, refresh, showToast, isAdmin }) {
 
 /* ================= REPORTS ================= */
 
-function ReportsPage({ db, showToast }) {
-  const exportExcel = () => {
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(db.sales), "Sales");
-    XLSX.writeFile(wb, "report.xlsx");
-    showToast("Exported");
-  };
-
+function ReportsPage({ sales }) {
   return (
     <div>
       <h1>Reports</h1>
-      <button onClick={exportExcel}>Export Excel</button>
-    </div>
-  );
-}
-
-/* ================= USERS ================= */
-
-function UsersPage({ db }) {
-  return <div><h1>Users ({db.users.length})</h1></div>;
-}
-
-/* ================= ADD SERVICE ================= */
-
-function AddServiceModal({ onClose, showToast, refresh }) {
-  const [name, setName] = useState("");
-  const [color, setColor] = useState("#81B29A");
-
-  const submit = async () => {
-    await supabase.from("services").insert([{
-      id: name.toLowerCase().replace(/\s+/g, "-"),
-      name,
-      color
-    }]);
-
-    showToast("Service added");
-    refresh();
-    onClose();
-  };
-
-  return (
-    <div style={{ position: "fixed", inset: 0, background: "#0005", display: "flex", justifyContent: "center", alignItems: "center" }}>
-      <div style={{ background: "#fff", padding: 24, borderRadius: 16 }}>
-        <input placeholder="Service name" onChange={e => setName(e.target.value)} />
-        <button onClick={submit}>Add</button>
-        <button onClick={onClose}>Cancel</button>
-      </div>
+      <p>Total sales: {TZS(sales.reduce((a, b) => a + Number(b.amount), 0))}</p>
     </div>
   );
 }
