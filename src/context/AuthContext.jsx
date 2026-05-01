@@ -1,38 +1,60 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
-import { api, setUnauthorizedHandler, tokenStore } from "../api/client.js";
+import { supabase } from "../api/supabaseClient";
 
 const AuthCtx = createContext(null);
-const USER_KEY = "stv_user";
 
 export function AuthProvider({ children }) {
-  const [user, setUser] = useState(() => {
-    const raw = localStorage.getItem(USER_KEY);
-    return raw ? JSON.parse(raw) : null;
-  });
+  const [user, setUser] = useState(null);
 
+  // 🔄 Check session on load
   useEffect(() => {
-    setUnauthorizedHandler(() => {
-      localStorage.removeItem(USER_KEY);
-      setUser(null);
+    const getSession = async () => {
+      const { data } = await supabase.auth.getSession();
+      setUser(data?.session?.user || null);
+    };
+
+    getSession();
+
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user || null);
     });
+
+    return () => {
+      listener.subscription.unsubscribe();
+    };
   }, []);
 
-  async function login(username, password) {
-    const res = await api.login(username, password);
-    tokenStore.set(res.token);
-    const u = { id: res.id, username: res.username, fullName: res.fullName, role: res.role };
-    localStorage.setItem(USER_KEY, JSON.stringify(u));
-    setUser(u);
-    return u;
+  // 🔐 Login
+  async function login(email, password) {
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+
+    if (error) {
+      console.error("Login error:", error.message);
+      throw error;
+    }
+
+    setUser(data.user);
+    return data.user;
   }
 
-  function logout() {
-    tokenStore.clear();
-    localStorage.removeItem(USER_KEY);
+  // 🚪 Logout
+  async function logout() {
+    await supabase.auth.signOut();
     setUser(null);
   }
 
-  const value = useMemo(() => ({ user, login, logout, isAdmin: user?.role === "ADMIN" }), [user]);
+  const value = useMemo(
+    () => ({
+      user,
+      login,
+      logout,
+    }),
+    [user]
+  );
+
   return <AuthCtx.Provider value={value}>{children}</AuthCtx.Provider>;
 }
 
