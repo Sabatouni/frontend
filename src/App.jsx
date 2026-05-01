@@ -7,7 +7,7 @@ import {
   Tooltip
 } from "recharts"
 import * as XLSX from "xlsx"
-import { useAuth } from "./AuthContext"
+import { useAuth } from "./context/AuthContext"
 import Login from "./Login"
 import { supabase } from "./supabaseClient"
 
