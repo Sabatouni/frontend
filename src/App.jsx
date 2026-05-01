@@ -1,10 +1,6 @@
-// (NOTE: trimmed explanation — this is FULL working structure, not simplified)
-
 import { useEffect, useState } from "react";
 import {
-  Cell,
-  Pie,
-  PieChart,
+  Cell, Pie, PieChart,
   ResponsiveContainer, Tooltip
 } from "recharts";
 import * as XLSX from "xlsx";
@@ -69,8 +65,15 @@ export default function App() {
     <div style={{ display: "flex", height: "100vh", background: "#F7F5F0", fontFamily: "'DM Sans', sans-serif" }}>
 
       {/* SIDEBAR */}
-      <aside style={{ width: 240, background: "#2A2D40", color: "#fff", padding: 20 }}>
-        <img src={LOGO} style={{ width: "100%", marginBottom: 16 }} />
+      <aside style={{
+        width: 240,
+        background: "#2A2D40",
+        color: "#fff",
+        padding: 20,
+        display: "flex",
+        flexDirection: "column"
+      }}>
+        <img src={LOGO} style={{ width: "100%", marginBottom: 20 }} />
 
         {[
           { id: "dashboard", label: "📊 Dashboard" },
@@ -78,11 +81,19 @@ export default function App() {
           { id: "expenses", label: "🧾 Expenses" },
           { id: "reports", label: "📈 Reports" }
         ].map(item => (
-          <button key={item.id} onClick={() => setPage(item.id)}
+          <button key={item.id}
+            onClick={() => setPage(item.id)}
             style={{
-              width: "100%", padding: 10, marginBottom: 8,
+              width: "100%",
+              padding: "12px 14px",
+              marginBottom: 8,
               background: page === item.id ? "#3D405B" : "transparent",
-              color: "#fff", border: "none", borderRadius: 6, cursor: "pointer"
+              color: "#fff",
+              border: "none",
+              borderRadius: 8,
+              cursor: "pointer",
+              textAlign: "left",
+              fontWeight: page === item.id ? 600 : 400
             }}>
             {item.label}
           </button>
@@ -90,12 +101,12 @@ export default function App() {
 
         {isAdmin && (
           <button onClick={() => setPage("users")}
-            style={{ width: "100%", padding: 10, marginTop: 8 }}>
+            style={{ marginTop: 6 }}>
             👥 Users
           </button>
         )}
 
-        <button onClick={logout} style={{ marginTop: 20, width: "100%" }}>
+        <button onClick={logout} style={{ marginTop: "auto" }}>
           Logout
         </button>
       </aside>
@@ -103,21 +114,29 @@ export default function App() {
       {/* MAIN */}
       <main style={{ flex: 1, padding: 28, overflowY: "auto" }}>
         {page === "dashboard" && <Dashboard db={db} />}
-        {page === "sales" && <SalesPage db={db} refresh={fetchAll} showToast={showToast} />}
-        {page === "expenses" && <ExpensesPage db={db} refresh={fetchAll} showToast={showToast} />}
+        {page === "sales" && <SalesPage db={db} refresh={fetchAll} showToast={showToast} isAdmin={isAdmin} />}
+        {page === "expenses" && <ExpensesPage />}
         {page === "reports" && isAdmin && <ReportsPage db={db} showToast={showToast} />}
-        {page === "users" && isAdmin && <UsersPage db={db} refresh={fetchAll} showToast={showToast} />}
+        {page === "users" && isAdmin && <UsersPage db={db} />}
       </main>
 
       {showAddServiceModal && (
-        <AddServiceModal onClose={() => setShowAddServiceModal(false)} showToast={showToast} refresh={fetchAll} />
+        <AddServiceModal
+          onClose={() => setShowAddServiceModal(false)}
+          showToast={showToast}
+          refresh={fetchAll}
+        />
       )}
 
       {toast && (
         <div style={{
-          position: "fixed", bottom: 20, right: 20,
-          background: "#81B29A", color: "#fff",
-          padding: "12px 18px", borderRadius: 8
+          position: "fixed",
+          bottom: 20,
+          right: 20,
+          background: "#81B29A",
+          color: "#fff",
+          padding: "12px 18px",
+          borderRadius: 10
         }}>
           {toast.msg}
         </div>
@@ -140,7 +159,7 @@ function Dashboard({ db }) {
 
   return (
     <div>
-      <h1 style={{ fontSize: 28 }}>Overview</h1>
+      <h1 style={{ fontSize: 28, marginBottom: 20 }}>Overview</h1>
 
       <div style={{ display: "flex", gap: 14, marginBottom: 20 }}>
         <StatCard label="Revenue" value={TZS(totalSales)} color="#81B29A" />
@@ -148,7 +167,7 @@ function Dashboard({ db }) {
         <StatCard label="Profit" value={TZS(totalSales - totalExp)} color="#3D405B" />
       </div>
 
-      <div style={{ background: "#fff", padding: 20, borderRadius: 12 }}>
+      <div style={{ background: "#fff", padding: 20, borderRadius: 16 }}>
         <ResponsiveContainer width="100%" height={250}>
           <PieChart>
             <Pie data={data} dataKey="value">
@@ -168,10 +187,10 @@ function StatCard({ label, value, color }) {
       flex: 1,
       background: "#fff",
       padding: 20,
-      borderRadius: 12,
+      borderRadius: 16,
       borderTop: `4px solid ${color}`
     }}>
-      <div>{label}</div>
+      <div style={{ color: "#888", fontSize: 12 }}>{label}</div>
       <h2>{value}</h2>
     </div>
   );
@@ -179,47 +198,67 @@ function StatCard({ label, value, color }) {
 
 /* ================= SALES ================= */
 
-function SalesPage({ db, refresh, showToast }) {
-  const [form, setForm] = useState({ service: "", amount: "", date: todayStr(), note: "" });
+function SalesPage({ db, refresh, showToast, isAdmin }) {
+  const [form, setForm] = useState({
+    service: "",
+    amount: "",
+    date: todayStr(),
+    note: ""
+  });
 
   const submit = async () => {
-    await supabase.from("sales").insert([{ ...form, amount: Number(form.amount) }]);
+    if (!form.amount) return;
+
+    await supabase.from("sales").insert([{
+      ...form,
+      amount: Number(form.amount)
+    }]);
+
     showToast("Sale added");
     refresh();
   };
 
   return (
     <div>
-      <h1>Sales</h1>
+      <h1 style={{ fontSize: 28 }}>Sales</h1>
 
-      <select onChange={e => setForm(f => ({ ...f, service: e.target.value }))}>
-        {db.services.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-      </select>
+      {isAdmin && (
+        <button onClick={() => window.dispatchEvent(new Event("openAddService"))}>
+          ➕ Add Service
+        </button>
+      )}
 
-      <button onClick={() => window.dispatchEvent(new Event("openAddService"))}>
-        + Add Service
-      </button>
+      {/* SERVICE BUTTONS */}
+      <div style={{ display: "flex", gap: 8, margin: "16px 0" }}>
+        {db.services.map(s => (
+          <button key={s.id}
+            onClick={() => setForm(f => ({ ...f, service: s.id }))}
+            style={{
+              padding: "8px 14px",
+              borderRadius: 10,
+              background: form.service === s.id ? s.color : "#fff",
+              color: form.service === s.id ? "#fff" : "#555",
+              border: "2px solid #ddd"
+            }}>
+            {s.name}
+          </button>
+        ))}
+      </div>
 
-      <input placeholder="Amount" onChange={e => setForm(f => ({ ...f, amount: e.target.value }))} />
+      <input placeholder="Amount"
+        onChange={e => setForm(f => ({ ...f, amount: e.target.value }))} />
 
       <button onClick={submit}>Save</button>
     </div>
   );
 }
 
-/* ================= EXPENSES ================= */
-
-function ExpensesPage({ db, refresh, showToast }) {
-  return <div><h1>Expenses</h1></div>;
-}
-
 /* ================= REPORTS ================= */
 
 function ReportsPage({ db, showToast }) {
   const exportExcel = () => {
-    const ws = XLSX.utils.json_to_sheet(db.sales);
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Sales");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(db.sales), "Sales");
     XLSX.writeFile(wb, "report.xlsx");
     showToast("Exported");
   };
@@ -235,7 +274,7 @@ function ReportsPage({ db, showToast }) {
 /* ================= USERS ================= */
 
 function UsersPage({ db }) {
-  return <div><h1>Users</h1></div>;
+  return <div><h1>Users ({db.users.length})</h1></div>;
 }
 
 /* ================= ADD SERVICE ================= */
@@ -245,7 +284,12 @@ function AddServiceModal({ onClose, showToast, refresh }) {
   const [color, setColor] = useState("#81B29A");
 
   const submit = async () => {
-    await supabase.from("services").insert([{ id: name.toLowerCase(), name, color }]);
+    await supabase.from("services").insert([{
+      id: name.toLowerCase().replace(/\s+/g, "-"),
+      name,
+      color
+    }]);
+
     showToast("Service added");
     refresh();
     onClose();
@@ -253,7 +297,7 @@ function AddServiceModal({ onClose, showToast, refresh }) {
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "#0005", display: "flex", justifyContent: "center", alignItems: "center" }}>
-      <div style={{ background: "#fff", padding: 20 }}>
+      <div style={{ background: "#fff", padding: 24, borderRadius: 16 }}>
         <input placeholder="Service name" onChange={e => setName(e.target.value)} />
         <button onClick={submit}>Add</button>
         <button onClick={onClose}>Cancel</button>

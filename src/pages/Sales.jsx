@@ -20,7 +20,6 @@ export default function Sales() {
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
 
-  // 🔄 Load everything
   async function load() {
     try {
       const { data: salesData } = await supabase
@@ -35,7 +34,6 @@ export default function Sales() {
       setSales(salesData || []);
       setServices(servicesData || []);
 
-      // auto select first service
       if (servicesData?.length && !form.service) {
         setForm((f) => ({ ...f, service: servicesData[0].id }));
       }
@@ -48,7 +46,6 @@ export default function Sales() {
     load();
   }, []);
 
-  // ➕ Add sale
   async function submit(e) {
     e.preventDefault();
     setErr("");
@@ -85,7 +82,6 @@ export default function Sales() {
     }
   }
 
-  // 🗑 Delete
   async function remove(id) {
     if (!confirm("Delete this sale?")) return;
 
@@ -103,28 +99,31 @@ export default function Sales() {
     }
   }
 
-  // 🎨 get service color
   function getColor(id) {
     return services.find((s) => s.id === id)?.color || "#999";
   }
 
   return (
-    <>
-      <h2 style={{ marginTop: 0 }}>Record a sale</h2>
+    <div>
+      {/* HEADER */}
+      <h1 style={{ fontSize: 32, marginBottom: 10 }}>Sales</h1>
+      <p style={{ color: "#777", marginBottom: 24 }}>
+        Record and track all business sales
+      </p>
 
-      {/* ➕ ADD SERVICE BUTTON */}
+      {/* ADD SERVICE BUTTON */}
       {isAdmin && (
         <button
           onClick={() =>
             window.dispatchEvent(new Event("openAddService"))
           }
           style={{
-            marginBottom: 12,
-            padding: "10px 14px",
-            background: "#3D405B",
+            marginBottom: 20,
+            padding: "10px 16px",
+            background: "#2A2D40",
             color: "#fff",
             border: "none",
-            borderRadius: 8,
+            borderRadius: 10,
             cursor: "pointer",
             fontWeight: 600,
           }}
@@ -133,118 +132,151 @@ export default function Sales() {
         </button>
       )}
 
-      {/* FORM */}
-      <form className="panel" onSubmit={submit}>
-        <div className="form-grid">
+      {/* FORM CARD */}
+      <div
+        style={{
+          background: "#fff",
+          padding: 24,
+          borderRadius: 16,
+          boxShadow: "0 4px 12px rgba(0,0,0,0.05)",
+          marginBottom: 30,
+        }}
+      >
+        <h3 style={{ marginBottom: 16 }}>New Sale</h3>
 
-          <label>
-            Service
-            <select
-              value={form.service}
-              onChange={(e) =>
-                setForm({ ...form, service: e.target.value })
-              }
+        {/* SERVICE BUTTONS */}
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
+          {services.map((s) => (
+            <button
+              key={s.id}
+              onClick={() => setForm({ ...form, service: s.id })}
+              style={{
+                padding: "8px 14px",
+                borderRadius: 999,
+                border: "2px solid #eee",
+                background:
+                  form.service === s.id ? s.color : "#fff",
+                color:
+                  form.service === s.id ? "#fff" : "#333",
+                cursor: "pointer",
+                fontWeight: 600,
+              }}
             >
-              {services.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label>
-            Amount
-            <input
-              type="number"
-              required
-              value={form.amount}
-              onChange={(e) =>
-                setForm({ ...form, amount: e.target.value })
-              }
-            />
-          </label>
-
-          <label>
-            Date
-            <input
-              type="date"
-              value={form.date}
-              onChange={(e) =>
-                setForm({ ...form, date: e.target.value })
-              }
-            />
-          </label>
+              {s.name}
+            </button>
+          ))}
         </div>
 
-        <label>
-          Notes
+        {/* INPUTS */}
+        <div style={{ display: "flex", gap: 12, marginBottom: 12 }}>
           <input
-            value={form.note}
+            type="number"
+            placeholder="Amount"
+            value={form.amount}
             onChange={(e) =>
-              setForm({ ...form, note: e.target.value })
+              setForm({ ...form, amount: e.target.value })
             }
-            placeholder="Optional..."
+            style={inputStyle}
           />
-        </label>
 
-        {err && <div className="error">{err}</div>}
+          <input
+            type="date"
+            value={form.date}
+            onChange={(e) =>
+              setForm({ ...form, date: e.target.value })
+            }
+            style={inputStyle}
+          />
+        </div>
+
+        <input
+          placeholder="Notes (optional)"
+          value={form.note}
+          onChange={(e) =>
+            setForm({ ...form, note: e.target.value })
+          }
+          style={{ ...inputStyle, width: "100%" }}
+        />
+
+        {err && <p style={{ color: "red" }}>{err}</p>}
 
         <button
-          className="primary"
-          type="submit"
+          onClick={submit}
           disabled={busy}
-          style={{ marginTop: 12 }}
+          style={{
+            marginTop: 14,
+            padding: "10px 18px",
+            background: "#81B29A",
+            color: "#fff",
+            border: "none",
+            borderRadius: 10,
+            cursor: "pointer",
+            fontWeight: 600,
+          }}
         >
-          {busy ? "Saving…" : "Save sale"}
+          {busy ? "Saving..." : "Save Sale"}
         </button>
-      </form>
+      </div>
 
       {/* TABLE */}
-      <h2>Recent sales</h2>
-
-      <div className="panel" style={{ padding: 0 }}>
-        <table>
-          <thead>
+      <div
+        style={{
+          background: "#fff",
+          borderRadius: 16,
+          overflow: "hidden",
+          boxShadow: "0 4px 12px rgba(0,0,0,0.05)",
+        }}
+      >
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead style={{ background: "#F7F5F0" }}>
             <tr>
-              <th>Date</th>
-              <th>Service</th>
-              <th>Amount</th>
-              <th>Note</th>
-              {isAdmin && <th></th>}
+              <th style={th}>Date</th>
+              <th style={th}>Service</th>
+              <th style={th}>Amount</th>
+              <th style={th}>Note</th>
+              {isAdmin && <th style={th}></th>}
             </tr>
           </thead>
 
           <tbody>
             {sales.map((s) => (
-              <tr key={s.id}>
-                <td>{new Date(s.date).toLocaleDateString()}</td>
+              <tr key={s.id} style={{ borderTop: "1px solid #eee" }}>
+                <td style={td}>
+                  {new Date(s.date).toLocaleDateString()}
+                </td>
 
-                <td>
+                <td style={td}>
                   <span
                     style={{
                       background: getColor(s.service) + "22",
                       color: getColor(s.service),
-                      padding: "4px 8px",
-                      borderRadius: 6,
+                      padding: "4px 10px",
+                      borderRadius: 8,
                       fontWeight: 600,
                     }}
                   >
-                    {services.find(x => x.id === s.service)?.name || s.service}
+                    {services.find((x) => x.id === s.service)?.name || s.service}
                   </span>
                 </td>
 
-                <td style={{ fontWeight: 600 }}>
+                <td style={{ ...td, fontWeight: 700 }}>
                   {TZS(s.amount)}
                 </td>
 
-                <td>{s.note || "—"}</td>
+                <td style={td}>{s.note || "—"}</td>
 
                 {isAdmin && (
-                  <td>
+                  <td style={td}>
                     <button
-                      className="danger"
                       onClick={() => remove(s.id)}
+                      style={{
+                        background: "#E07A5F",
+                        color: "#fff",
+                        border: "none",
+                        padding: "6px 10px",
+                        borderRadius: 8,
+                        cursor: "pointer",
+                      }}
                     >
                       Delete
                     </button>
@@ -255,7 +287,7 @@ export default function Sales() {
 
             {sales.length === 0 && (
               <tr>
-                <td colSpan={isAdmin ? 5 : 4} className="muted">
+                <td colSpan={5} style={{ padding: 20, textAlign: "center", color: "#888" }}>
                   No sales yet.
                 </td>
               </tr>
@@ -263,6 +295,27 @@ export default function Sales() {
           </tbody>
         </table>
       </div>
-    </>
+    </div>
   );
 }
+
+/* 🎨 STYLES */
+const inputStyle = {
+  flex: 1,
+  padding: "10px 12px",
+  borderRadius: 10,
+  border: "1px solid #ddd",
+  fontSize: 14,
+};
+
+const th = {
+  textAlign: "left",
+  padding: "12px 16px",
+  fontSize: 12,
+  color: "#666",
+};
+
+const td = {
+  padding: "12px 16px",
+  fontSize: 14,
+};
