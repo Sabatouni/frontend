@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import * as XLSX from "xlsx";
+import { supabase } from "./api/supabaseClient";
 import { useAuth } from "./context/AuthContext";
 import Login from "./pages/Login";
-import { supabase } from "./supabaseClient";
 
 const LOGO = "/logo.png";
 
