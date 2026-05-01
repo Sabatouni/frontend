@@ -1,222 +1,332 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState } from "react"
 import {
   Cell,
+  Line,
+  LineChart,
   Pie,
   PieChart,
   ResponsiveContainer,
-  Tooltip
-} from "recharts";
-import { supabase } from "./api/supabaseClient";
-import { useAuth } from "./context/AuthContext";
-import Login from "./pages/Login";
-
-const TZS = (n) => `TZS ${Number(n || 0).toLocaleString()}`;
-const today = () => new Date().toISOString().split("T")[0];
+  Tooltip,
+  XAxis, YAxis,
+} from "recharts"
+import "./App.css"
+import { useAuth } from "./AuthContext"
+import Login from "./Login"
+import { supabase } from "./supabaseClient"
 
 export default function App() {
-  const { user, logout } = useAuth();
-  const isOwner = user?.role === "owner";
+  const { user, role } = useAuth()
 
-  const [page, setPage] = useState("dashboard");
-  const [toast, setToast] = useState(null);
+  const [sales, setSales] = useState([])
+  const [expenses, setExpenses] = useState([])
+  const [services, setServices] = useState([])
+  const [users, setUsers] = useState([])
+  const [page, setPage] = useState("dashboard")
 
-  const [sales, setSales] = useState([]);
-  const [expenses, setExpenses] = useState([]);
-  const [services, setServices] = useState([]);
+  const [newSale, setNewSale] = useState({ service_id: "", amount: "" })
+  const [newExpense, setNewExpense] = useState({ category: "", cost: "" })
 
-  // 🔄 FETCH FROM SUPABASE
-  async function load() {
-    const { data: s } = await supabase.from("sales").select("*").order("date", { ascending: false });
-    const { data: e } = await supabase.from("expenses").select("*").order("date", { ascending: false });
-    const { data: srv } = await supabase.from("services").select("*");
+  const [showAddService, setShowAddService] = useState(false)
+  const [newService, setNewService] = useState({ name: "", color: "#8884d8" })
 
-    setSales(s || []);
-    setExpenses(e || []);
-    setServices(srv || []);
+  // ---- Fetch from Supabase ----
+  const fetchAll = async () => {
+    const { data: s } = await supabase
+      .from("sales")
+      .select("*")
+      .order("date", { ascending: false })
+    const { data: e } = await supabase
+      .from("expenses")
+      .select("*")
+      .order("date", { ascending: false })
+    const { data: srv } = await supabase.from("services").select("*")
+    const { data: u } = await supabase.from("users").select("*")
+
+    setSales(s || [])
+    setExpenses(e || [])
+    setServices(srv || [])
+    setUsers(u || [])
   }
 
   useEffect(() => {
-    load();
-    const i = setInterval(load, 5000);
-    return () => clearInterval(i);
-  }, []);
+    fetchAll()
+    const i = setInterval(fetchAll, 5000)
+    return () => clearInterval(i)
+  }, [])
 
-  const showToast = (msg, type = "success") => {
-    setToast({ msg, type });
-    setTimeout(() => setToast(null), 3000);
-  };
+  // ---- Event listeners for Add Service ----
+  useEffect(() => {
+    const openModal = () => setShowAddService(true)
+    window.addEventListener("openAddService", openModal)
+    return () => window.removeEventListener("openAddService", openModal)
+  }, [])
 
-  if (!user) return <Login />;
+  // ---- Insert Operations ----
+  const handleAddSale = async () => {
+    if (!newSale.service_id || !newSale.amount) return
+    await supabase.from("sales").insert([
+      {
+        service_id: newSale.service_id,
+        amount: Number(newSale.amount),
+        date: new Date().toISOString(),
+        user_id: user.id,
+      },
+    ])
+    setNewSale({ service_id: "", amount: "" })
+    fetchAll()
+  }
 
+  const handleAddExpense = async () => {
+    if (!newExpense.category || !newExpense.cost) return
+    await supabase.from("expenses").insert([
+      {
+        category: newExpense.category,
+        cost: Number(newExpense.cost),
+        date: new Date().toISOString(),
+        user_id: user.id,
+      },
+    ])
+    setNewExpense({ category: "", cost: "" })
+    fetchAll()
+  }
+
+  const handleAddService = async () => {
+    if (!newService.name) return
+    await supabase.from("services").insert([
+      {
+        id: newService.name.toLowerCase(),
+        name: newService.name,
+        color: newService.color,
+      },
+    ])
+    setNewService({ name: "", color: "#8884d8" })
+    setShowAddService(false)
+    fetchAll()
+  }
+
+  // ---- Derived Calculations ----
+  const totalSales = sales.reduce((a, s) => a + Number(s.amount || 0), 0)
+  const totalExpenses = expenses.reduce((a, e) => a + Number(e.cost || 0), 0)
+  const netProfit = totalSales - totalExpenses
+
+  if (!user) return <Login />
+
+  // ---- UI ----
   return (
-    <div style={{ display: "flex", height: "100vh", background: "#F7F5F0", fontFamily: "DM Sans" }}>
-
+    <div className="app">
       {/* SIDEBAR */}
-      <aside style={{ width: 240, background: "#2A2D40", color: "#fff", padding: 20 }}>
-        <img src="/logo.png" style={{ width: "100%", marginBottom: 20 }} />
-
-        {[
-          { id: "dashboard", label: "📊 Dashboard" },
-          { id: "sales", label: "💰 Sales" },
-          { id: "expenses", label: "🧾 Expenses" },
-          { id: "reports", label: "📈 Reports" },
-        ].map(item => (
-          <button
-            key={item.id}
-            type="button"
-            onClick={() => setPage(item.id)}
-            style={{
-              width: "100%", padding: 10, marginBottom: 8,
-              background: page === item.id ? "#3D405B" : "transparent",
-              color: "#fff", border: "none", borderRadius: 6, cursor: "pointer"
-            }}
-          >
-            {item.label}
-          </button>
-        ))}
-
-        {isOwner && (
-          <button type="button" onClick={() => setPage("users")} style={{ width: "100%", marginTop: 10 }}>
-            👥 Users
-          </button>
-        )}
-
-        <button onClick={logout} style={{ marginTop: 20, width: "100%" }}>
-          Logout
+      <aside className="sidebar">
+        <h2>POS System</h2>
+        <button type="button" onClick={() => setPage("dashboard")}>
+          Dashboard
+        </button>
+        <button type="button" onClick={() => setPage("sales")}>
+          Sales
+        </button>
+        <button type="button" onClick={() => setPage("expenses")}>
+          Expenses
+        </button>
+        <button type="button" onClick={() => setPage("reports")}>
+          Reports
         </button>
       </aside>
 
-      {/* MAIN */}
-      <main style={{ flex: 1, padding: 28, overflowY: "auto" }}>
-        {page === "dashboard" && <Dashboard sales={sales} expenses={expenses} services={services} />}
-        {page === "sales" && <SalesPage services={services} refresh={load} showToast={showToast} />}
-        {page === "expenses" && <ExpensesPage refresh={load} showToast={showToast} />}
-        {page === "reports" && isOwner && <ReportsPage sales={sales} expenses={expenses} services={services} />}
+      {/* MAIN CONTENT */}
+      <main>
+        {page === "dashboard" && (
+          <div className="dashboard">
+            <h1>Dashboard</h1>
+            <div className="cards">
+              <div className="card">Total Sales: ${totalSales}</div>
+              <div className="card">Total Expenses: ${totalExpenses}</div>
+              <div className="card">Net Profit: ${netProfit}</div>
+            </div>
+
+            <div className="charts">
+              <ResponsiveContainer width="50%" height={300}>
+                <PieChart>
+                  <Pie
+                    data={services.map(srv => ({
+                      name: srv.name,
+                      value: sales.filter(s => s.service_id === srv.id)
+                                  .reduce((a, b) => a + Number(b.amount || 0), 0),
+                    }))}
+                    dataKey="value"
+                    outerRadius={80}
+                    label
+                  >
+                    {services.map((s, i) => (
+                      <Cell key={i} fill={s.color || "#8884d8"} />
+                    ))}
+                  </Pie>
+                  <Tooltip />
+                </PieChart>
+              </ResponsiveContainer>
+
+              <ResponsiveContainer width="50%" height={300}>
+                <LineChart data={sales.slice(0, 10).reverse()}>
+                  <XAxis dataKey="date" />
+                  <YAxis />
+                  <Tooltip />
+                  <Line type="monotone" dataKey="amount" stroke="#8884d8" />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        )}
+
+        {page === "sales" && (
+          <div className="sales-page">
+            <h1>Sales</h1>
+            <div className="form">
+              <select
+                value={newSale.service_id}
+                onChange={(e) =>
+                  setNewSale({ ...newSale, service_id: e.target.value })
+                }
+              >
+                <option value="">Select service</option>
+                {services.map((srv) => (
+                  <option key={srv.id} value={srv.id}>
+                    {srv.name}
+                  </option>
+                ))}
+              </select>
+              <input
+                type="number"
+                placeholder="Amount"
+                value={newSale.amount}
+                onChange={(e) =>
+                  setNewSale({ ...newSale, amount: e.target.value })
+                }
+              />
+              <button type="button" onClick={handleAddSale}>
+                Add Sale
+              </button>
+              {role === "admin" && (
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => window.dispatchEvent(new Event("openAddService"))}
+                >
+                  Add Service
+                </button>
+              )}
+            </div>
+
+            <table>
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Service</th>
+                  <th>Amount</th>
+                  <th>User</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sales.map((s, i) => (
+                  <tr key={i}>
+                    <td>{new Date(s.date).toLocaleDateString()}</td>
+                    <td>{services.find(x => x.id === s.service_id)?.name || "—"}</td>
+                    <td>${Number(s.amount)}</td>
+                    <td>{users.find(x => x.id === s.user_id)?.name || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {page === "expenses" && (
+          <div className="expenses-page">
+            <h1>Expenses</h1>
+            <div className="form">
+              <input
+                type="text"
+                placeholder="Category"
+                value={newExpense.category}
+                onChange={(e) =>
+                  setNewExpense({ ...newExpense, category: e.target.value })
+                }
+              />
+              <input
+                type="number"
+                placeholder="Cost"
+                value={newExpense.cost}
+                onChange={(e) =>
+                  setNewExpense({ ...newExpense, cost: e.target.value })
+                }
+              />
+              <button type="button" onClick={handleAddExpense}>
+                Add Expense
+              </button>
+            </div>
+
+            <table>
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Category</th>
+                  <th>Cost</th>
+                  <th>User</th>
+                </tr>
+              </thead>
+              <tbody>
+                {expenses.map((e, i) => (
+                  <tr key={i}>
+                    <td>{new Date(e.date).toLocaleDateString()}</td>
+                    <td>{e.category}</td>
+                    <td>${Number(e.cost)}</td>
+                    <td>{users.find(x => x.id === e.user_id)?.name || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {page === "reports" && (
+          <div className="reports-page">
+            <h1>Reports</h1>
+            <p>Total Sales: ${totalSales}</p>
+            <p>Total Expenses: ${totalExpenses}</p>
+            <p>Net Profit: ${netProfit}</p>
+            {/* CSV / Excel export can be added here based on your existing lib */}
+          </div>
+        )}
       </main>
 
-      {toast && (
-        <div style={{
-          position: "fixed", bottom: 20, right: 20,
-          background: "#81B29A", color: "#fff",
-          padding: "12px 18px", borderRadius: 8
-        }}>
-          {toast.msg}
+      {/* MODAL: Add Service */}
+      {showAddService && role === "admin" && (
+        <div className="modal-overlay">
+          <div className="modal">
+            <h2>Add New Service</h2>
+            <input
+              type="text"
+              placeholder="Service name"
+              value={newService.name}
+              onChange={(e) =>
+                setNewService({ ...newService, name: e.target.value })
+              }
+            />
+            <input
+              type="color"
+              value={newService.color}
+              onChange={(e) =>
+                setNewService({ ...newService, color: e.target.value })
+              }
+            />
+            <div className="actions">
+              <button type="button" onClick={handleAddService}>
+                Save
+              </button>
+              <button type="button" className="secondary" onClick={() => setShowAddService(false)}>
+                Cancel
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
-  );
-}
-
-/* ================= DASHBOARD ================= */
-
-function Dashboard({ sales, expenses, services }) {
-  const totalSales = sales.reduce((a, b) => a + Number(b.amount), 0);
-  const totalExp = expenses.reduce((a, b) => a + Number(b.cost), 0);
-
-  const data = services.map(s => ({
-    name: s.name,
-    value: sales.filter(x => x.service === s.id)
-      .reduce((a, b) => a + Number(b.amount), 0),
-    color: s.color
-  })).filter(x => x.value > 0);
-
-  return (
-    <div>
-      <h1>Dashboard</h1>
-
-      <div style={{ display: "flex", gap: 10 }}>
-        <StatCard label="Revenue" value={TZS(totalSales)} />
-        <StatCard label="Expenses" value={TZS(totalExp)} />
-        <StatCard label="Profit" value={TZS(totalSales - totalExp)} />
-      </div>
-
-      <div style={{ background: "#fff", padding: 20, marginTop: 20 }}>
-        <ResponsiveContainer width="100%" height={250}>
-          <PieChart>
-            <Pie data={data} dataKey="value">
-              {data.map((e, i) => <Cell key={i} fill={e.color} />)}
-            </Pie>
-            <Tooltip formatter={v => TZS(v)} />
-          </PieChart>
-        </ResponsiveContainer>
-      </div>
-    </div>
-  );
-}
-
-function StatCard({ label, value }) {
-  return (
-    <div style={{ background: "#fff", padding: 20, borderRadius: 10, flex: 1 }}>
-      <div>{label}</div>
-      <h2>{value}</h2>
-    </div>
-  );
-}
-
-/* ================= SALES ================= */
-
-function SalesPage({ services, refresh, showToast }) {
-  const [form, setForm] = useState({ service: "", amount: "", date: today(), note: "" });
-
-  async function submit() {
-    await supabase.from("sales").insert([
-      { ...form, amount: Number(form.amount) }
-    ]);
-    showToast("Sale added");
-    refresh();
-  }
-
-  return (
-    <div>
-      <h1>Sales</h1>
-
-      <select onChange={e => setForm(f => ({ ...f, service: e.target.value }))}>
-        {services.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-      </select>
-
-      <button onClick={() => window.dispatchEvent(new Event("openAddService"))}>
-        + Add Service
-      </button>
-
-      <input placeholder="Amount" onChange={e => setForm(f => ({ ...f, amount: e.target.value }))} />
-
-      <button onClick={submit}>Save</button>
-    </div>
-  );
-}
-
-/* ================= EXPENSES ================= */
-
-function ExpensesPage({ refresh, showToast }) {
-  const [form, setForm] = useState({ item: "", cost: "", date: today() });
-
-  async function submit() {
-    await supabase.from("expenses").insert([
-      { ...form, cost: Number(form.cost) }
-    ]);
-    showToast("Expense added");
-    refresh();
-  }
-
-  return (
-    <div>
-      <h1>Expenses</h1>
-
-      <input placeholder="Item" onChange={e => setForm(f => ({ ...f, item: e.target.value }))} />
-      <input placeholder="Cost" onChange={e => setForm(f => ({ ...f, cost: e.target.value }))} />
-
-      <button onClick={submit}>Save</button>
-    </div>
-  );
-}
-
-/* ================= REPORTS ================= */
-
-function ReportsPage({ sales }) {
-  return (
-    <div>
-      <h1>Reports</h1>
-      <p>Total sales: {TZS(sales.reduce((a, b) => a + Number(b.amount), 0))}</p>
-    </div>
-  );
+  )
 }
