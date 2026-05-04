@@ -1,10 +1,16 @@
 const API = import.meta.env.VITE_API_URL;
 
+// 🚨 Hard fail if missing
 if (!API) {
-  console.error("⚠️  VITE_API_URL is not set. Add it to your .env file.");
+  throw new Error(
+    "VITE_API_URL is not set. Fix it in Vercel environment variables."
+  );
 }
 
-console.log("API BASE:", API);
+// 🧹 Clean trailing slash
+const BASE = API.replace(/\/+$/, "");
 
-export { API };
-export const ADMIN_API = `${API}/admin`;
+console.log("✅ API BASE:", BASE);
+
+export { BASE as API };
+export const ADMIN_API = `${BASE}/admin`;
