@@ -4,16 +4,18 @@ import { useAuth } from "../context/AuthContext.jsx";
 
 export default function Expenses() {
   const { isAdmin } = useAuth();
+
   const [items, setItems] = useState([]);
   const [form, setForm] = useState({
-    description: "",
-    amount: 0,
+    item: "",
+    cost: "",
     category: "OTHER",
   });
+
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
 
-  // 🔄 Load expenses
+  // 🔄 Load
   async function load() {
     try {
       const { data, error } = await supabase
@@ -22,7 +24,6 @@ export default function Expenses() {
         .order("date", { ascending: false });
 
       if (error) throw error;
-
       setItems(data || []);
     } catch (e) {
       setErr(e.message);
@@ -40,18 +41,27 @@ export default function Expenses() {
     setBusy(true);
 
     try {
+      if (!form.item || Number(form.cost) <= 0) {
+        throw new Error("Enter valid data");
+      }
+
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+
       const { error } = await supabase.from("expenses").insert([
         {
-          item: form.description,
-          cost: Number(form.amount),
+          item: form.item,
+          cost: Number(form.cost),
           category: form.category,
           date: new Date().toISOString(),
+          created_by: user?.email || "unknown",
         },
       ]);
 
       if (error) throw error;
 
-      setForm({ description: "", amount: 0, category: "OTHER" });
+      setForm({ item: "", cost: "", category: "OTHER" });
       load();
     } catch (e) {
       setErr(e.message);
@@ -60,7 +70,6 @@ export default function Expenses() {
     }
   }
 
-  // 🗑 Delete expense
   async function remove(id) {
     if (!confirm("Delete this expense?")) return;
 
@@ -71,7 +80,6 @@ export default function Expenses() {
         .eq("id", id);
 
       if (error) throw error;
-
       load();
     } catch (e) {
       setErr(e.message);
@@ -80,18 +88,18 @@ export default function Expenses() {
 
   return (
     <>
-      <h2 style={{ marginTop: 0 }}>Record an expense</h2>
+      <h2>Expenses</h2>
 
       <form className="panel" onSubmit={submit}>
         <div className="form-grid">
           <label>
             Description
             <input
-              required
-              value={form.description}
+              value={form.item}
               onChange={(e) =>
-                setForm({ ...form, description: e.target.value })
+                setForm({ ...form, item: e.target.value })
               }
+              required
             />
           </label>
 
@@ -99,13 +107,11 @@ export default function Expenses() {
             Amount
             <input
               type="number"
-              min="0"
-              step="0.01"
-              required
-              value={form.amount}
+              value={form.cost}
               onChange={(e) =>
-                setForm({ ...form, amount: e.target.value })
+                setForm({ ...form, cost: e.target.value })
               }
+              required
             />
           </label>
 
@@ -122,62 +128,42 @@ export default function Expenses() {
 
         {err && <div className="error">{err}</div>}
 
-        <button
-          className="primary"
-          type="submit"
-          disabled={busy}
-          style={{ marginTop: 12 }}
-        >
-          {busy ? "Saving…" : "Save expense"}
+        <button className="primary" disabled={busy}>
+          {busy ? "Saving..." : "Save Expense"}
         </button>
       </form>
-
-      <h2>Recent expenses</h2>
 
       <div className="panel" style={{ padding: 0 }}>
         <table>
           <thead>
             <tr>
-              <th>When</th>
-              <th>Description</th>
+              <th>Date</th>
+              <th>Item</th>
               <th>Category</th>
               <th>Amount</th>
-              {isAdmin && <th></th>}
+              <th>By</th>
+              {isAdmin && <th />}
             </tr>
           </thead>
 
           <tbody>
             {items.map((x) => (
               <tr key={x.id}>
-                <td>{new Date(x.date).toLocaleString()}</td>
+                <td>{new Date(x.date).toLocaleDateString()}</td>
                 <td>{x.item}</td>
                 <td>{x.category}</td>
                 <td>{Number(x.cost).toFixed(2)}</td>
+                <td>{x.created_by}</td>
 
                 {isAdmin && (
                   <td>
-                    <button
-                      className="danger"
-                      onClick={() => remove(x.id)}
-                    >
+                    <button onClick={() => remove(x.id)}>
                       Delete
                     </button>
                   </td>
                 )}
               </tr>
             ))}
-
-            {items.length === 0 && (
-              <tr>
-                <td
-                  colSpan={isAdmin ? 5 : 4}
-                  className="muted"
-                  style={{ padding: 18 }}
-                >
-                  No expenses yet.
-                </td>
-              </tr>
-            )}
           </tbody>
         </table>
       </div>
