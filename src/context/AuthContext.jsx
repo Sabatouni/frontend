@@ -4,55 +4,52 @@ import { supabase } from "../api/supabaseClient";
 const AuthCtx = createContext(null);
 
 export function AuthProvider({ children }) {
-  const [user, setUser] = useState(null);
+  const [user, setUser]   = useState(null);
+  const [role, setRole]   = useState(null);
+  const [ready, setReady] = useState(false);
 
-  // 🔄 Check session on load
+  function extractRole(u) {
+    const r = u?.user_metadata?.role || "";
+    return r.toLowerCase();               // "admin" | "owner" | "worker" | ""
+  }
+
   useEffect(() => {
-    const getSession = async () => {
-      const { data } = await supabase.auth.getSession();
-      setUser(data?.session?.user || null);
-    };
-
-    getSession();
-
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUser(session?.user || null);
+    supabase.auth.getSession().then(({ data }) => {
+      const u = data?.session?.user || null;
+      setUser(u);
+      setRole(extractRole(u));
+      setReady(true);
     });
 
-    return () => {
-      listener.subscription.unsubscribe();
-    };
+    const { data: listener } = supabase.auth.onAuthStateChange((_evt, session) => {
+      const u = session?.user || null;
+      setUser(u);
+      setRole(extractRole(u));
+    });
+
+    return () => listener.subscription.unsubscribe();
   }, []);
 
-  // 🔐 Login
   async function login(email, password) {
-    const { data, error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    });
-
-    if (error) {
-      console.error("Login error:", error.message);
-      throw error;
-    }
-
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) throw error;
     setUser(data.user);
+    setRole(extractRole(data.user));
     return data.user;
   }
 
-  // 🚪 Logout
   async function logout() {
     await supabase.auth.signOut();
     setUser(null);
+    setRole(null);
   }
 
+  // isOwner: true for "owner", "admin", "ADMIN", "OWNER"
+  const isOwner = ["owner", "admin"].includes(role);
+
   const value = useMemo(
-    () => ({
-      user,
-      login,
-      logout,
-    }),
-    [user]
+    () => ({ user, role, isOwner, login, logout, ready }),
+    [user, role, ready]
   );
 
   return <AuthCtx.Provider value={value}>{children}</AuthCtx.Provider>;
