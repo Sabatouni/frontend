@@ -1148,7 +1148,7 @@ function UsersPage({ showToast }) {
 
   async function loadUsers() {
     try {
-      const data = await adminFetch("/admin/users")
+      const data = await adminFetch("/users")
       setUsers(Array.isArray(data) ? data : [])
     } catch (e) {
       setErr(e.message)
@@ -1161,7 +1161,7 @@ function UsersPage({ showToast }) {
     if (!newUser.email || !newUser.password) { showToast("Email and password required", "error"); return }
     setBusy(true)
     try {
-      await adminFetch("/admin/users", {
+      await adminFetch("/users", {
         method:"POST",
         body: JSON.stringify(newUser),
       })
@@ -1178,7 +1178,7 @@ function UsersPage({ showToast }) {
 
   async function changeRole(id, role) {
     try {
-      await adminFetch("/admin/role", { method:"PATCH", body: JSON.stringify({ userId:id, role }) })
+      await adminFetch("/role", { method:"PATCH", body: JSON.stringify({ userId:id, role }) })
       loadUsers()
       showToast("Role updated ✓")
     } catch (e) {
@@ -1188,7 +1188,7 @@ function UsersPage({ showToast }) {
 
   async function toggleActive(id, active) {
     try {
-      await adminFetch("/admin/active", { method:"PATCH", body: JSON.stringify({ userId:id, active }) })
+      await adminFetch("/active", { method:"PATCH", body: JSON.stringify({ userId:id, active }) })
       loadUsers()
       showToast(`User ${active ? "enabled" : "disabled"}`)
     } catch (e) {
