@@ -1,15 +1,25 @@
 import { useEffect, useState } from "react"
 import {
-  BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
-  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  Legend,
+  Line,
+  LineChart,
+  Pie,
+  PieChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis, YAxis,
 } from "recharts"
 import * as XLSX from "xlsx"
-import { useAuth } from "./context/AuthContext"
+import { ADMIN_API } from "./api"
 import { supabase } from "./api/supabaseClient"
+import { useAuth } from "./context/AuthContext"
 
 /* ── CONFIG ─────────────────────────────────────────────── */
 const LOGO        = "/logo.png"
-const ADMIN_BASE  = import.meta.env.VITE_ADMIN_URL || "http://localhost:3001"
 const TZS         = (n) => `TZS ${Number(n || 0).toLocaleString()}`
 const todayStr    = () => new Date().toISOString().split("T")[0]
 const thisMonth   = () => new Date().toISOString().slice(0, 7)
@@ -18,11 +28,13 @@ const PALETTE = ["#E07A5F","#3D405B","#81B29A","#F2CC8F","#9C89B8","#F0A500","#0
 const EMOJI_LIST  = ["🍽️","🏎️","🎯","🎟️","🏊","🎪","🎭","⚽","🎸","🧗","🏄","🎡","🛶","🎠","🏋️","🎳","🤸","🧩","🎨","🎮","🧘","🎲","🚀","💆","🎉"]
 const EXPENSE_CATS = ["Restaurant","Go Kart","Paintball","Park Entry","Utilities","Staff","Maintenance","Other"]
 
-/* Admin backend helper */
+/* Admin backend helper — uses VITE_API_URL via src/api/index.js */
 async function adminFetch(path, opts = {}) {
   const { data } = await supabase.auth.getSession()
   const token = data.session?.access_token
-  const res = await fetch(`${ADMIN_BASE}${path}`, {
+  const url = `${ADMIN_API}${path}`
+  console.log("API BASE:", ADMIN_API)
+  const res = await fetch(url, {
     ...opts,
     headers: {
       "Content-Type": "application/json",
@@ -1293,7 +1305,7 @@ function UsersPage({ showToast }) {
             {users.length === 0 && (
               <tr>
                 <td colSpan={6} style={{ ...tS, textAlign:"center", color:"#bbb", paddingTop:24 }}>
-                  {err ? "Could not load users — make sure the admin backend is running on port 3001" : "No users found"}
+                  {err ? `Could not load users — ${err}` : "No users found"}
                 </td>
               </tr>
             )}
