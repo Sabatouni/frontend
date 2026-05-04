@@ -65,11 +65,27 @@ export default function App() {
   }
 
   async function fetchAll() {
-    const [{ data: s }, { data: e }, { data: srv }] = await Promise.all([
+    const { data: session } = await supabase.auth.getSession()
+    console.log("SESSION:", session?.session)
+    console.log("USER ID:", session?.session?.user?.id)
+
+    const [
+      { data: s, error: sErr },
+      { data: e, error: eErr },
+      { data: srv, error: srvErr },
+    ] = await Promise.all([
       supabase.from("sales").select("*").order("date", { ascending: false }),
       supabase.from("expenses").select("*").order("date", { ascending: false }),
       supabase.from("services").select("*"),
     ])
+
+    if (sErr)   console.error("Sales fetch error:", sErr.message)
+    if (eErr)   console.error("Expenses fetch error:", eErr.message)
+    if (srvErr) console.error("Services fetch error:", srvErr.message)
+
+    console.log("Fetched sales:", s)
+    console.log("Fetched expenses:", e)
+
     setSales(s || [])
     setExpenses(e || [])
     setServices(srv || [])
@@ -722,18 +738,21 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, onOpen
   const safeService  = svcNames.includes(form.service) ? form.service : (services[0]?.name || "")
 
   const submit = async () => {
+    if (!user?.id) { showToast("Not authenticated", "error"); return }
     if (!form.amount || Number(form.amount) <= 0) { showToast("Enter a valid amount", "error"); return }
     if (!safeService) { showToast("Select a service", "error"); return }
     setBusy(true)
-    const { error } = await supabase.from("sales").insert([{
+    const payload = {
       service: safeService,
       amount:  Number(form.amount),
       note:    form.note,
       date:    new Date(form.date + "T12:00:00").toISOString(),
       user_id: user.id,
-    }])
+    }
+    console.log("Inserting sale:", payload)
+    const { error } = await supabase.from("sales").insert([payload])
     setBusy(false)
-    if (error) { showToast(error.message, "error"); return }
+    if (error) { console.error("Sale insert error:", error.message); showToast(error.message, "error"); return }
     setForm(f => ({ ...f, amount:"", note:"" }))
     fetchAll()
     showToast("Sale recorded ✓")
@@ -875,18 +894,22 @@ function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner }) {
   const [busy, setBusy] = useState(false)
 
   const submit = async () => {
+    if (!user?.id) { showToast("Not authenticated", "error"); return }
     if (!form.item.trim())            { showToast("Enter an item description", "error"); return }
     if (!form.cost || Number(form.cost) <= 0) { showToast("Enter a valid cost", "error"); return }
     setBusy(true)
-    const { error } = await supabase.from("expenses").insert([{
-      category: form.category,
-      item:     form.item,
-      cost:     Number(form.cost),
-      date:     new Date(form.date + "T12:00:00").toISOString(),
-      user_id:  user.id,
-    }])
+    const payload = {
+      category:   form.category,
+      item:       form.item,
+      cost:       Number(form.cost),
+      date:       new Date(form.date + "T12:00:00").toISOString(),
+      user_id:    user.id,
+      created_by: user.email,
+    }
+    console.log("Inserting expense:", payload)
+    const { error } = await supabase.from("expenses").insert([payload])
     setBusy(false)
-    if (error) { showToast(error.message, "error"); return }
+    if (error) { console.error("Expense insert error:", error.message); showToast(error.message, "error"); return }
     setForm(f => ({ ...f, item:"", cost:"" }))
     fetchAll()
     showToast("Expense recorded ✓")
