@@ -28,6 +28,42 @@ const PALETTE = ["#E07A5F","#3D405B","#81B29A","#F2CC8F","#9C89B8","#F0A500","#0
 const EMOJI_LIST  = ["🍽️","🏎️","🎯","🎟️","🏊","🎪","🎭","⚽","🎸","🧗","🏄","🎡","🛶","🎠","🏋️","🎳","🤸","🧩","🎨","🎮","🧘","🎲","🚀","💆","🎉"]
 const EXPENSE_CATS = ["Restaurant","Go Kart","Paintball","Park Entry","Utilities","Staff","Maintenance","Other"]
 
+/* ── DESIGN TOKENS ──────────────────────────────────────────
+   A small, consistent scale so spacing/radius/shadow/color
+   stop being ad hoc per element. Brand accents (sage + terracotta)
+   are kept, just used with more restraint — neutral surfaces,
+   color reserved for meaning (brand action, money in/out, status). */
+const FONT = "'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif"
+const RADIUS = { sm: 8, md: 12, lg: 16, pill: 999 }
+const SPACE  = { xs:8, sm:12, md:16, lg:20, xl:24, xxl:32 }
+const C = {
+  bg:        "#F7F7F6",
+  surface:   "#FFFFFF",
+  border:    "#EBE8E3",
+  borderStrong: "#DCD8D1",
+  text:      "#1F2233",
+  textSub:   "#4B5163",   // ~7.9:1 on white — WCAG AAA
+  textFaint: "#6B7080",   // ~4.9:1 on white — WCAG AA (was #9A9FAE at 2.6:1, failed)
+  accent:      "#6FA88E",   // sage — badges/icons/borders (not for white-on-fill text)
+  accentHover: "#5F9680",
+  accentSoft:  "#EDF4F0",
+  accentStrong:      "#3F7259", // ~5.6:1 with white text — use for solid buttons/CTAs
+  accentStrongHover: "#345F49",
+  warn:        "#E07A5F",   // terracotta — money-out / destructive / errors (badges, icons)
+  warnHover:   "#C96A50",
+  warnSoft:    "#FBEEE9",
+  warnStrong:      "#A34E33",  // ~5.7:1 with white text, ~5:1 as text on warnSoft
+  warnStrongHover: "#8A4129",
+  sidebar:     "#20222E",
+  sidebarBorder: "rgba(255,255,255,0.08)",
+  sidebarText:   "#9CA0B4",
+}
+const SHADOW = {
+  card:  "0 1px 2px rgba(20,20,30,0.04), 0 1px 3px rgba(20,20,30,0.05)",
+  hover: "0 6px 20px rgba(20,20,30,0.08)",
+  modal: "0 24px 48px rgba(20,20,30,0.16)",
+}
+
 /* Admin backend helper — uses VITE_API_URL via src/api/index.js */
 async function adminFetch(path, opts = {}) {
   const { data } = await supabase.auth.getSession()
@@ -58,6 +94,14 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen]   = useState(true)
   const [toast,    setToast]    = useState(null)
   const [showAddService, setShowAddService] = useState(false)
+
+  // Start with the sidebar closed on phones/small tablets so it behaves
+  // as an off-canvas drawer instead of covering the screen on first load.
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.innerWidth < 768) {
+      setSidebarOpen(false)
+    }
+  }, [])
 
   const showToast = (msg, type = "success") => {
     setToast({ msg, type })
@@ -115,8 +159,8 @@ export default function App() {
   const displayName = user.user_metadata?.name || user.email?.split("@")[0] || "User"
 
   return (
-    <div style={{ display:"flex", height:"100vh", fontFamily:"'DM Sans',sans-serif", background:"#F7F5F0", overflow:"hidden" }}>
-      <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=Playfair+Display:wght@600;700&display=swap" rel="stylesheet" />
+    <div style={{ display:"flex", height:"100vh", fontFamily:FONT, background:C.bg, overflow:"hidden" }}>
+      <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
 
       <Sidebar
         page={page}
@@ -125,24 +169,28 @@ export default function App() {
         displayName={displayName}
         onLogout={() => { logout(); setPage("dashboard") }}
         open={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
       />
 
-      <main style={{ flex:1, overflow:"auto" }}>
+      <main style={{ flex:1, overflow:"auto", minWidth:0 }}>
         {/* Top bar */}
-        <div style={{ padding:"16px 28px 0", display:"flex", alignItems:"center", gap:14, marginBottom:6 }}>
+        <div style={{ padding:"16px clamp(14px,4vw,28px) 0", display:"flex", alignItems:"center", gap:14, marginBottom:6 }}>
           <button
             type="button"
             onClick={() => setSidebarOpen(!sidebarOpen)}
-            style={{ background:"none", border:"none", cursor:"pointer", fontSize:20, padding:4, color:"#555", lineHeight:1 }}
+            className="stv-btn stv-btn-ghost"
+            aria-label="Toggle sidebar"
+            aria-expanded={sidebarOpen}
+            style={{ background:"none", border:"none", borderRadius:RADIUS.sm, cursor:"pointer", fontSize:19, padding:6, color:C.textSub, lineHeight:1 }}
           >
             ☰
           </button>
-          <span style={{ fontSize:13, color:"#999" }}>
+          <span style={{ fontSize:13, color:C.textFaint, fontWeight:500 }}>
             {new Date().toLocaleDateString("en-US", { weekday:"long", year:"numeric", month:"long", day:"numeric" })}
           </span>
         </div>
 
-        <div style={{ padding:"18px 28px 32px" }}>
+        <div style={{ padding:"18px clamp(14px,4vw,28px) 32px" }}>
           {page === "dashboard" && isOwner  && <OwnerDashboard sales={sales} expenses={expenses} services={services} />}
           {page === "dashboard" && !isOwner && <WorkerHome sales={sales} displayName={displayName} setPage={setPage} />}
           {page === "sales"     && (
@@ -167,12 +215,18 @@ export default function App() {
 
       {/* Toast */}
       {toast && (
-        <div style={{
-          position:"fixed", bottom:28, right:28, zIndex:9999,
-          background: toast.type === "success" ? "#81B29A" : "#E07A5F",
-          color:"#fff", padding:"13px 22px", borderRadius:12,
-          fontWeight:600, fontSize:14, boxShadow:"0 8px 28px rgba(0,0,0,0.18)",
-        }}>
+        <div
+          role={toast.type === "error" ? "alert" : "status"}
+          aria-live={toast.type === "error" ? "assertive" : "polite"}
+          style={{
+            position:"fixed", bottom:"clamp(16px,4vw,28px)", right:"clamp(16px,4vw,28px)",
+            left:"auto", maxWidth:"min(90vw, 380px)", zIndex:9999,
+            display:"flex", alignItems:"center", gap:9,
+            background: toast.type === "success" ? C.accentStrong : C.warnStrong,
+            color:"#fff", padding:"13px 20px", borderRadius:RADIUS.md,
+            fontWeight:600, fontSize:14, boxShadow:SHADOW.modal,
+          }}>
+          <span aria-hidden="true" style={{ fontSize:15, lineHeight:1 }}>{toast.type === "error" ? "⚠" : "✓"}</span>
           {toast.msg}
         </div>
       )}
@@ -188,9 +242,61 @@ export default function App() {
 
       <style>{`
         * { box-sizing:border-box; margin:0; padding:0; }
-        body { background:#F7F5F0; }
+        html, body { background:${C.bg}; overflow-x:hidden; }
+        body { font-family:${FONT}; -webkit-font-smoothing:antialiased; }
+        img { max-width:100%; height:auto; }
         ::-webkit-scrollbar { width:5px; }
-        ::-webkit-scrollbar-thumb { background:#D4CFC7; border-radius:3px; }
+        ::-webkit-scrollbar-thumb { background:${C.borderStrong}; border-radius:3px; }
+
+        /* Shared interaction states — impossible to express via inline style */
+        .stv-btn { transition: background-color .15s ease, border-color .15s ease, color .15s ease, box-shadow .15s ease, transform .1s ease, opacity .15s ease; }
+        .stv-btn:active { transform: translateY(1px); }
+        .stv-btn-primary:hover:not(:disabled)   { background:${C.accentStrongHover} !important; }
+        .stv-btn-danger-solid:hover:not(:disabled) { background:${C.warnStrongHover} !important; }
+        .stv-btn-secondary:hover:not(:disabled) { background:${C.bg} !important; border-color:${C.borderStrong} !important; }
+        .stv-btn-ghost:hover:not(:disabled)     { background:${C.bg} !important; color:${C.text} !important; }
+        .stv-btn-danger:hover:not(:disabled)    { background:${C.warnStrong} !important; color:#fff !important; }
+        .stv-btn-accent:hover:not(:disabled)    { background:${C.accentStrong} !important; color:#fff !important; }
+
+        .stv-card { transition: box-shadow .15s ease, border-color .15s ease; }
+        .stv-card-hover:hover { box-shadow:${SHADOW.hover}; border-color:${C.borderStrong}; }
+
+        .stv-nav-item:hover { background:rgba(255,255,255,0.06) !important; color:#fff !important; }
+        .stv-table tbody tr { transition: background-color .12s ease; }
+        .stv-table tbody tr:hover { background:#FAFAF9; }
+
+        input, select, textarea { transition: border-color .15s ease, box-shadow .15s ease; }
+        input:focus, select:focus, textarea:focus {
+          border-color:${C.accent} !important;
+          box-shadow:0 0 0 3px ${C.accentSoft};
+        }
+        button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
+          outline: 2px solid ${C.accentStrong};
+          outline-offset: 2px;
+        }
+        input:focus-visible, select:focus-visible {
+          outline: none;
+        }
+
+        /* Mobile drawer overlay (hidden on tablet/desktop) */
+        .stv-sidebar-overlay {
+          position:fixed; inset:0; background:rgba(20,20,30,0.45);
+          z-index:900; opacity:0; pointer-events:none; transition:opacity .2s ease;
+          display:none;
+        }
+        .stv-sidebar-overlay.is-open { opacity:1; pointer-events:auto; }
+
+        @media (max-width: 767px) {
+          .stv-sidebar-overlay { display:block; }
+          .stv-sidebar {
+            position:fixed !important; top:0; left:0; z-index:950;
+            height:100vh !important; width:min(78vw,260px) !important; min-width:0 !important;
+            transform:translateX(-100%);
+            box-shadow:0 0 40px rgba(0,0,0,.25);
+            transition:transform .25s ease;
+          }
+          .stv-sidebar.is-open { transform:translateX(0); }
+        }
       `}</style>
     </div>
   )
@@ -220,17 +326,18 @@ function LoginPage() {
     <div style={{
       minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center",
       background:"linear-gradient(145deg, #1a1c2b 0%, #2f3347 50%, #3a2e1e 100%)",
-      fontFamily:"'DM Sans',sans-serif",
+      fontFamily:FONT, padding:20,
     }}>
-      <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;700&family=Playfair+Display:wght@700&display=swap" rel="stylesheet" />
-      <div style={{ background:"#fff", borderRadius:24, padding:"44px 40px", width:400, boxShadow:"0 32px 80px rgba(0,0,0,0.4)" }}>
-        <div style={{ textAlign:"center", marginBottom:32 }}>
-          <img src={LOGO} alt="Swahili Tent Village" style={{ width:200, height:"auto", marginBottom:4, mixBlendMode:"multiply" }} />
-          <p style={{ margin:"4px 0 0", color:"#888", fontSize:13, letterSpacing:1 }}>POINT OF SALE</p>
+      <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+      <div style={{ background:C.surface, borderRadius:RADIUS.lg, padding:"clamp(28px,6vw,44px) clamp(20px,6vw,40px)", width:"min(92vw, 400px)", maxHeight:"92vh", overflowY:"auto", boxShadow:SHADOW.modal }}>
+        <div style={{ textAlign:"center", marginBottom:SPACE.xl }}>
+          <img src={LOGO} alt="Swahili Tent Village" style={{ width:180, height:"auto", marginBottom:4, mixBlendMode:"multiply" }} />
+          <p style={{ margin:"6px 0 0", color:C.textFaint, fontSize:12, letterSpacing:1.5, fontWeight:600 }}>POINT OF SALE</p>
         </div>
 
-        <label style={lS}>Email</label>
+        <label style={lS} htmlFor="login-email">Email</label>
         <input
+          id="login-email"
           type="email"
           placeholder="you@example.com"
           value={email}
@@ -239,8 +346,9 @@ function LoginPage() {
           style={iS}
         />
 
-        <label style={{ ...lS, marginTop:14 }}>Password</label>
+        <label style={{ ...lS, marginTop:SPACE.sm+2 }} htmlFor="login-password">Password</label>
         <input
+          id="login-password"
           type="password"
           placeholder="••••••••"
           value={password}
@@ -249,19 +357,20 @@ function LoginPage() {
           style={{ ...iS, marginTop:0 }}
         />
 
-        {error && <p style={{ color:"#E07A5F", fontSize:13, marginTop:8 }}>{error}</p>}
+        {error && <p role="alert" style={{ color:C.warnStrong, fontSize:13, marginTop:8 }}>{error}</p>}
 
         <button
           type="button"
           onClick={handle}
           disabled={busy}
+          className="stv-btn stv-btn-primary"
           style={{
-            width:"100%", marginTop:22, padding:"15px",
-            background:"#3D405B", color:"#fff", border:"none",
-            borderRadius:12, fontSize:15, fontWeight:600,
+            width:"100%", marginTop:SPACE.lg+2, padding:"14px",
+            background:C.accentStrong, color:"#fff", border:"none",
+            borderRadius:RADIUS.sm, fontSize:14.5, fontWeight:600,
             cursor: busy ? "not-allowed" : "pointer",
             opacity: busy ? 0.7 : 1,
-            fontFamily:"'DM Sans',sans-serif",
+            fontFamily:FONT, boxShadow:"0 1px 2px rgba(20,20,30,0.08)",
           }}
         >
           {busy ? "Signing in…" : "Sign In"}
@@ -272,7 +381,7 @@ function LoginPage() {
 }
 
 /* ── SIDEBAR ─────────────────────────────────────────────── */
-function Sidebar({ page, setPage, isOwner, displayName, onLogout, open }) {
+function Sidebar({ page, setPage, isOwner, displayName, onLogout, open, onClose }) {
   const ownerNav = [
     { id:"dashboard", label:"Dashboard", icon:"📊" },
     { id:"sales",     label:"Sales",     icon:"💰" },
@@ -288,10 +397,18 @@ function Sidebar({ page, setPage, isOwner, displayName, onLogout, open }) {
   const nav = isOwner ? ownerNav : workerNav
 
   return (
-    <aside style={{
+    <>
+      <div
+        className={`stv-sidebar-overlay${open ? " is-open" : ""}`}
+        onClick={onClose}
+        aria-hidden="true"
+      />
+      <aside
+      className={`stv-sidebar${open ? " is-open" : ""}`}
+      style={{
       width: open ? 232 : 66,
       minWidth: open ? 232 : 66,
-      background:"#2A2D40",
+      background:C.sidebar,
       color:"#fff",
       display:"flex",
       flexDirection:"column",
@@ -301,69 +418,72 @@ function Sidebar({ page, setPage, isOwner, displayName, onLogout, open }) {
     }}>
       {/* Logo */}
       <div style={{
-        padding: open ? "22px 16px 14px" : "18px 10px 14px",
+        padding: open ? "24px 16px 16px" : "18px 10px 16px",
         display:"flex", alignItems:"center", justifyContent:"center",
         flexDirection:"column", gap:6,
-        borderBottom:"1px solid #3D405B",
+        borderBottom:`1px solid ${C.sidebarBorder}`,
       }}>
         <img
           src={LOGO}
           alt="logo"
-          style={{ width: open ? 110 : 42, height:"auto", transition:"width .25s", objectFit:"contain", mixBlendMode:"screen" }}
+          style={{ width: open ? 104 : 40, height:"auto", transition:"width .25s", objectFit:"contain", mixBlendMode:"screen" }}
         />
         {open && (
-          <div style={{ fontSize:10, color:"#8B8FA8", textAlign:"center", marginTop:2, letterSpacing:0.5 }}>
-            {isOwner ? "Owner Dashboard" : "Worker Panel"}
+          <div style={{ fontSize:10, color:C.sidebarText, textAlign:"center", marginTop:2, letterSpacing:0.6, fontWeight:500 }}>
+            {isOwner ? "OWNER DASHBOARD" : "WORKER PANEL"}
           </div>
         )}
       </div>
 
       {/* Nav */}
-      <nav style={{ flex:1, padding:"8px 10px" }}>
+      <nav style={{ flex:1, padding:"12px 10px" }} aria-label="Main navigation">
         {nav.map(item => (
           <button
             key={item.id}
             type="button"
             onClick={() => setPage(item.id)}
+            className="stv-btn stv-nav-item"
+            aria-label={item.label}
+            aria-current={page === item.id ? "page" : undefined}
+            title={item.label}
             style={{
-              display:"flex", alignItems:"center", gap:10,
+              display:"flex", alignItems:"center", gap:11,
               width:"100%",
-              padding: open ? "11px 14px" : "11px 7px",
-              marginBottom:3, borderRadius:10,
+              padding: open ? "10px 14px" : "10px 7px",
+              marginBottom:2, borderRadius:RADIUS.sm,
               border:"none", cursor:"pointer",
-              background: page === item.id ? "#3D405B" : "transparent",
-              color: page === item.id ? "#fff" : "#8B8FA8",
-              fontSize:13,
-              fontWeight: page === item.id ? 600 : 400,
+              background: page === item.id ? "rgba(255,255,255,0.1)" : "transparent",
+              color: page === item.id ? "#fff" : C.sidebarText,
+              fontSize:13.5,
+              fontWeight: page === item.id ? 600 : 500,
               textAlign:"left",
-              fontFamily:"'DM Sans',sans-serif",
+              fontFamily:FONT,
               justifyContent: open ? "flex-start" : "center",
-              transition:"background 0.15s",
             }}
           >
-            <span style={{ fontSize:17, flexShrink:0 }}>{item.icon}</span>
+            <span style={{ fontSize:16, flexShrink:0, opacity: page === item.id ? 1 : 0.85 }}>{item.icon}</span>
             {open && <span>{item.label}</span>}
           </button>
         ))}
       </nav>
 
       {/* User + Logout */}
-      <div style={{ padding:"14px 10px", borderTop:"1px solid #3D405B" }}>
+      <div style={{ padding:"16px 10px", borderTop:`1px solid ${C.sidebarBorder}` }}>
         {open && (
-          <div style={{ display:"flex", alignItems:"center", gap:9, marginBottom:10 }}>
+          <div style={{ display:"flex", alignItems:"center", gap:SPACE.sm, marginBottom:12 }}>
             <div style={{
-              width:32, height:32, borderRadius:"50%",
-              background:"#E07A5F",
+              width:30, height:30, borderRadius:RADIUS.sm,
+              background:C.warn,
               display:"flex", alignItems:"center", justifyContent:"center",
-              fontSize:13, fontWeight:700, flexShrink:0,
+              fontSize:12.5, fontWeight:700, flexShrink:0, color:"#fff",
             }}>
               {displayName[0]?.toUpperCase()}
             </div>
             <div style={{ overflow:"hidden" }}>
-              <div style={{ fontSize:12, fontWeight:600, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>
+              <div style={{ fontSize:12.5, fontWeight:600, color:"#fff", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>
                 {displayName}
               </div>
-              <div style={{ fontSize:10, color:"#8B8FA8", textTransform:"capitalize" }}>
+              <div style={{ fontSize:10.5, color:C.sidebarText, textTransform:"capitalize" }}>
                 {isOwner ? "Owner" : "Worker"}
               </div>
             </div>
@@ -372,39 +492,47 @@ function Sidebar({ page, setPage, isOwner, displayName, onLogout, open }) {
         <button
           type="button"
           onClick={onLogout}
+          className="stv-btn stv-nav-item"
+          aria-label="Sign out"
+          title="Sign out"
           style={{
-            width:"100%", padding:"9px 14px", borderRadius:9,
-            border:"1px solid #3D405B", background:"transparent",
-            color:"#8B8FA8", cursor:"pointer", fontSize:12,
-            fontFamily:"'DM Sans',sans-serif",
-            display:"flex", alignItems:"center", gap:7,
+            width:"100%", padding:"9px 14px", borderRadius:RADIUS.sm,
+            border:`1px solid ${C.sidebarBorder}`, background:"transparent",
+            color:C.sidebarText, cursor:"pointer", fontSize:12.5, fontWeight:500,
+            fontFamily:FONT,
+            display:"flex", alignItems:"center", gap:8,
             justifyContent: open ? "flex-start" : "center",
           }}
         >
-          <span>🚪</span>
+          <span style={{ fontSize:14 }}>🚪</span>
           {open && "Sign Out"}
         </button>
       </div>
-    </aside>
+      </aside>
+    </>
   )
 }
 
 /* ── STAT CARD ───────────────────────────────────────────── */
 function StatCard({ label, value, sub, color, icon }) {
   return (
-    <div style={{
-      background:"#fff", borderRadius:18, padding:"22px 20px",
-      boxShadow:"0 2px 10px rgba(0,0,0,0.06)",
-      flex:1, minWidth:0, borderTop:`4px solid ${color}`,
+    <div className="stv-card stv-card-hover" style={{
+      background:C.surface, borderRadius:RADIUS.md, padding:"18px 20px",
+      border:`1px solid ${C.border}`, boxShadow:SHADOW.card,
+      flex:1, minWidth:0,
     }}>
-      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:10 }}>
-        <span style={{ fontSize:12, color:"#888", fontWeight:500 }}>{label}</span>
-        <span style={{ fontSize:22 }}>{icon}</span>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:14 }}>
+        <span style={{ fontSize:12, color:C.textSub, fontWeight:600 }}>{label}</span>
+        <span style={{
+          width:32, height:32, borderRadius:RADIUS.sm, flexShrink:0,
+          background:color + "18", display:"flex", alignItems:"center", justifyContent:"center",
+          fontSize:15,
+        }}>{icon}</span>
       </div>
-      <div style={{ fontSize:21, fontWeight:700, color:"#2A2D40", fontFamily:"'Playfair Display',serif" }}>
+      <div style={{ fontSize:22, fontWeight:700, color:C.text, letterSpacing:"-0.01em" }}>
         {value}
       </div>
-      {sub && <div style={{ fontSize:11, color:"#aaa", marginTop:5 }}>{sub}</div>}
+      {sub && <div style={{ fontSize:11.5, color:C.textFaint, marginTop:6 }}>{sub}</div>}
     </div>
   )
 }
@@ -416,10 +544,10 @@ function ServiceBadge({ name, services }) {
   const emoji = svc?.emoji || ""
   return (
     <span style={{
-      background: color + "22", color,
-      border:`1px solid ${color}44`,
-      padding:"3px 9px", borderRadius:6,
-      fontSize:11, fontWeight:600,
+      background: color + "18", color,
+      border:`1px solid ${color}33`,
+      padding:"4px 10px", borderRadius:RADIUS.pill,
+      fontSize:11.5, fontWeight:600, whiteSpace:"nowrap",
     }}>
       {emoji && <span style={{ marginRight:4 }}>{emoji}</span>}
       {name || "—"}
@@ -455,39 +583,46 @@ function AddServiceModal({ onAdd, onClose, existing }) {
   return (
     <div
       onClick={onClose}
-      style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.5)", zIndex:1000, display:"flex", alignItems:"center", justifyContent:"center" }}
+      style={{ position:"fixed", inset:0, background:"rgba(20,20,30,0.5)", zIndex:1000, display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}
     >
       <div
         onClick={e => e.stopPropagation()}
-        style={{ background:"#fff", borderRadius:22, padding:"36px 32px", width:400, boxShadow:"0 20px 60px rgba(0,0,0,0.25)" }}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="add-service-title"
+        style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:RADIUS.lg, padding:"clamp(22px,5vw,32px)", width:"min(92vw, 400px)", maxHeight:"90vh", overflowY:"auto", boxShadow:SHADOW.modal }}
       >
-        <h3 style={{ margin:"0 0 24px", fontFamily:"'Playfair Display',serif", fontSize:20, color:"#2A2D40" }}>
+        <h2 id="add-service-title" style={{ margin:"0 0 22px", fontFamily:FONT, fontWeight:700, fontSize:17, color:C.text, letterSpacing:"-0.01em" }}>
           Add New Service
-        </h3>
+        </h2>
 
-        <label style={lS}>Service Name</label>
+        <label style={lS} htmlFor="svc-name">Service Name</label>
         <input
+          id="svc-name"
           autoFocus
           placeholder="e.g. Swimming Pool"
           value={name}
           onChange={e => { setName(e.target.value); setErr("") }}
           onKeyDown={e => e.key === "Enter" && submit()}
-          style={{ ...iS, marginBottom: err ? 4 : 18 }}
+          style={{ ...iS, marginBottom: err ? 4 : SPACE.md+2 }}
         />
-        {err && <p style={{ color:"#E07A5F", fontSize:12, margin:"4px 0 14px" }}>{err}</p>}
+        {err && <p role="alert" style={{ color:C.warnStrong, fontSize:12, margin:"4px 0 14px" }}>{err}</p>}
 
-        <label style={lS}>Icon</label>
-        <div style={{ display:"flex", flexWrap:"wrap", gap:7, marginBottom:18 }}>
+        <label style={lS} id="svc-icon-label">Icon</label>
+        <div role="group" aria-labelledby="svc-icon-label" style={{ display:"flex", flexWrap:"wrap", gap:7, marginBottom:SPACE.md+2 }}>
           {EMOJI_LIST.map(e => (
             <button
               key={e}
               type="button"
               onClick={() => setEmoji(e)}
+              className="stv-btn"
+              aria-label={`Icon: ${e}`}
+              aria-pressed={emoji === e}
               style={{
-                width:38, height:38, borderRadius:9,
-                border:`2px solid ${emoji === e ? "#3D405B" : "#E8E4DF"}`,
-                background: emoji === e ? "#3D405B" : "#fff",
-                fontSize:18, cursor:"pointer",
+                width:36, height:36, borderRadius:RADIUS.sm,
+                border:`1.5px solid ${emoji === e ? C.text : C.border}`,
+                background: emoji === e ? C.text : C.surface,
+                fontSize:16, cursor:"pointer",
                 display:"flex", alignItems:"center", justifyContent:"center",
               }}
             >
@@ -496,16 +631,20 @@ function AddServiceModal({ onAdd, onClose, existing }) {
           ))}
         </div>
 
-        <label style={lS}>Color</label>
-        <div style={{ display:"flex", flexWrap:"wrap", gap:8, marginBottom:26 }}>
+        <label style={lS} id="svc-color-label">Color</label>
+        <div role="group" aria-labelledby="svc-color-label" style={{ display:"flex", flexWrap:"wrap", gap:8, marginBottom:SPACE.lg+4 }}>
           {PALETTE.map(c => (
             <button
               key={c}
               type="button"
               onClick={() => setColor(c)}
+              className="stv-btn"
+              aria-label={`Color swatch ${c}`}
+              aria-pressed={color === c}
               style={{
-                width:30, height:30, borderRadius:8,
-                border:`3px solid ${color === c ? "#2A2D40" : "transparent"}`,
+                width:28, height:28, borderRadius:RADIUS.sm,
+                border:`2px solid ${color === c ? C.text : "transparent"}`,
+                boxShadow: color === c ? "none" : `0 0 0 1px ${C.border}`,
                 background:c, cursor:"pointer", outline:"none",
               }}
             />
@@ -513,12 +652,12 @@ function AddServiceModal({ onAdd, onClose, existing }) {
         </div>
 
         {/* Preview */}
-        <div style={{ marginBottom:22, padding:"12px 16px", background:"#F7F5F0", borderRadius:12, display:"flex", alignItems:"center", gap:10 }}>
-          <span style={{ fontSize:22 }}>{emoji}</span>
+        <div style={{ marginBottom:SPACE.lg, padding:"12px 16px", background:C.bg, borderRadius:RADIUS.sm, display:"flex", alignItems:"center", gap:10 }}>
+          <span style={{ fontSize:20 }}>{emoji}</span>
           <span style={{
-            background: color + "22", color,
-            border:`1px solid ${color}44`,
-            padding:"4px 12px", borderRadius:7,
+            background: color + "18", color,
+            border:`1px solid ${color}33`,
+            padding:"4px 12px", borderRadius:RADIUS.pill,
             fontSize:13, fontWeight:600,
           }}>
             {name || "Preview"}
@@ -529,7 +668,8 @@ function AddServiceModal({ onAdd, onClose, existing }) {
           <button
             type="button"
             onClick={onClose}
-            style={{ flex:1, padding:"13px", borderRadius:11, border:"2px solid #E8E4DF", background:"#fff", color:"#555", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600 }}
+            className="stv-btn stv-btn-secondary"
+            style={{ flex:1, padding:"12px", borderRadius:RADIUS.sm, border:`1px solid ${C.border}`, background:C.surface, color:C.text, cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5 }}
           >
             Cancel
           </button>
@@ -537,7 +677,8 @@ function AddServiceModal({ onAdd, onClose, existing }) {
             type="button"
             onClick={submit}
             disabled={busy}
-            style={{ flex:1, padding:"13px", borderRadius:11, border:"none", background:"#3D405B", color:"#fff", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600, fontSize:14, opacity: busy ? 0.7 : 1 }}
+            className="stv-btn stv-btn-primary"
+            style={{ flex:1, padding:"12px", borderRadius:RADIUS.sm, border:"none", background:C.accentStrong, color:"#fff", cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5, opacity: busy ? 0.7 : 1 }}
           >
             {busy ? "Saving…" : `${emoji} Add Service`}
           </button>
@@ -583,20 +724,20 @@ function OwnerDashboard({ sales, expenses, services }) {
   return (
     <div>
       <h1 style={pT}>Overview</h1>
-      <p style={{ margin:"-10px 0 22px", color:"#888", fontSize:13 }}>This month's performance</p>
+      <p style={{ margin:"0 0 " + SPACE.xl + "px", color:C.textSub, fontSize:13.5 }}>This month's performance</p>
 
       {/* Stat cards */}
-      <div style={{ display:"flex", gap:14, marginBottom:20, flexWrap:"wrap" }}>
-        <StatCard label="Today's Sales"    value={TZS(todaySales)} color="#81B29A" icon="💰" sub={`Today expenses: ${TZS(todayExp)}`} />
-        <StatCard label="Monthly Revenue"  value={TZS(monthSales)} color="#E07A5F" icon="📈" />
-        <StatCard label="Monthly Expenses" value={TZS(monthExp)}   color="#F2CC8F" icon="🧾" />
-        <StatCard label="Net Profit"       value={TZS(netProfit)}  color={netProfit >= 0 ? "#81B29A" : "#E07A5F"} icon={netProfit >= 0 ? "✅" : "⚠️"} />
+      <div style={{ display:"grid", gap:SPACE.md, marginBottom:SPACE.xl, gridTemplateColumns:"repeat(auto-fit, minmax(200px, 1fr))" }}>
+        <StatCard label="Today's Sales"    value={TZS(todaySales)} color={C.accent} icon="💰" sub={`Today expenses: ${TZS(todayExp)}`} />
+        <StatCard label="Monthly Revenue"  value={TZS(monthSales)} color={C.accent} icon="📈" />
+        <StatCard label="Monthly Expenses" value={TZS(monthExp)}   color={C.warn} icon="🧾" />
+        <StatCard label="Net Profit"       value={TZS(netProfit)}  color={netProfit >= 0 ? C.accent : C.warn} icon={netProfit >= 0 ? "✅" : "⚠️"} />
       </div>
 
       {/* Charts row */}
-      <div style={{ display:"flex", gap:14, marginBottom:20, flexWrap:"wrap" }}>
+      <div style={{ display:"flex", gap:SPACE.md, marginBottom:SPACE.xl, flexWrap:"wrap" }}>
         <div style={{ ...panelS, flex:2, minWidth:280 }}>
-          <h3 style={{ margin:"0 0 18px", fontSize:14, color:"#2A2D40" }}>Sales vs Expenses — Last 7 Days</h3>
+          <h2 style={{ margin:"0 0 16px", fontSize:14, fontWeight:600, color:C.text }}>Sales vs Expenses — Last 7 Days</h2>
           <ResponsiveContainer width="100%" height={190}>
             <BarChart data={trend} barSize={13}>
               <CartesianGrid strokeDasharray="3 3" stroke="#F0EDE8" />
@@ -611,7 +752,7 @@ function OwnerDashboard({ sales, expenses, services }) {
         </div>
 
         <div style={{ ...panelS, flex:1, minWidth:200 }}>
-          <h3 style={{ margin:"0 0 14px", fontSize:14, color:"#2A2D40" }}>Revenue by Service</h3>
+          <h2 style={{ margin:"0 0 14px", fontSize:14, fontWeight:600, color:C.text }}>Revenue by Service</h2>
           {byService.length > 0 ? (
             <>
               <ResponsiveContainer width="100%" height={150}>
@@ -619,47 +760,49 @@ function OwnerDashboard({ sales, expenses, services }) {
                   <Pie data={byService} dataKey="value" cx="50%" cy="50%" outerRadius={62} innerRadius={32} paddingAngle={3}>
                     {byService.map((e, i) => <Cell key={i} fill={getColor(e.name)} />)}
                   </Pie>
-                  <Tooltip formatter={v => TZS(v)} contentStyle={{ borderRadius:10, border:"none", fontSize:12 }} />
+                  <Tooltip formatter={v => TZS(v)} contentStyle={{ borderRadius:RADIUS.sm, border:`1px solid ${C.border}`, fontSize:12, boxShadow:SHADOW.hover }} />
                 </PieChart>
               </ResponsiveContainer>
               {byService.map(s => (
-                <div key={s.name} style={{ display:"flex", alignItems:"center", gap:6, fontSize:11, color:"#666", marginTop:6 }}>
-                  <span style={{ width:9, height:9, borderRadius:2, background:getColor(s.name), display:"inline-block", flexShrink:0 }} />
+                <div key={s.name} style={{ display:"flex", alignItems:"center", gap:7, fontSize:11.5, color:C.textSub, marginTop:7 }}>
+                  <span aria-hidden="true" style={{ width:8, height:8, borderRadius:RADIUS.pill, background:getColor(s.name), display:"inline-block", flexShrink:0 }} />
                   {s.emoji} {s.name}
                 </div>
               ))}
             </>
           ) : (
-            <div style={{ textAlign:"center", color:"#bbb", fontSize:13, paddingTop:40 }}>No data this month</div>
+            <div style={{ textAlign:"center", color:C.textFaint, fontSize:13, paddingTop:40 }}>No data this month</div>
           )}
         </div>
       </div>
 
       {/* Recent transactions */}
       <div style={panelS}>
-        <h3 style={{ margin:"0 0 14px", fontSize:14, color:"#2A2D40" }}>Recent Transactions</h3>
-        <table style={{ width:"100%", borderCollapse:"collapse" }}>
+        <h2 style={{ margin:"0 0 14px", fontSize:14, fontWeight:600, color:C.text }}>Recent Transactions</h2>
+        <div style={{ overflowX:"auto", WebkitOverflowScrolling:"touch" }}>
+        <table className="stv-table" style={{ width:"100%", minWidth:480, borderCollapse:"collapse" }}>
           <thead>
-            <tr style={{ borderBottom:"2px solid #F0EDE8" }}>
+            <tr style={{ borderBottom:`1.5px solid ${C.border}` }}>
               {["Date","Service","Amount","Note"].map(h => (
-                <th key={h} style={{ textAlign:"left", padding:"0 0 10px", fontSize:10, color:"#aaa", fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
+                <th key={h} scope="col" style={{ textAlign:"left", padding:"0 0 10px", fontSize:10.5, color:C.textFaint, fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
               ))}
             </tr>
           </thead>
           <tbody>
             {recent.map(s => (
-              <tr key={s.id} style={{ borderBottom:"1px solid #F7F5F0" }}>
+              <tr key={s.id} style={{ borderBottom:`1px solid ${C.bg}` }}>
                 <td style={tS}>{s.date?.slice(0, 10)}</td>
                 <td style={tS}><ServiceBadge name={s.service} services={services} /></td>
                 <td style={{ ...tS, fontWeight:600 }}>{TZS(s.amount)}</td>
-                <td style={{ ...tS, color:"#aaa" }}>{s.note || "—"}</td>
+                <td style={{ ...tS, color:C.textFaint }}>{s.note || "—"}</td>
               </tr>
             ))}
             {recent.length === 0 && (
-              <tr><td colSpan={4} style={{ ...tS, textAlign:"center", color:"#bbb", paddingTop:20 }}>No sales yet</td></tr>
+              <tr><td colSpan={4} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>No sales yet</td></tr>
             )}
           </tbody>
         </table>
+        </div>
       </div>
     </div>
   )
@@ -673,49 +816,51 @@ function WorkerHome({ sales, displayName, setPage }) {
   return (
     <div>
       <h1 style={pT}>Good day, {displayName} 👋</h1>
-      <p style={{ margin:"-10px 0 26px", color:"#888" }}>What would you like to record today?</p>
+      <p style={{ margin:"0 0 " + SPACE.xl + "px", color:C.textSub, fontSize:13.5 }}>What would you like to record today?</p>
 
-      <div style={{ display:"flex", gap:14, marginBottom:28, flexWrap:"wrap" }}>
-        <StatCard label="Today's Sales" value={TZS(todaySales)} color="#81B29A" icon="💰" sub={`${count} transaction${count !== 1 ? "s" : ""} recorded`} />
+      <div style={{ display:"grid", gap:SPACE.md, marginBottom:SPACE.xl, gridTemplateColumns:"repeat(auto-fit, minmax(200px, 1fr))" }}>
+        <StatCard label="Today's Sales" value={TZS(todaySales)} color={C.accent} icon="💰" sub={`${count} transaction${count !== 1 ? "s" : ""} recorded`} />
       </div>
 
-      <div style={{ display:"flex", gap:16, flexWrap:"wrap" }}>
+      <div style={{ display:"grid", gap:SPACE.md, gridTemplateColumns:"repeat(auto-fit, minmax(220px, 1fr))" }}>
         <button
           type="button"
           onClick={() => setPage("sales")}
+          className="stv-btn"
           style={{
-            flex:1, minWidth:180, padding:"34px 26px",
-            borderRadius:20, border:"none", background:"#81B29A",
+            flex:1, minWidth:180, padding:"28px 24px",
+            borderRadius:RADIUS.lg, border:"none", background:C.accentStrong,
             color:"#fff", cursor:"pointer", textAlign:"center",
-            fontFamily:"'DM Sans',sans-serif",
-            boxShadow:"0 8px 26px #81B29A55",
-            transition:"transform .15s",
+            fontFamily:FONT,
+            boxShadow:`0 4px 16px ${C.accent}33`,
+            transition:"transform .15s, box-shadow .15s",
           }}
           onMouseEnter={e => e.currentTarget.style.transform = "translateY(-2px)"}
           onMouseLeave={e => e.currentTarget.style.transform = "none"}
         >
-          <span style={{ fontSize:34, marginBottom:10, display:"block" }}>💰</span>
-          <span style={{ fontSize:16, fontWeight:700, display:"block" }}>Record Sale</span>
-          <span style={{ fontSize:12, opacity:.8, marginTop:5, display:"block" }}>Restaurant, Go Kart, Paintball…</span>
+          <span style={{ fontSize:30, marginBottom:10, display:"block" }}>💰</span>
+          <span style={{ fontSize:15.5, fontWeight:700, display:"block" }}>Record Sale</span>
+          <span style={{ fontSize:12, opacity:.85, marginTop:5, display:"block" }}>Restaurant, Go Kart, Paintball…</span>
         </button>
 
         <button
           type="button"
           onClick={() => setPage("expenses")}
+          className="stv-btn"
           style={{
-            flex:1, minWidth:180, padding:"34px 26px",
-            borderRadius:20, border:"none", background:"#E07A5F",
+            flex:1, minWidth:180, padding:"28px 24px",
+            borderRadius:RADIUS.lg, border:"none", background:C.warnStrong,
             color:"#fff", cursor:"pointer", textAlign:"center",
-            fontFamily:"'DM Sans',sans-serif",
-            boxShadow:"0 8px 26px #E07A5F55",
-            transition:"transform .15s",
+            fontFamily:FONT,
+            boxShadow:`0 4px 16px ${C.warn}33`,
+            transition:"transform .15s, box-shadow .15s",
           }}
           onMouseEnter={e => e.currentTarget.style.transform = "translateY(-2px)"}
           onMouseLeave={e => e.currentTarget.style.transform = "none"}
         >
-          <span style={{ fontSize:34, marginBottom:10, display:"block" }}>🧾</span>
-          <span style={{ fontSize:16, fontWeight:700, display:"block" }}>Record Expense</span>
-          <span style={{ fontSize:12, opacity:.8, marginTop:5, display:"block" }}>Supplies, purchases, costs…</span>
+          <span style={{ fontSize:30, marginBottom:10, display:"block" }}>🧾</span>
+          <span style={{ fontSize:15.5, fontWeight:700, display:"block" }}>Record Expense</span>
+          <span style={{ fontSize:12, opacity:.85, marginTop:5, display:"block" }}>Supplies, purchases, costs…</span>
         </button>
       </div>
     </div>
@@ -780,26 +925,27 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, onOpen
       <div style={{ display:"flex", gap:20, flexWrap:"wrap", alignItems:"flex-start" }}>
 
         {/* Form card */}
-        <div style={{ ...fC, width: isOwner ? 300 : "100%", maxWidth: isOwner ? 300 : 460 }}>
-          <h3 style={fTi}>Record a Sale</h3>
+        <div style={{ ...fC, flex: isOwner ? "1 1 280px" : "1 1 100%", flexShrink:1, width:"auto", maxWidth: isOwner ? 340 : 460 }}>
+          <h2 style={fTi}>Record a Sale</h2>
 
-          <label style={lS}>Service</label>
-          <div style={{ display:"flex", flexWrap:"wrap", gap:7, marginBottom:6 }}>
+          <label style={lS} id="sale-service-label">Service</label>
+          <div role="group" aria-labelledby="sale-service-label" style={{ display:"flex", flexWrap:"wrap", gap:7, marginBottom:8 }}>
             {services.map(s => (
               <button
                 key={s.id}
                 type="button"
                 onClick={() => setForm(f => ({ ...f, service:s.name }))}
+                className="stv-btn"
+                aria-pressed={safeService === s.name}
                 style={{
-                  padding:"9px 14px", borderRadius:9,
-                  border:"2px solid",
-                  borderColor: safeService === s.name ? s.color : "#E8E4DF",
-                  background:  safeService === s.name ? s.color : "#fff",
-                  color:       safeService === s.name ? "#fff" : "#555",
+                  padding:"8px 13px", borderRadius:RADIUS.sm,
+                  border:"1.5px solid",
+                  borderColor: safeService === s.name ? s.color : C.border,
+                  background:  safeService === s.name ? s.color : C.surface,
+                  color:       safeService === s.name ? "#fff" : C.textSub,
                   fontSize:12, fontWeight:600, cursor:"pointer",
-                  fontFamily:"'DM Sans',sans-serif",
+                  fontFamily:FONT,
                   display:"flex", alignItems:"center", gap:5,
-                  transition:"all .15s",
                 }}
               >
                 {s.emoji && <span>{s.emoji}</span>}
@@ -812,23 +958,24 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, onOpen
             <button
               type="button"
               onClick={onOpenAddService}
-              style={{ display:"flex", alignItems:"center", gap:6, background:"none", border:"1.5px dashed #C4BEB6", color:"#888", borderRadius:9, padding:"7px 12px", fontSize:12, cursor:"pointer", marginBottom:18, fontFamily:"'DM Sans',sans-serif" }}
+              className="stv-btn stv-btn-ghost"
+              style={{ display:"flex", alignItems:"center", gap:6, background:"none", border:`1.5px dashed ${C.borderStrong}`, color:C.textSub, borderRadius:RADIUS.sm, padding:"7px 12px", fontSize:12, fontWeight:500, cursor:"pointer", marginBottom:SPACE.md+2, fontFamily:FONT }}
             >
-              <span style={{ fontSize:16 }}>＋</span> Add New Service
+              <span style={{ fontSize:15 }}>＋</span> Add New Service
             </button>
           )}
           {!isOwner && <div style={{ marginBottom:16 }} />}
 
-          <label style={lS}>Amount (TZS)</label>
-          <input type="number" placeholder="e.g. 15000" value={form.amount} onChange={e => setForm(f => ({ ...f, amount:e.target.value }))} style={{ ...iS, fontSize:22, fontWeight:700, marginBottom:14 }} />
+          <label style={lS} htmlFor="sale-amount">Amount (TZS)</label>
+          <input id="sale-amount" type="number" placeholder="e.g. 15000" value={form.amount} onChange={e => setForm(f => ({ ...f, amount:e.target.value }))} style={{ ...iS, fontSize:21, fontWeight:700, marginBottom:14 }} />
 
-          <label style={lS}>Date</label>
-          <input type="date" value={form.date} onChange={e => setForm(f => ({ ...f, date:e.target.value }))} style={{ ...iS, marginBottom:14 }} />
+          <label style={lS} htmlFor="sale-date">Date</label>
+          <input id="sale-date" type="date" value={form.date} onChange={e => setForm(f => ({ ...f, date:e.target.value }))} style={{ ...iS, marginBottom:14 }} />
 
-          <label style={lS}>Notes (optional)</label>
-          <input placeholder="e.g. Group of 5" value={form.note} onChange={e => setForm(f => ({ ...f, note:e.target.value }))} onKeyDown={e => e.key === "Enter" && submit()} style={{ ...iS, marginBottom:22 }} />
+          <label style={lS} htmlFor="sale-note">Notes (optional)</label>
+          <input id="sale-note" placeholder="e.g. Group of 5" value={form.note} onChange={e => setForm(f => ({ ...f, note:e.target.value }))} onKeyDown={e => e.key === "Enter" && submit()} style={{ ...iS, marginBottom:SPACE.lg+2 }} />
 
-          <button type="button" onClick={submit} disabled={busy} style={{ ...sB, opacity: busy ? 0.7 : 1 }}>
+          <button type="button" onClick={submit} disabled={busy} className="stv-btn stv-btn-primary" style={{ ...sB, opacity: busy ? 0.7 : 1 }}>
             {busy ? "Saving…" : "✓ Record Sale"}
           </button>
         </div>
@@ -838,37 +985,39 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, onOpen
           <div style={{ flex:2, minWidth:0 }}>
             <div style={panelS}>
               {/* Filters */}
-              <div style={{ display:"flex", gap:10, marginBottom:14, flexWrap:"wrap", alignItems:"center" }}>
-                <select value={filter.service} onChange={e => setFilter(f => ({ ...f, service:e.target.value }))} style={seS}>
+              <div style={{ display:"flex", gap:SPACE.sm, marginBottom:SPACE.md, flexWrap:"wrap", alignItems:"center" }}>
+                <select aria-label="Filter by service" value={filter.service} onChange={e => setFilter(f => ({ ...f, service:e.target.value }))} style={seS}>
                   <option>All</option>
                   {services.map(s => <option key={s.id}>{s.name}</option>)}
                 </select>
-                <input type="date" value={filter.from} onChange={e => setFilter(f => ({ ...f, from:e.target.value }))} style={seS} />
-                <input type="date" value={filter.to}   onChange={e => setFilter(f => ({ ...f, to:e.target.value }))}   style={seS} />
-                <button type="button" onClick={() => setFilter({ service:"All", from:"", to:"" })} style={{ ...seS, background:"#F0EDE8", border:"none", cursor:"pointer" }}>Reset</button>
-                <div style={{ marginLeft:"auto", fontWeight:700, color:"#2A2D40", fontSize:13 }}>Total: {TZS(total)}</div>
+                <input aria-label="From date" type="date" value={filter.from} onChange={e => setFilter(f => ({ ...f, from:e.target.value }))} style={seS} />
+                <input aria-label="To date" type="date" value={filter.to}   onChange={e => setFilter(f => ({ ...f, to:e.target.value }))}   style={seS} />
+                <button type="button" onClick={() => setFilter({ service:"All", from:"", to:"" })} className="stv-btn stv-btn-ghost" aria-label="Reset filters" style={{ ...seS, background:C.bg, border:"none", cursor:"pointer" }}>Reset</button>
+                <div style={{ marginLeft:"auto", fontWeight:700, color:C.text, fontSize:13 }}>Total: {TZS(total)}</div>
               </div>
 
-              <table style={{ width:"100%", borderCollapse:"collapse" }}>
+              <div style={{ overflowX:"auto", WebkitOverflowScrolling:"touch" }}>
+              <table className="stv-table" style={{ width:"100%", minWidth:560, borderCollapse:"collapse" }}>
                 <thead>
-                  <tr style={{ borderBottom:"2px solid #F0EDE8" }}>
+                  <tr style={{ borderBottom:`1.5px solid ${C.border}` }}>
                     {["Date","Service","Amount","Note",""].map(h => (
-                      <th key={h} style={{ textAlign:"left", padding:"0 0 10px", fontSize:10, color:"#aaa", fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
+                      <th key={h} scope="col" style={{ textAlign:"left", padding:"0 0 10px", fontSize:10.5, color:C.textFaint, fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
                   {filtered.slice(0, 50).map(s => (
-                    <tr key={s.id} style={{ borderBottom:"1px solid #F7F5F0" }}>
+                    <tr key={s.id} style={{ borderBottom:`1px solid ${C.bg}` }}>
                       <td style={tS}>{s.date?.slice(0, 10)}</td>
                       <td style={tS}><ServiceBadge name={s.service} services={services} /></td>
                       <td style={{ ...tS, fontWeight:600 }}>{TZS(s.amount)}</td>
-                      <td style={{ ...tS, color:"#aaa" }}>{s.note || "—"}</td>
+                      <td style={{ ...tS, color:C.textFaint }}>{s.note || "—"}</td>
                       <td style={tS}>
                         <button
                           type="button"
                           onClick={() => deleteSale(s.id)}
-                          style={{ background:"#E07A5F15", color:"#E07A5F", border:"none", padding:"4px 10px", borderRadius:7, fontSize:11, cursor:"pointer", fontWeight:600 }}
+                          className="stv-btn stv-btn-danger"
+                          style={{ background:C.warnSoft, color:C.warnStrong, border:"none", padding:"5px 11px", borderRadius:RADIUS.sm, fontSize:11, cursor:"pointer", fontWeight:600 }}
                         >
                           Delete
                         </button>
@@ -876,10 +1025,11 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, onOpen
                     </tr>
                   ))}
                   {filtered.length === 0 && (
-                    <tr><td colSpan={5} style={{ ...tS, textAlign:"center", color:"#bbb", paddingTop:24 }}>No sales found</td></tr>
+                    <tr><td colSpan={5} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>No sales found</td></tr>
                   )}
                 </tbody>
               </table>
+              </div>
             </div>
           </div>
         )}
@@ -932,24 +1082,24 @@ function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner }) {
       <div style={{ display:"flex", gap:20, flexWrap:"wrap", alignItems:"flex-start" }}>
 
         {/* Form */}
-        <div style={{ ...fC, width: isOwner ? 300 : "100%", maxWidth: isOwner ? 300 : 460 }}>
-          <h3 style={fTi}>Record an Expense</h3>
+        <div style={{ ...fC, flex: isOwner ? "1 1 280px" : "1 1 100%", flexShrink:1, width:"auto", maxWidth: isOwner ? 340 : 460 }}>
+          <h2 style={fTi}>Record an Expense</h2>
 
-          <label style={lS}>Category</label>
-          <select value={form.category} onChange={e => setForm(f => ({ ...f, category:e.target.value }))} style={{ ...iS, marginBottom:14 }}>
+          <label style={lS} htmlFor="exp-category">Category</label>
+          <select id="exp-category" value={form.category} onChange={e => setForm(f => ({ ...f, category:e.target.value }))} style={{ ...iS, marginBottom:14 }}>
             {EXPENSE_CATS.map(c => <option key={c}>{c}</option>)}
           </select>
 
-          <label style={lS}>Item / Description</label>
-          <input placeholder="e.g. Potato sack, Fuel…" value={form.item} onChange={e => setForm(f => ({ ...f, item:e.target.value }))} style={{ ...iS, marginBottom:14 }} />
+          <label style={lS} htmlFor="exp-item">Item / Description</label>
+          <input id="exp-item" placeholder="e.g. Potato sack, Fuel…" value={form.item} onChange={e => setForm(f => ({ ...f, item:e.target.value }))} style={{ ...iS, marginBottom:14 }} />
 
-          <label style={lS}>Cost (TZS)</label>
-          <input type="number" placeholder="e.g. 20000" value={form.cost} onChange={e => setForm(f => ({ ...f, cost:e.target.value }))} style={{ ...iS, fontSize:22, fontWeight:700, marginBottom:14 }} />
+          <label style={lS} htmlFor="exp-cost">Cost (TZS)</label>
+          <input id="exp-cost" type="number" placeholder="e.g. 20000" value={form.cost} onChange={e => setForm(f => ({ ...f, cost:e.target.value }))} style={{ ...iS, fontSize:22, fontWeight:700, marginBottom:14 }} />
 
-          <label style={lS}>Date</label>
-          <input type="date" value={form.date} onChange={e => setForm(f => ({ ...f, date:e.target.value }))} onKeyDown={e => e.key === "Enter" && submit()} style={{ ...iS, marginBottom:22 }} />
+          <label style={lS} htmlFor="exp-date">Date</label>
+          <input id="exp-date" type="date" value={form.date} onChange={e => setForm(f => ({ ...f, date:e.target.value }))} onKeyDown={e => e.key === "Enter" && submit()} style={{ ...iS, marginBottom:22 }} />
 
-          <button type="button" onClick={submit} disabled={busy} style={{ ...sB, background:"#E07A5F", opacity: busy ? 0.7 : 1 }}>
+          <button type="button" onClick={submit} disabled={busy} className="stv-btn stv-btn-danger-solid" style={{ ...sB, background:C.warnStrong, opacity: busy ? 0.7 : 1 }}>
             {busy ? "Saving…" : "✓ Record Expense"}
           </button>
         </div>
@@ -958,29 +1108,31 @@ function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner }) {
         {isOwner && (
           <div style={{ flex:2, minWidth:0 }}>
             <div style={panelS}>
-              <div style={{ fontWeight:700, color:"#2A2D40", marginBottom:14, fontSize:13 }}>
+              <div style={{ fontWeight:700, color:C.text, marginBottom:SPACE.md, fontSize:13 }}>
                 Total: {TZS(total)}
               </div>
-              <table style={{ width:"100%", borderCollapse:"collapse" }}>
+              <div style={{ overflowX:"auto", WebkitOverflowScrolling:"touch" }}>
+              <table className="stv-table" style={{ width:"100%", minWidth:560, borderCollapse:"collapse" }}>
                 <thead>
-                  <tr style={{ borderBottom:"2px solid #F0EDE8" }}>
+                  <tr style={{ borderBottom:`1.5px solid ${C.border}` }}>
                     {["Date","Category","Item","Cost",""].map(h => (
-                      <th key={h} style={{ textAlign:"left", padding:"0 0 10px", fontSize:10, color:"#aaa", fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
+                      <th key={h} scope="col" style={{ textAlign:"left", padding:"0 0 10px", fontSize:10.5, color:C.textFaint, fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
                   {sorted.slice(0, 50).map(e => (
-                    <tr key={e.id} style={{ borderBottom:"1px solid #F7F5F0" }}>
+                    <tr key={e.id} style={{ borderBottom:`1px solid ${C.bg}` }}>
                       <td style={tS}>{e.date?.slice(0, 10)}</td>
                       <td style={tS}>{e.category}</td>
                       <td style={tS}>{e.item}</td>
-                      <td style={{ ...tS, fontWeight:600, color:"#E07A5F" }}>{TZS(e.cost)}</td>
+                      <td style={{ ...tS, fontWeight:600, color:C.warnStrong }}>{TZS(e.cost)}</td>
                       <td style={tS}>
                         <button
                           type="button"
                           onClick={() => deleteExpense(e.id)}
-                          style={{ background:"#E07A5F15", color:"#E07A5F", border:"none", padding:"4px 10px", borderRadius:7, fontSize:11, cursor:"pointer", fontWeight:600 }}
+                          className="stv-btn stv-btn-danger"
+                          style={{ background:C.warnSoft, color:C.warnStrong, border:"none", padding:"5px 11px", borderRadius:RADIUS.sm, fontSize:11, cursor:"pointer", fontWeight:600 }}
                         >
                           Delete
                         </button>
@@ -988,10 +1140,11 @@ function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner }) {
                     </tr>
                   ))}
                   {sorted.length === 0 && (
-                    <tr><td colSpan={5} style={{ ...tS, textAlign:"center", color:"#bbb", paddingTop:24 }}>No expenses yet</td></tr>
+                    <tr><td colSpan={5} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>No expenses yet</td></tr>
                   )}
                 </tbody>
               </table>
+              </div>
             </div>
           </div>
         )}
@@ -1065,36 +1218,36 @@ function ReportsPage({ sales, expenses, services, showToast }) {
 
   return (
     <div>
-      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:20, flexWrap:"wrap", gap:12 }}>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:SPACE.xl, flexWrap:"wrap", gap:12 }}>
         <h1 style={{ ...pT, marginBottom:0 }}>Reports</h1>
-        <div style={{ display:"flex", gap:10 }}>
-          <button type="button" onClick={exportCSV}   style={{ ...sB, background:"#3D405B", padding:"11px 18px", fontSize:13 }}>↓ CSV</button>
-          <button type="button" onClick={exportExcel} style={{ ...sB, background:"#3D405B", padding:"11px 18px", fontSize:13 }}>↓ Excel</button>
+        <div style={{ display:"flex", gap:8 }}>
+          <button type="button" onClick={exportCSV}   className="stv-btn stv-btn-secondary" style={{ background:C.surface, color:C.text, border:`1.5px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"10px 16px", fontSize:13, fontWeight:600, cursor:"pointer", fontFamily:FONT }}>↓ CSV</button>
+          <button type="button" onClick={exportExcel} className="stv-btn stv-btn-secondary" style={{ background:C.surface, color:C.text, border:`1.5px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"10px 16px", fontSize:13, fontWeight:600, cursor:"pointer", fontFamily:FONT }}>↓ Excel</button>
         </div>
       </div>
 
       {/* Filters */}
-      <div style={{ display:"flex", gap:10, marginBottom:18, flexWrap:"wrap", alignItems:"center" }}>
-        <select value={service} onChange={e => setService(e.target.value)} style={seS}>
+      <div style={{ display:"flex", gap:SPACE.sm, marginBottom:SPACE.lg, flexWrap:"wrap", alignItems:"center" }}>
+        <select aria-label="Filter by service" value={service} onChange={e => setService(e.target.value)} style={seS}>
           <option>All</option>
           {services.map(s => <option key={s.id}>{s.name}</option>)}
         </select>
-        <input type="date" value={range.from} onChange={e => setRange(r => ({ ...r, from:e.target.value }))} style={seS} />
-        <input type="date" value={range.to}   onChange={e => setRange(r => ({ ...r, to:e.target.value }))}   style={seS} />
-        <button type="button" onClick={() => setRange({ from:"", to:"" })} style={{ ...seS, background:"#F0EDE8", border:"none", cursor:"pointer" }}>Reset</button>
+        <input aria-label="From date" type="date" value={range.from} onChange={e => setRange(r => ({ ...r, from:e.target.value }))} style={seS} />
+        <input aria-label="To date" type="date" value={range.to}   onChange={e => setRange(r => ({ ...r, to:e.target.value }))}   style={seS} />
+        <button type="button" onClick={() => setRange({ from:"", to:"" })} className="stv-btn stv-btn-ghost" aria-label="Reset filters" style={{ ...seS, background:C.bg, border:"none", cursor:"pointer" }}>Reset</button>
       </div>
 
       {/* Stat cards */}
-      <div style={{ display:"flex", gap:14, marginBottom:20, flexWrap:"wrap" }}>
-        <StatCard label="Total Revenue"  value={TZS(totalSales)}            color="#81B29A" icon="📈" />
-        <StatCard label="Total Expenses" value={TZS(totalExp)}              color="#E07A5F" icon="🧾" />
-        <StatCard label="Net Profit"     value={TZS(totalSales - totalExp)} color={totalSales - totalExp >= 0 ? "#81B29A" : "#E07A5F"} icon="✅" />
+      <div style={{ display:"grid", gap:SPACE.md, marginBottom:SPACE.xl, gridTemplateColumns:"repeat(auto-fit, minmax(200px, 1fr))" }}>
+        <StatCard label="Total Revenue"  value={TZS(totalSales)}            color={C.accent} icon="📈" />
+        <StatCard label="Total Expenses" value={TZS(totalExp)}              color={C.warn} icon="🧾" />
+        <StatCard label="Net Profit"     value={TZS(totalSales - totalExp)} color={totalSales - totalExp >= 0 ? C.accent : C.warn} icon="✅" />
       </div>
 
       {/* Line chart */}
       {trend.length > 0 && (
-        <div style={{ ...panelS, marginBottom:16 }}>
-          <h3 style={{ margin:"0 0 18px", fontSize:14 }}>Revenue vs Expenses Over Time</h3>
+        <div style={{ ...panelS, marginBottom:SPACE.md }}>
+          <h2 style={{ margin:"0 0 18px", fontSize:14, fontWeight:600, color:C.text }}>Revenue vs Expenses Over Time</h2>
           <ResponsiveContainer width="100%" height={220}>
             <LineChart data={trend}>
               <CartesianGrid strokeDasharray="3 3" stroke="#F0EDE8" />
@@ -1110,9 +1263,9 @@ function ReportsPage({ sales, expenses, services, showToast }) {
       )}
 
       {/* Pie + Bar */}
-      <div style={{ display:"flex", gap:14, flexWrap:"wrap" }}>
-        <div style={{ ...panelS, flex:1, minWidth:220 }}>
-          <h3 style={{ margin:"0 0 14px", fontSize:14 }}>Revenue by Service</h3>
+      <div style={{ display:"grid", gap:14, gridTemplateColumns:"repeat(auto-fit, minmax(240px, 1fr))" }}>
+        <div style={{ ...panelS, minWidth:0 }}>
+          <h2 style={{ margin:"0 0 14px", fontSize:14, fontWeight:600, color:C.text }}>Revenue by Service</h2>
           {byService.length > 0 ? (
             <>
               <ResponsiveContainer width="100%" height={170}>
@@ -1120,26 +1273,26 @@ function ReportsPage({ sales, expenses, services, showToast }) {
                   <Pie data={byService} dataKey="value" cx="50%" cy="50%" outerRadius={65} innerRadius={34} paddingAngle={3}>
                     {byService.map((e, i) => <Cell key={i} fill={getColor(e.name)} />)}
                   </Pie>
-                  <Tooltip formatter={v => TZS(v)} contentStyle={{ borderRadius:10, border:"none", fontSize:12 }} />
+                  <Tooltip formatter={v => TZS(v)} contentStyle={{ borderRadius:RADIUS.sm, border:`1px solid ${C.border}`, fontSize:12, boxShadow:SHADOW.hover }} />
                 </PieChart>
               </ResponsiveContainer>
               {byService.map(s => (
-                <div key={s.name} style={{ display:"flex", justifyContent:"space-between", fontSize:12, marginTop:7, color:"#555" }}>
+                <div key={s.name} style={{ display:"flex", justifyContent:"space-between", fontSize:12, marginTop:8, color:C.textSub }}>
                   <span style={{ display:"flex", alignItems:"center", gap:7 }}>
-                    <span style={{ width:9, height:9, borderRadius:2, background:getColor(s.name), display:"inline-block" }} />
+                    <span aria-hidden="true" style={{ width:8, height:8, borderRadius:RADIUS.pill, background:getColor(s.name), display:"inline-block" }} />
                     {s.name}
                   </span>
-                  <span style={{ fontWeight:600 }}>{TZS(s.value)}</span>
+                  <span style={{ fontWeight:600, color:C.text }}>{TZS(s.value)}</span>
                 </div>
               ))}
             </>
           ) : (
-            <div style={{ textAlign:"center", color:"#bbb", fontSize:13, paddingTop:40 }}>No data</div>
+            <div style={{ textAlign:"center", color:C.textFaint, fontSize:13, paddingTop:40 }}>No data</div>
           )}
         </div>
 
-        <div style={{ ...panelS, flex:1, minWidth:220 }}>
-          <h3 style={{ margin:"0 0 14px", fontSize:14 }}>Revenue by Service (Bar)</h3>
+        <div style={{ ...panelS, minWidth:0 }}>
+          <h2 style={{ margin:"0 0 14px", fontSize:14, fontWeight:600, color:C.text }}>Revenue by Service (Bar)</h2>
           {byService.length > 0 ? (
             <ResponsiveContainer width="100%" height={210}>
               <BarChart data={byService} layout="vertical">
@@ -1153,7 +1306,7 @@ function ReportsPage({ sales, expenses, services, showToast }) {
               </BarChart>
             </ResponsiveContainer>
           ) : (
-            <div style={{ textAlign:"center", color:"#bbb", fontSize:13, paddingTop:40 }}>No data</div>
+            <div style={{ textAlign:"center", color:C.textFaint, fontSize:13, paddingTop:40 }}>No data</div>
           )}
         </div>
       </div>
@@ -1221,46 +1374,49 @@ function UsersPage({ showToast }) {
 
   return (
     <div>
-      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:22, flexWrap:"wrap", gap:12 }}>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:SPACE.xl, flexWrap:"wrap", gap:12 }}>
         <h1 style={{ ...pT, marginBottom:0 }}>Users</h1>
         <button
           type="button"
           onClick={() => setShowForm(!showForm)}
-          style={{ ...sB, background:"#3D405B", padding:"11px 20px", fontSize:13 }}
+          className={`stv-btn ${showForm ? "stv-btn-secondary" : "stv-btn-primary"}`}
+          style={showForm
+            ? { background:C.surface, color:C.text, border:`1.5px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"10px 18px", fontSize:13, fontWeight:600, cursor:"pointer", fontFamily:FONT }
+            : { ...sB, width:"auto", background:C.accentStrong, padding:"10px 18px", fontSize:13 }}
         >
           {showForm ? "✕ Cancel" : "＋ Add User"}
         </button>
       </div>
 
-      {err && <p style={{ color:"#E07A5F", marginBottom:14, fontSize:13 }}>{err}</p>}
+      {err && <p role="alert" style={{ color:C.warnStrong, marginBottom:SPACE.md, fontSize:13 }}>{err}</p>}
 
       {/* Add User Form */}
       {showForm && (
-        <div style={{ ...panelS, marginBottom:24, maxWidth:560 }}>
-          <h3 style={{ margin:"0 0 18px", fontFamily:"'Playfair Display',serif", fontSize:17, color:"#2A2D40" }}>New User</h3>
-          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14, marginBottom:14 }}>
+        <div style={{ ...panelS, marginBottom:SPACE.xl, maxWidth:560 }}>
+          <h2 style={fTi}>New User</h2>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(200px, 1fr))", gap:14, marginBottom:14 }}>
             <div>
-              <label style={lS}>Email</label>
-              <input type="email" placeholder="user@example.com" value={newUser.email} onChange={e => setNewUser(u => ({ ...u, email:e.target.value }))} style={iS} />
+              <label style={lS} htmlFor="new-user-email">Email</label>
+              <input id="new-user-email" type="email" placeholder="user@example.com" value={newUser.email} onChange={e => setNewUser(u => ({ ...u, email:e.target.value }))} style={iS} />
             </div>
             <div>
-              <label style={lS}>Display Name</label>
-              <input placeholder="e.g. John" value={newUser.name} onChange={e => setNewUser(u => ({ ...u, name:e.target.value }))} style={iS} />
+              <label style={lS} htmlFor="new-user-name">Display Name</label>
+              <input id="new-user-name" placeholder="e.g. John" value={newUser.name} onChange={e => setNewUser(u => ({ ...u, name:e.target.value }))} style={iS} />
             </div>
             <div>
-              <label style={lS}>Password</label>
-              <input type="password" placeholder="min 6 characters" value={newUser.password} onChange={e => setNewUser(u => ({ ...u, password:e.target.value }))} style={iS} />
+              <label style={lS} htmlFor="new-user-password">Password</label>
+              <input id="new-user-password" type="password" placeholder="min 6 characters" value={newUser.password} onChange={e => setNewUser(u => ({ ...u, password:e.target.value }))} style={iS} />
             </div>
             <div>
-              <label style={lS}>Role</label>
-              <select value={newUser.role} onChange={e => setNewUser(u => ({ ...u, role:e.target.value }))} style={iS}>
+              <label style={lS} htmlFor="new-user-role">Role</label>
+              <select id="new-user-role" value={newUser.role} onChange={e => setNewUser(u => ({ ...u, role:e.target.value }))} style={iS}>
                 <option value="WORKER">Worker</option>
                 <option value="OWNER">Owner</option>
                 <option value="ADMIN">Admin</option>
               </select>
             </div>
           </div>
-          <button type="button" onClick={createUser} disabled={busy} style={{ ...sB, opacity: busy ? 0.7 : 1, width:"auto", padding:"12px 28px" }}>
+          <button type="button" onClick={createUser} disabled={busy} className="stv-btn stv-btn-primary" style={{ ...sB, opacity: busy ? 0.7 : 1, width:"auto", padding:"12px 26px" }}>
             {busy ? "Creating…" : "✓ Create User"}
           </button>
         </div>
@@ -1268,11 +1424,12 @@ function UsersPage({ showToast }) {
 
       {/* Users Table */}
       <div style={panelS}>
-        <table style={{ width:"100%", borderCollapse:"collapse" }}>
+        <div style={{ overflowX:"auto", WebkitOverflowScrolling:"touch" }}>
+        <table className="stv-table" style={{ width:"100%", minWidth:620, borderCollapse:"collapse" }}>
           <thead>
-            <tr style={{ borderBottom:"2px solid #F0EDE8" }}>
+            <tr style={{ borderBottom:`1.5px solid ${C.border}` }}>
               {["Email","Name","Role","Status","Created","Actions"].map(h => (
-                <th key={h} style={{ textAlign:"left", padding:"0 0 10px 0", paddingRight:12, fontSize:10, color:"#aaa", fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
+                <th key={h} scope="col" style={{ textAlign:"left", padding:"0 0 10px 0", paddingRight:12, fontSize:10.5, color:C.textFaint, fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
               ))}
             </tr>
           </thead>
@@ -1282,7 +1439,7 @@ function UsersPage({ showToast }) {
               const name = u.user_metadata?.name || "—"
               const active = !u.banned
               return (
-                <tr key={u.id} style={{ borderBottom:"1px solid #F7F5F0" }}>
+                <tr key={u.id} style={{ borderBottom:`1px solid ${C.bg}` }}>
                   <td style={tS}>{u.email}</td>
                   <td style={tS}>{name}</td>
                   <td style={tS}>
@@ -1298,24 +1455,25 @@ function UsersPage({ showToast }) {
                   </td>
                   <td style={tS}>
                     <span style={{
-                      fontSize:11, fontWeight:600, padding:"3px 9px", borderRadius:20,
-                      background: active ? "#81B29A22" : "#E07A5F22",
-                      color: active ? "#81B29A" : "#E07A5F",
+                      fontSize:11, fontWeight:600, padding:"4px 10px", borderRadius:RADIUS.pill,
+                      background: active ? C.accentSoft : C.warnSoft,
+                      color: active ? C.accentStrong : C.warnStrong,
                     }}>
                       {active ? "Active" : "Disabled"}
                     </span>
                   </td>
-                  <td style={{ ...tS, color:"#aaa" }}>
+                  <td style={{ ...tS, color:C.textFaint }}>
                     {u.created_at ? new Date(u.created_at).toLocaleDateString() : "—"}
                   </td>
                   <td style={tS}>
                     <button
                       type="button"
                       onClick={() => toggleActive(u.id, !active)}
+                      className={`stv-btn ${active ? "stv-btn-danger" : "stv-btn-accent"}`}
                       style={{
-                        background: active ? "#E07A5F15" : "#81B29A15",
-                        color: active ? "#E07A5F" : "#81B29A",
-                        border:"none", padding:"5px 12px", borderRadius:7,
+                        background: active ? C.warnSoft : C.accentSoft,
+                        color: active ? C.warnStrong : C.accentStrong,
+                        border:"none", padding:"5px 12px", borderRadius:RADIUS.sm,
                         fontSize:11, cursor:"pointer", fontWeight:600,
                       }}
                     >
@@ -1327,25 +1485,26 @@ function UsersPage({ showToast }) {
             })}
             {users.length === 0 && (
               <tr>
-                <td colSpan={6} style={{ ...tS, textAlign:"center", color:"#bbb", paddingTop:24 }}>
+                <td colSpan={6} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>
                   {err ? `Could not load users — ${err}` : "No users found"}
                 </td>
               </tr>
             )}
           </tbody>
         </table>
+        </div>
       </div>
     </div>
   )
 }
 
 /* ── SHARED STYLE CONSTANTS ──────────────────────────────── */
-const iS    = { width:"100%", padding:"12px 14px", border:"2px solid #E8E4DF", borderRadius:11, fontSize:14, outline:"none", background:"#FAFAF8", fontFamily:"'DM Sans',sans-serif", color:"#2A2D40" }
-const seS   = { padding:"9px 12px", border:"2px solid #E8E4DF", borderRadius:9, fontSize:12, background:"#FAFAF8", fontFamily:"'DM Sans',sans-serif", color:"#555" }
-const lS    = { display:"block", fontSize:11, fontWeight:600, color:"#888", marginBottom:6, textTransform:"uppercase", letterSpacing:.5 }
-const fC    = { background:"#fff", borderRadius:18, padding:22, flexShrink:0, boxShadow:"0 2px 10px rgba(0,0,0,.06)" }
-const fTi   = { margin:"0 0 18px", fontFamily:"'Playfair Display',serif", fontSize:18, color:"#2A2D40" }
-const sB    = { width:"100%", padding:"14px", background:"#81B29A", color:"#fff", border:"none", borderRadius:11, fontSize:15, fontWeight:700, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }
-const tS    = { padding:"11px 0", paddingRight:12, fontSize:13, color:"#444", verticalAlign:"middle" }
-const pT    = { margin:"0 0 18px", fontFamily:"'Playfair Display',serif", fontSize:28, color:"#2A2D40" }
-const panelS = { background:"#fff", borderRadius:18, padding:22, boxShadow:"0 2px 10px rgba(0,0,0,.06)" }
+const iS    = { width:"100%", padding:"11px 14px", border:`1.5px solid ${C.border}`, borderRadius:RADIUS.sm, fontSize:14, outline:"none", background:C.surface, fontFamily:FONT, color:C.text }
+const seS   = { padding:"9px 12px", border:`1.5px solid ${C.border}`, borderRadius:RADIUS.sm, fontSize:12.5, background:C.surface, fontFamily:FONT, color:C.textSub, fontWeight:500 }
+const lS    = { display:"block", fontSize:11, fontWeight:600, color:C.textSub, marginBottom:6, textTransform:"uppercase", letterSpacing:.5 }
+const fC    = { background:C.surface, borderRadius:RADIUS.md, padding:SPACE.xl, flexShrink:0, border:`1px solid ${C.border}`, boxShadow:SHADOW.card }
+const fTi   = { margin:"0 0 20px", fontFamily:FONT, fontWeight:700, fontSize:"clamp(15px, 2.2vw, 17px)", color:C.text, letterSpacing:"-0.01em" }
+const sB    = { width:"100%", padding:"13px", background:C.accentStrong, color:"#fff", border:"none", borderRadius:RADIUS.sm, fontSize:14.5, fontWeight:600, cursor:"pointer", fontFamily:FONT }
+const tS    = { padding:"12px 0", paddingRight:12, fontSize:13, color:C.text, verticalAlign:"middle" }
+const pT    = { margin:"0 0 6px", fontFamily:FONT, fontWeight:700, fontSize:"clamp(19px, 3.4vw, 24px)", color:C.text, letterSpacing:"-0.01em" }
+const panelS = { background:C.surface, borderRadius:RADIUS.md, padding:SPACE.xl, border:`1px solid ${C.border}`, boxShadow:SHADOW.card }
