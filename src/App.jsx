@@ -85,7 +85,7 @@ async function adminFetch(path, opts = {}) {
 
 /* ── ROOT APP ────────────────────────────────────────────── */
 export default function App() {
-  const { user, isOwner, logout } = useAuth()
+  const { user, isOwner, logout, ready, hasAccess } = useAuth()
 
   const [sales,    setSales]    = useState([])
   const [expenses, setExpenses] = useState([])
@@ -154,7 +154,13 @@ export default function App() {
     showToast(`"${newSvc.name}" added ✓`)
   }
 
+  // `ready` covers both the initial session check and the permissions fetch
+  // that follows it -- nothing below can render with a half-loaded auth
+  // state, so there's no flash of the login screen for an already-signed-in
+  // user, and no flash of the dashboard before permissions are known.
+  if (!ready) return <FullScreenLoader />
   if (!user) return <LoginPage />
+  if (!hasAccess) return <AccessDeniedPage onLogout={logout} email={user.email} />
 
   const displayName = user.user_metadata?.name || user.email?.split("@")[0] || "User"
 
@@ -298,6 +304,46 @@ export default function App() {
           .stv-sidebar.is-open { transform:translateX(0); }
         }
       `}</style>
+    </div>
+  )
+}
+
+/* ── LOADING / ACCESS DENIED ────────────────────────────── */
+function FullScreenLoader() {
+  return (
+    <div style={{
+      minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center",
+      background:C.bg, fontFamily:FONT, color:C.textFaint, fontSize:13.5,
+    }}>
+      Checking access…
+    </div>
+  )
+}
+
+function AccessDeniedPage({ onLogout, email }) {
+  return (
+    <div style={{
+      minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center",
+      background:C.bg, fontFamily:FONT, padding:20,
+    }}>
+      <div style={{ background:C.surface, borderRadius:RADIUS.lg, padding:"40px 36px", width:"min(92vw, 420px)", textAlign:"center", boxShadow:SHADOW.modal }}>
+        <div style={{ fontSize:34, marginBottom:14 }}>🔒</div>
+        <h1 style={{ margin:"0 0 10px", fontFamily:FONT, fontWeight:700, fontSize:19, color:C.text }}>No access to the POS</h1>
+        <p style={{ margin:"0 0 6px", color:C.textSub, fontSize:13.5, lineHeight:1.5 }}>
+          {email} is signed in, but doesn't have a role in Swahili Tent Village POS yet.
+        </p>
+        <p style={{ margin:"0 0 24px", color:C.textFaint, fontSize:12.5, lineHeight:1.5 }}>
+          Ask an Owner to grant you access, then sign in again.
+        </p>
+        <button
+          type="button"
+          onClick={onLogout}
+          className="stv-btn stv-btn-primary"
+          style={{ width:"100%", padding:"12px", background:C.accentStrong, color:"#fff", border:"none", borderRadius:RADIUS.sm, fontSize:14, fontWeight:600, cursor:"pointer", fontFamily:FONT }}
+        >
+          Sign out
+        </button>
+      </div>
     </div>
   )
 }
@@ -1320,7 +1366,7 @@ function UsersPage({ showToast }) {
   const [err,    setErr]    = useState("")
   const [busy,   setBusy]   = useState(false)
   const [showForm, setShowForm] = useState(false)
-  const [newUser, setNewUser]   = useState({ email:"", password:"", name:"", role:"WORKER" })
+  const [newUser, setNewUser]   = useState({ email:"", password:"", name:"", role:"worker" })
 
   async function loadUsers() {
     try {
@@ -1341,7 +1387,7 @@ function UsersPage({ showToast }) {
         method:"POST",
         body: JSON.stringify(newUser),
       })
-      setNewUser({ email:"", password:"", name:"", role:"WORKER" })
+      setNewUser({ email:"", password:"", name:"", role:"worker" })
       setShowForm(false)
       loadUsers()
       showToast("User created ✓")
@@ -1367,6 +1413,17 @@ function UsersPage({ showToast }) {
       await adminFetch("/active", { method:"PATCH", body: JSON.stringify({ userId:id, active }) })
       loadUsers()
       showToast(`User ${active ? "enabled" : "disabled"}`)
+    } catch (e) {
+      showToast(e.message, "error")
+    }
+  }
+
+  async function revokeAccess(id) {
+    if (!confirm("Remove this person's access to the POS entirely?")) return
+    try {
+      await adminFetch(`/role/${id}`, { method:"DELETE" })
+      loadUsers()
+      showToast("Access revoked")
     } catch (e) {
       showToast(e.message, "error")
     }
@@ -1410,9 +1467,9 @@ function UsersPage({ showToast }) {
             <div>
               <label style={lS} htmlFor="new-user-role">Role</label>
               <select id="new-user-role" value={newUser.role} onChange={e => setNewUser(u => ({ ...u, role:e.target.value }))} style={iS}>
-                <option value="WORKER">Worker</option>
-                <option value="OWNER">Owner</option>
-                <option value="ADMIN">Admin</option>
+                <option value="worker">Worker</option>
+                <option value="admin">Admin</option>
+                <option value="owner">Owner</option>
               </select>
             </div>
           </div>
@@ -1435,7 +1492,7 @@ function UsersPage({ showToast }) {
           </thead>
           <tbody>
             {users.map(u => {
-              const role = u.user_metadata?.role || "WORKER"
+              const role = u.stv_pos_role || ""
               const name = u.user_metadata?.name || "—"
               const active = !u.banned
               return (
@@ -1445,12 +1502,17 @@ function UsersPage({ showToast }) {
                   <td style={tS}>
                     <select
                       value={role}
-                      onChange={e => changeRole(u.id, e.target.value)}
+                      onChange={e => {
+                        const next = e.target.value
+                        if (!next) revokeAccess(u.id)
+                        else changeRole(u.id, next)
+                      }}
                       style={{ ...seS, fontSize:12, padding:"5px 10px" }}
                     >
-                      <option value="WORKER">Worker</option>
-                      <option value="OWNER">Owner</option>
-                      <option value="ADMIN">Admin</option>
+                      <option value="">No access</option>
+                      <option value="worker">Worker</option>
+                      <option value="admin">Admin</option>
+                      <option value="owner">Owner</option>
                     </select>
                   </td>
                   <td style={tS}>
