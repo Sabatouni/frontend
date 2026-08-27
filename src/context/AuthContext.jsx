@@ -9,10 +9,18 @@ import { fetchMyPermissions, ROLE_LEVELS } from "../lib/permissions";
 // application, never anything project-wide.
 const APP_SLUG = "stv-pos";
 
+// Hard ceiling on how long we wait for Supabase to resolve the initial auth
+// state before giving up and treating the visitor as signed out. This is a
+// failsafe only -- normally onAuthStateChange fires within milliseconds --
+// but if session restore ever hangs (see the incident notes below), the app
+// must still leave "Checking access..." instead of hanging forever.
+const AUTH_INIT_TIMEOUT_MS = 10000;
+
 const AuthCtx = createContext(null);
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
+  const [session, setSession] = useState(null);
   const [permissions, setPermissions] = useState([]);
   const [ready, setReady] = useState(false);
 
@@ -28,33 +36,78 @@ export function AuthProvider({ children }) {
 
   useEffect(() => {
     let cancelled = false;
+    let settled = false;
 
-    supabase.auth.getSession().then(async ({ data }) => {
-      const u = data?.session?.user || null;
-      if (cancelled) return;
-      setUser(u);
-      if (u) await loadPermissions();
-      if (!cancelled) setReady(true);
-    });
+    // Single source of truth for auth initialization.
+    //
+    // We deliberately do NOT also call supabase.auth.getSession() here.
+    // onAuthStateChange() already fires once, immediately, with whatever
+    // session currently exists (Supabase's documented initial-session
+    // behavior) and then again on every subsequent sign-in/out/refresh --
+    // calling getSession() as well just duplicates that first call.
+    //
+    // That duplication is what caused the "stuck on Checking access..."
+    // incident this code fixes: two concurrent calls into the Supabase auth
+    // client on mount both tried to acquire its internal navigator.locks-
+    // based session lock (visible in the console as `Lock "lock:sb-...-
+    // auth-token" was not released within 5000ms ... Forcefully acquiring
+    // the lock to recover`). When a stale/expired token was already sitting
+    // in localStorage, that contention left `ready` stuck at false forever
+    // -- the app never left the loading screen, and never even issued the
+    // permissions request, because the code never got past the stuck
+    // session promise. Removing the redundant call removes the contention;
+    // the timeout below is a backstop in case the single remaining call
+    // ever hangs for an unrelated reason (network, corrupted token, etc).
+    let subscription;
+    try {
+      const { data } = supabase.auth.onAuthStateChange(async (_evt, nextSession) => {
+        if (cancelled) return;
+        const u = nextSession?.user || null;
+        setSession(nextSession || null);
+        setUser(u);
+        if (u) {
+          await loadPermissions();
+        } else {
+          setPermissions([]);
+        }
+        settled = true;
+        if (!cancelled) setReady(true);
+      });
+      subscription = data?.subscription;
+    } catch (err) {
+      // Subscribing itself should never throw, but if it somehow does (or
+      // the Supabase client failed to initialize -- see
+      // api/supabaseClient.js), we still must not hang the UI.
+      console.error("[Auth] failed to start auth listener:", err.message);
+      settled = true;
+      setUser(null);
+      setSession(null);
+      setPermissions([]);
+      setReady(true);
+    }
 
-    // Covers sign-in, sign-out, and token refresh. Permissions are re-fetched
-    // on every transition so a role change (grant/revoke) takes effect the
-    // next time the session is touched, without requiring a hard reload.
-    const { data: listener } = supabase.auth.onAuthStateChange(async (_evt, session) => {
-      if (cancelled) return;
-      const u = session?.user || null;
-      setUser(u);
-      if (u) {
-        await loadPermissions();
-      } else {
+    // Failsafe: if the callback above never fires -- lock contention, a
+    // hung network request during token refresh, or any other stuck
+    // promise inside the Supabase client -- resolve into a safe signed-out
+    // state instead of leaving `ready` false forever. This does not retry
+    // or call getSession(); it just stops the app from hanging so the
+    // visitor lands on the login screen and can try again.
+    const timeoutId = setTimeout(() => {
+      if (!settled && !cancelled) {
+        console.error(
+          `[Auth] session initialization did not resolve within ${AUTH_INIT_TIMEOUT_MS}ms -- falling back to signed-out state`
+        );
+        setUser(null);
+        setSession(null);
         setPermissions([]);
+        setReady(true);
       }
-      if (!cancelled) setReady(true);
-    });
+    }, AUTH_INIT_TIMEOUT_MS);
 
     return () => {
       cancelled = true;
-      listener.subscription.unsubscribe();
+      clearTimeout(timeoutId);
+      subscription?.unsubscribe();
     };
   }, [loadPermissions]);
 
@@ -67,6 +120,7 @@ export function AuthProvider({ children }) {
   async function logout() {
     await supabase.auth.signOut();
     setUser(null);
+    setSession(null);
     setPermissions([]);
   }
 
@@ -87,9 +141,18 @@ export function AuthProvider({ children }) {
   const isWorker = role === "worker";
   const hasAccess = !!grant;
 
+  // Exposed so components that need to call the admin backend (UsersPage)
+  // can read the current access token from context instead of independently
+  // calling supabase.auth.getSession() themselves -- see adminFetch() in
+  // App.jsx. Keeping session reads inside AuthProvider's single listener is
+  // what avoids the auth-lock contention described above.
+  const accessToken = session?.access_token || null;
+
   const value = useMemo(
     () => ({
       user,
+      session,
+      accessToken,
       role,
       roleLevel,
       isOwner,
@@ -101,7 +164,19 @@ export function AuthProvider({ children }) {
       ready,
       refresh: loadPermissions,
     }),
-    [user, role, roleLevel, isOwner, isWorker, hasAccess, permissions, ready, loadPermissions]
+    [
+      user,
+      session,
+      accessToken,
+      role,
+      roleLevel,
+      isOwner,
+      isWorker,
+      hasAccess,
+      permissions,
+      ready,
+      loadPermissions,
+    ]
   );
 
   return <AuthCtx.Provider value={value}>{children}</AuthCtx.Provider>;

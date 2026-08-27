@@ -64,17 +64,19 @@ const SHADOW = {
   modal: "0 24px 48px rgba(20,20,30,0.16)",
 }
 
-/* Admin backend helper — uses VITE_API_URL via src/api/index.js */
-async function adminFetch(path, opts = {}) {
-  const { data } = await supabase.auth.getSession()
-  const token = data.session?.access_token
+/* Admin backend helper — uses VITE_API_URL via src/api/index.js.
+   Takes the access token as a parameter (read from AuthContext by the
+   caller) instead of calling supabase.auth.getSession() itself -- that
+   avoids adding another independent call into the Supabase auth client,
+   which is what caused lock contention on session restore (see
+   context/AuthContext.jsx for the full incident notes). */
+async function adminFetch(path, accessToken, opts = {}) {
   const url = `${ADMIN_API}${path}`
-  console.log("API BASE:", ADMIN_API)
   const res = await fetch(url, {
     ...opts,
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+      Authorization: `Bearer ${accessToken}`,
       ...(opts.headers || {}),
     },
   })
@@ -109,9 +111,13 @@ export default function App() {
   }
 
   async function fetchAll() {
-    const { data: session } = await supabase.auth.getSession()
-    console.log("SESSION:", session?.session)
-    console.log("USER ID:", session?.session?.user?.id)
+    // Previously called supabase.auth.getSession() here just to log the
+    // session/user id -- that's another independent call into the Supabase
+    // auth client (this one re-fires every 5s via the polling interval
+    // below), and unnecessary since `user` is already available from
+    // AuthContext. Removing it cuts down on avoidable auth-lock traffic;
+    // see context/AuthContext.jsx for why that traffic matters here.
+    console.log("USER ID:", user?.id)
 
     const [
       { data: s, error: sErr },
@@ -1362,6 +1368,7 @@ function ReportsPage({ sales, expenses, services, showToast }) {
 
 /* ── USERS PAGE ──────────────────────────────────────────── */
 function UsersPage({ showToast }) {
+  const { accessToken } = useAuth()
   const [users,  setUsers]  = useState([])
   const [err,    setErr]    = useState("")
   const [busy,   setBusy]   = useState(false)
@@ -1370,7 +1377,7 @@ function UsersPage({ showToast }) {
 
   async function loadUsers() {
     try {
-      const data = await adminFetch("/users")
+      const data = await adminFetch("/users", accessToken)
       setUsers(Array.isArray(data) ? data : [])
     } catch (e) {
       setErr(e.message)
@@ -1383,7 +1390,7 @@ function UsersPage({ showToast }) {
     if (!newUser.email || !newUser.password) { showToast("Email and password required", "error"); return }
     setBusy(true)
     try {
-      await adminFetch("/users", {
+      await adminFetch("/users", accessToken, {
         method:"POST",
         body: JSON.stringify(newUser),
       })
@@ -1400,7 +1407,7 @@ function UsersPage({ showToast }) {
 
   async function changeRole(id, role) {
     try {
-      await adminFetch("/role", { method:"PATCH", body: JSON.stringify({ userId:id, role }) })
+      await adminFetch("/role", accessToken, { method:"PATCH", body: JSON.stringify({ userId:id, role }) })
       loadUsers()
       showToast("Role updated ✓")
     } catch (e) {
@@ -1410,7 +1417,7 @@ function UsersPage({ showToast }) {
 
   async function toggleActive(id, active) {
     try {
-      await adminFetch("/active", { method:"PATCH", body: JSON.stringify({ userId:id, active }) })
+      await adminFetch("/active", accessToken, { method:"PATCH", body: JSON.stringify({ userId:id, active }) })
       loadUsers()
       showToast(`User ${active ? "enabled" : "disabled"}`)
     } catch (e) {
@@ -1421,7 +1428,7 @@ function UsersPage({ showToast }) {
   async function revokeAccess(id) {
     if (!confirm("Remove this person's access to the POS entirely?")) return
     try {
-      await adminFetch(`/role/${id}`, { method:"DELETE" })
+      await adminFetch(`/role/${id}`, accessToken, { method:"DELETE" })
       loadUsers()
       showToast("Access revoked")
     } catch (e) {
