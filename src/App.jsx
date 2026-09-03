@@ -23,6 +23,7 @@ import XLSXStyle from "xlsx-js-style"
 import { ADMIN_API } from "./api"
 import { supabase } from "./api/supabaseClient"
 import { useAuth } from "./context/AuthContext"
+import { useLanguage } from "./i18n"
 
 /* ── CONFIG ─────────────────────────────────────────────── */
 const LOGO        = "/logo.png"
@@ -93,7 +94,8 @@ async function adminFetch(path, accessToken, opts = {}) {
 
 /* ── ROOT APP ────────────────────────────────────────────── */
 export default function App() {
-  const { user, isOwner, logout, ready, hasAccess } = useAuth()
+  const { user, isOwner, logout, ready, hasAccess, permissionsPending } = useAuth()
+  const { t, lang } = useLanguage()
 
   const [sales,    setSales]    = useState([])
   const [expenses, setExpenses] = useState([])
@@ -163,15 +165,24 @@ export default function App() {
     }])
     if (error) { showToast(error.message, "error"); return }
     fetchAll()
-    showToast(`"${newSvc.name}" added ✓`)
+    showToast(t("serviceAddedToast", { name: newSvc.name }))
   }
 
-  // `ready` covers both the initial session check and the permissions fetch
-  // that follows it -- nothing below can render with a half-loaded auth
-  // state, so there's no flash of the login screen for an already-signed-in
-  // user, and no flash of the dashboard before permissions are known.
+  // `ready` covers only session restore now (fast, local) -- it no longer
+  // waits for the permissions network round trip, which is what used to
+  // cause a "Checking access..." flash for every already-authenticated
+  // user on every refresh. `permissionsPending` is the new, narrower case:
+  // it's only true when there's neither a real permission result yet NOR a
+  // cached hint for this user to render from optimistically (i.e. a
+  // genuinely first-time/unknown-on-this-device session) -- a returning
+  // Owner/Admin/Worker with a matching hint skips straight to the real UI
+  // below using that hint, while the real check verifies silently in the
+  // background and can still redirect to AccessDeniedPage the moment it
+  // comes back if it disagrees. See src/context/AuthContext.jsx for the
+  // full reasoning (hint caching, namespacing, fail-closed timeouts).
   if (!ready) return <FullScreenLoader />
   if (!user) return <LoginPage />
+  if (permissionsPending) return <FullScreenLoader />
   if (!hasAccess) return <AccessDeniedPage onLogout={logout} email={user.email} />
 
   const displayName = user.user_metadata?.name || user.email?.split("@")[0] || "User"
@@ -197,14 +208,14 @@ export default function App() {
             type="button"
             onClick={() => setSidebarOpen(!sidebarOpen)}
             className="stv-btn stv-btn-ghost"
-            aria-label="Toggle sidebar"
+            aria-label={t("toggleSidebar")}
             aria-expanded={sidebarOpen}
             style={{ background:"none", border:"none", borderRadius:RADIUS.sm, cursor:"pointer", fontSize:19, padding:6, color:C.textSub, lineHeight:1 }}
           >
             ☰
           </button>
           <span style={{ fontSize:13, color:C.textFaint, fontWeight:500 }}>
-            {new Date().toLocaleDateString("en-US", { weekday:"long", year:"numeric", month:"long", day:"numeric" })}
+            {new Date().toLocaleDateString(lang === "sw" ? "sw-TZ" : "en-US", { weekday:"long", year:"numeric", month:"long", day:"numeric" })}
           </span>
         </div>
 
@@ -321,18 +332,38 @@ export default function App() {
 }
 
 /* ── LOADING / ACCESS DENIED ────────────────────────────── */
+// Only shown when genuinely necessary: (a) briefly, while the local session
+// restore itself is in flight (near-instant in practice -- see AuthContext's
+// AUTH_INIT_TIMEOUT_MS), or (b) for a first-time/unknown-on-this-device
+// session with no cached access hint to render from optimistically. A
+// returning authenticated user with a cached hint never sees this -- they
+// go straight to the POS shell while permissions verify in the background.
 function FullScreenLoader() {
+  const { t } = useLanguage()
   return (
     <div style={{
-      minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center",
-      background:C.bg, fontFamily:FONT, color:C.textFaint, fontSize:13.5,
+      minHeight:"100vh", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center",
+      gap:16, background:C.bg, fontFamily:FONT,
     }}>
-      Checking access…
+      <img src={LOGO} alt="" aria-hidden="true" style={{ width:72, height:"auto", opacity:0.92, mixBlendMode:"multiply" }} />
+      <div
+        aria-hidden="true"
+        style={{
+          width:22, height:22, borderRadius:RADIUS.pill,
+          border:`2.5px solid ${C.border}`, borderTopColor:C.accentStrong,
+          animation:"stv-spin 0.7s linear infinite",
+        }}
+      />
+      <span role="status" aria-live="polite" style={{ fontSize:12.5, color:C.textFaint, fontWeight:500 }}>
+        {t("loadingBrand")}
+      </span>
+      <style>{`@keyframes stv-spin { to { transform:rotate(360deg); } }`}</style>
     </div>
   )
 }
 
 function AccessDeniedPage({ onLogout, email }) {
+  const { t } = useLanguage()
   return (
     <div style={{
       minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center",
@@ -340,12 +371,12 @@ function AccessDeniedPage({ onLogout, email }) {
     }}>
       <div style={{ background:C.surface, borderRadius:RADIUS.lg, padding:"40px 36px", width:"min(92vw, 420px)", textAlign:"center", boxShadow:SHADOW.modal }}>
         <div style={{ fontSize:34, marginBottom:14 }}>🔒</div>
-        <h1 style={{ margin:"0 0 10px", fontFamily:FONT, fontWeight:700, fontSize:19, color:C.text }}>No access to the POS</h1>
+        <h1 style={{ margin:"0 0 10px", fontFamily:FONT, fontWeight:700, fontSize:19, color:C.text }}>{t("noAccessTitle")}</h1>
         <p style={{ margin:"0 0 6px", color:C.textSub, fontSize:13.5, lineHeight:1.5 }}>
-          {email} is signed in, but doesn't have a role in Swahili Tent Village POS yet.
+          {t("noAccessBody", { email })}
         </p>
         <p style={{ margin:"0 0 24px", color:C.textFaint, fontSize:12.5, lineHeight:1.5 }}>
-          Ask an Owner to grant you access, then sign in again.
+          {t("noAccessHint")}
         </p>
         <button
           type="button"
@@ -353,7 +384,7 @@ function AccessDeniedPage({ onLogout, email }) {
           className="stv-btn stv-btn-primary"
           style={{ width:"100%", padding:"12px", background:C.accentStrong, color:"#fff", border:"none", borderRadius:RADIUS.sm, fontSize:14, fontWeight:600, cursor:"pointer", fontFamily:FONT }}
         >
-          Sign out
+          {t("signOut")}
         </button>
       </div>
     </div>
@@ -440,17 +471,18 @@ function LoginPage() {
 
 /* ── SIDEBAR ─────────────────────────────────────────────── */
 function Sidebar({ page, setPage, isOwner, displayName, onLogout, open, onClose }) {
+  const { t, lang, setLang } = useLanguage()
   const ownerNav = [
-    { id:"dashboard", label:"Dashboard", icon:"📊" },
-    { id:"sales",     label:"Sales",     icon:"💰" },
-    { id:"expenses",  label:"Expenses",  icon:"🧾" },
-    { id:"reports",   label:"Reports",   icon:"📈" },
-    { id:"users",     label:"Users",     icon:"👥" },
+    { id:"dashboard", label:t("navDashboard"), icon:"📊" },
+    { id:"sales",     label:t("navSales"),     icon:"💰" },
+    { id:"expenses",  label:t("navExpenses"),  icon:"🧾" },
+    { id:"reports",   label:t("navReports"),   icon:"📈" },
+    { id:"users",     label:t("navUsers"),     icon:"👥" },
   ]
   const workerNav = [
-    { id:"dashboard", label:"Home",        icon:"🏠" },
-    { id:"sales",     label:"Record Sale", icon:"💰" },
-    { id:"expenses",  label:"Expenses",    icon:"🧾" },
+    { id:"dashboard", label:t("navHome"),       icon:"🏠" },
+    { id:"sales",     label:t("navRecordSale"), icon:"💰" },
+    { id:"expenses",  label:t("navExpenses"),   icon:"🧾" },
   ]
   const nav = isOwner ? ownerNav : workerNav
 
@@ -488,13 +520,13 @@ function Sidebar({ page, setPage, isOwner, displayName, onLogout, open, onClose 
         />
         {open && (
           <div style={{ fontSize:10, color:C.sidebarText, textAlign:"center", marginTop:2, letterSpacing:0.6, fontWeight:500 }}>
-            {isOwner ? "OWNER DASHBOARD" : "WORKER PANEL"}
+            {isOwner ? t("ownerDashboardLabel") : t("workerPanelLabel")}
           </div>
         )}
       </div>
 
       {/* Nav */}
-      <nav style={{ flex:1, padding:"12px 10px" }} aria-label="Main navigation">
+      <nav style={{ flex:1, padding:"12px 10px" }} aria-label={t("mainNavigation")}>
         {nav.map(item => (
           <button
             key={item.id}
@@ -542,17 +574,55 @@ function Sidebar({ page, setPage, isOwner, displayName, onLogout, open, onClose 
                 {displayName}
               </div>
               <div style={{ fontSize:10.5, color:C.sidebarText, textTransform:"capitalize" }}>
-                {isOwner ? "Owner" : "Worker"}
+                {isOwner ? t("roleOwner") : t("roleWorker")}
               </div>
             </div>
           </div>
         )}
+
+        {/* Language selector -- compact EN|SW toggle. A manual choice here
+            always overrides the role-based default and persists per
+            authenticated user (see src/i18n.jsx), so it survives a refresh
+            but never leaks onto a different person's session on a shared
+            device. */}
+        <div
+          role="group"
+          aria-label={t("language")}
+          style={{
+            display:"flex", gap:4, marginBottom:10,
+            justifyContent: open ? "flex-start" : "center",
+          }}
+        >
+          {["en", "sw"].map((code) => (
+            <button
+              key={code}
+              type="button"
+              onClick={() => setLang(code)}
+              aria-pressed={lang === code}
+              aria-label={code === "en" ? "English" : "Kiswahili"}
+              title={code === "en" ? "English" : "Kiswahili"}
+              className="stv-btn"
+              style={{
+                padding: open ? "6px 12px" : "6px 8px",
+                borderRadius:RADIUS.sm,
+                border:`1px solid ${lang === code ? "rgba(255,255,255,0.3)" : C.sidebarBorder}`,
+                background: lang === code ? "rgba(255,255,255,0.14)" : "transparent",
+                color: lang === code ? "#fff" : C.sidebarText,
+                cursor:"pointer", fontSize:11, fontWeight:700,
+                fontFamily:FONT, letterSpacing:0.5,
+              }}
+            >
+              {code.toUpperCase()}
+            </button>
+          ))}
+        </div>
+
         <button
           type="button"
           onClick={onLogout}
           className="stv-btn stv-nav-item"
-          aria-label="Sign out"
-          title="Sign out"
+          aria-label={t("signOut")}
+          title={t("signOut")}
           style={{
             width:"100%", padding:"9px 14px", borderRadius:RADIUS.sm,
             border:`1px solid ${C.sidebarBorder}`, background:"transparent",
@@ -563,7 +633,7 @@ function Sidebar({ page, setPage, isOwner, displayName, onLogout, open, onClose 
           }}
         >
           <span style={{ fontSize:14 }}>🚪</span>
-          {open && "Sign Out"}
+          {open && t("signOut")}
         </button>
       </div>
       </aside>
@@ -615,6 +685,7 @@ function ServiceBadge({ name, services }) {
 
 /* ── ADD SERVICE MODAL ───────────────────────────────────── */
 function AddServiceModal({ onAdd, onClose, existing }) {
+  const { t } = useLanguage()
   const [name,  setName]  = useState("")
   const [emoji, setEmoji] = useState("🎪")
   const [color, setColor] = useState(PALETTE[existing.length % PALETTE.length])
@@ -623,9 +694,9 @@ function AddServiceModal({ onAdd, onClose, existing }) {
 
   const submit = async () => {
     const trimmed = name.trim()
-    if (!trimmed) { setErr("Service name is required."); return }
+    if (!trimmed) { setErr(t("serviceNameRequired")); return }
     if (existing.some(s => s.name.toLowerCase() === trimmed.toLowerCase())) {
-      setErr("A service with this name already exists."); return
+      setErr(t("serviceNameExists")); return
     }
     setBusy(true)
     await onAdd({
@@ -651,14 +722,14 @@ function AddServiceModal({ onAdd, onClose, existing }) {
         style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:RADIUS.lg, padding:"clamp(22px,5vw,32px)", width:"min(92vw, 400px)", maxHeight:"90vh", overflowY:"auto", boxShadow:SHADOW.modal }}
       >
         <h2 id="add-service-title" style={{ margin:"0 0 22px", fontFamily:FONT, fontWeight:700, fontSize:17, color:C.text, letterSpacing:"-0.01em" }}>
-          Add New Service
+          {t("addServiceTitle")}
         </h2>
 
-        <label style={lS} htmlFor="svc-name">Service Name</label>
+        <label style={lS} htmlFor="svc-name">{t("serviceNameLabel")}</label>
         <input
           id="svc-name"
           autoFocus
-          placeholder="e.g. Swimming Pool"
+          placeholder={t("serviceNamePlaceholder")}
           value={name}
           onChange={e => { setName(e.target.value); setErr("") }}
           onKeyDown={e => e.key === "Enter" && submit()}
@@ -666,7 +737,7 @@ function AddServiceModal({ onAdd, onClose, existing }) {
         />
         {err && <p role="alert" style={{ color:C.warnStrong, fontSize:12, margin:"4px 0 14px" }}>{err}</p>}
 
-        <label style={lS} id="svc-icon-label">Icon</label>
+        <label style={lS} id="svc-icon-label">{t("iconLabel")}</label>
         <div role="group" aria-labelledby="svc-icon-label" style={{ display:"flex", flexWrap:"wrap", gap:7, marginBottom:SPACE.md+2 }}>
           {EMOJI_LIST.map(e => (
             <button
@@ -674,7 +745,7 @@ function AddServiceModal({ onAdd, onClose, existing }) {
               type="button"
               onClick={() => setEmoji(e)}
               className="stv-btn"
-              aria-label={`Icon: ${e}`}
+              aria-label={t("iconAriaLabel", { emoji: e })}
               aria-pressed={emoji === e}
               style={{
                 width:36, height:36, borderRadius:RADIUS.sm,
@@ -689,7 +760,7 @@ function AddServiceModal({ onAdd, onClose, existing }) {
           ))}
         </div>
 
-        <label style={lS} id="svc-color-label">Color</label>
+        <label style={lS} id="svc-color-label">{t("colorLabel")}</label>
         <div role="group" aria-labelledby="svc-color-label" style={{ display:"flex", flexWrap:"wrap", gap:8, marginBottom:SPACE.lg+4 }}>
           {PALETTE.map(c => (
             <button
@@ -697,7 +768,7 @@ function AddServiceModal({ onAdd, onClose, existing }) {
               type="button"
               onClick={() => setColor(c)}
               className="stv-btn"
-              aria-label={`Color swatch ${c}`}
+              aria-label={t("colorSwatchAriaLabel", { color: c })}
               aria-pressed={color === c}
               style={{
                 width:28, height:28, borderRadius:RADIUS.sm,
@@ -718,7 +789,7 @@ function AddServiceModal({ onAdd, onClose, existing }) {
             padding:"4px 12px", borderRadius:RADIUS.pill,
             fontSize:13, fontWeight:600,
           }}>
-            {name || "Preview"}
+            {name || t("preview")}
           </span>
         </div>
 
@@ -729,7 +800,7 @@ function AddServiceModal({ onAdd, onClose, existing }) {
             className="stv-btn stv-btn-secondary"
             style={{ flex:1, padding:"12px", borderRadius:RADIUS.sm, border:`1px solid ${C.border}`, background:C.surface, color:C.text, cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5 }}
           >
-            Cancel
+            {t("cancel")}
           </button>
           <button
             type="button"
@@ -738,7 +809,7 @@ function AddServiceModal({ onAdd, onClose, existing }) {
             className="stv-btn stv-btn-primary"
             style={{ flex:1, padding:"12px", borderRadius:RADIUS.sm, border:"none", background:C.accentStrong, color:"#fff", cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5, opacity: busy ? 0.7 : 1 }}
           >
-            {busy ? "Saving…" : `${emoji} Add Service`}
+            {busy ? t("saving") : `${emoji} ${t("addServiceBtn")}`}
           </button>
         </div>
       </div>
@@ -746,8 +817,195 @@ function AddServiceModal({ onAdd, onClose, existing }) {
   )
 }
 
+/* ── RECEIPT ─────────────────────────────────────────────────
+   Extends the existing Sales workflow rather than creating a second
+   sales/service system: every value shown here comes from the same `sale`
+   record and `service` data SalesPage already has (service name, amount,
+   date, note) plus the currently authenticated user's display name for
+   "Served by". Customer name/contact and payment method are the only new
+   inputs, and they are intentionally NEVER written to Supabase -- see the
+   Phase 0 audit notes in the final report for why a schema change wasn't
+   used: the `sales` table has no customer/payment fields today, and there
+   was no reliable way from this session to confirm which Supabase project
+   backs this exact deployment (VITE_SUPABASE_URL isn't in the repo's
+   .env -- it's Vercel-only), so altering a shared production database
+   blind was avoided. Customer/payment info therefore lives only in this
+   modal's state (plus the light in-memory `receiptDrafts` cache in
+   SalesPage) for as long as the receipt is open. */
+
+// Human-readable reference derived from the existing sale record -- never
+// the raw UUID. Deterministic (same sale -> same reference every time it's
+// reprinted), and doesn't require a new counter/table.
+function receiptRefFromSale(sale) {
+  const idPart = String(sale?.id || "").replace(/[^a-zA-Z0-9]/g, "").slice(-6).toUpperCase()
+  const d = (sale?.date || "").slice(0, 10).replace(/-/g, "").slice(2) // YYMMDD
+  return `STV-${d || "000000"}-${idPart || "000000"}`
+}
+
+function ReceiptModal({ sale, servedByName, capturedAt, draft, onDraftChange, onClose }) {
+  const { t, lang } = useLanguage()
+  const [customerName,    setCustomerName]    = useState(draft?.customerName || "")
+  const [customerContact, setCustomerContact] = useState(draft?.customerContact || "")
+  const [paymentMethod,   setPaymentMethod]   = useState(draft?.paymentMethod || "")
+
+  const updateDraft = (next) => onDraftChange?.({ customerName, customerContact, paymentMethod, ...next })
+
+  const dateDisplay = formatDMY(sale?.date)
+  // Real clock time is only known for a sale just recorded in this session
+  // (capturedAt, set at the moment of saving) -- the sale's own stored
+  // `date` field always carries a fixed noon placeholder time (see
+  // SalesPage.submit), not the actual time of the transaction, so a
+  // reprinted older receipt correctly omits the Time row rather than
+  // showing a fabricated 12:00.
+  const timeDisplay = capturedAt
+    ? capturedAt.toLocaleTimeString(lang === "sw" ? "sw-TZ" : "en-US", { hour:"2-digit", minute:"2-digit" })
+    : null
+  const note = (sale?.note || "").trim()
+  const trimmedName = customerName.trim()
+  const trimmedContact = customerContact.trim()
+  const paymentLabel = { cash:t("paymentCash"), mobile:t("paymentMobileMoney"), card:t("paymentCard") }[paymentMethod] || null
+
+  const printLine = { display:"flex", justifyContent:"space-between", gap:12, fontSize:12.5, padding:"3px 0" }
+  const divider = <div aria-hidden="true" style={{ borderTop:`1px dashed ${C.borderStrong}`, margin:"12px 0" }} />
+
+  return (
+    <div
+      onClick={onClose}
+      style={{ position:"fixed", inset:0, background:"rgba(20,20,30,0.5)", zIndex:1000, display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="receipt-title"
+        style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:RADIUS.lg, padding:"clamp(20px,5vw,28px)", width:"min(94vw, 420px)", maxHeight:"92vh", overflowY:"auto", boxShadow:SHADOW.modal }}
+      >
+        <h2 id="receipt-title" style={{ margin:"0 0 16px", fontFamily:FONT, fontWeight:700, fontSize:16, color:C.text }}>
+          {t("printReceipt")}
+        </h2>
+
+        {/* Optional customer + payment capture -- never mandatory, never
+            blocks anything, and never touches the database. */}
+        <div style={{ marginBottom:16, padding:"12px 14px", background:C.bg, borderRadius:RADIUS.sm }}>
+          <div style={{ fontSize:11, fontWeight:600, color:C.textSub, marginBottom:10, textTransform:"uppercase", letterSpacing:0.5 }}>
+            {t("receiptAddCustomerOptional")}
+          </div>
+          <label style={lS} htmlFor="receipt-customer-name">{t("receiptName")}</label>
+          <input
+            id="receipt-customer-name"
+            placeholder={t("customerNamePlaceholder")}
+            value={customerName}
+            onChange={e => { setCustomerName(e.target.value); updateDraft({ customerName: e.target.value }) }}
+            style={{ ...iS, marginBottom:10 }}
+          />
+          <label style={lS} htmlFor="receipt-customer-contact">{t("receiptContact")}</label>
+          <input
+            id="receipt-customer-contact"
+            type="tel"
+            placeholder={t("customerContactPlaceholder")}
+            value={customerContact}
+            onChange={e => { setCustomerContact(e.target.value); updateDraft({ customerContact: e.target.value }) }}
+            style={{ ...iS, marginBottom:10 }}
+          />
+          <label style={lS} htmlFor="receipt-payment-method">{t("selectPaymentMethodOptional")}</label>
+          <select
+            id="receipt-payment-method"
+            value={paymentMethod}
+            onChange={e => { setPaymentMethod(e.target.value); updateDraft({ paymentMethod: e.target.value }) }}
+            style={iS}
+          >
+            <option value="">{t("paymentNone")}</option>
+            <option value="cash">{t("paymentCash")}</option>
+            <option value="mobile">{t("paymentMobileMoney")}</option>
+            <option value="card">{t("paymentCard")}</option>
+          </select>
+        </div>
+
+        {/* The actual printable receipt -- only this element (via
+            .stv-receipt-print) is visible when printing. */}
+        <div className="stv-receipt-print" style={{ border:`1px solid ${C.border}`, borderRadius:RADIUS.sm, padding:18, background:"#fff" }}>
+          <div style={{ textAlign:"center", marginBottom:10 }}>
+            <div style={{ fontWeight:800, fontSize:15, color:C.text, letterSpacing:0.5 }}>SWAHILI TENT VILLAGE</div>
+            <div style={{ fontSize:11, color:C.textFaint, fontWeight:600, letterSpacing:1, marginTop:4 }}>{t("receiptHeading")}</div>
+          </div>
+          {divider}
+          <div style={printLine}><span style={{ color:C.textSub }}>{t("receiptNo")}</span><span style={{ fontWeight:600 }}>{receiptRefFromSale(sale)}</span></div>
+          <div style={printLine}><span style={{ color:C.textSub }}>{t("dateLabel")}</span><span style={{ fontWeight:600 }}>{dateDisplay}</span></div>
+          {timeDisplay && (
+            <div style={printLine}><span style={{ color:C.textSub }}>{t("receiptTime")}</span><span style={{ fontWeight:600 }}>{timeDisplay}</span></div>
+          )}
+
+          {(trimmedName || trimmedContact) && (
+            <>
+              {divider}
+              <div style={{ fontSize:10.5, fontWeight:700, color:C.textFaint, textTransform:"uppercase", letterSpacing:0.5, marginBottom:6 }}>{t("receiptCustomer")}</div>
+              {trimmedName && <div style={{ fontSize:13, fontWeight:600, color:C.text }}>{trimmedName}</div>}
+              {trimmedContact && <div style={{ fontSize:12.5, color:C.textSub }}>{trimmedContact}</div>}
+            </>
+          )}
+
+          {divider}
+          <div style={{ fontSize:10.5, fontWeight:700, color:C.textFaint, textTransform:"uppercase", letterSpacing:0.5, marginBottom:6 }}>{t("receiptServiceProvided")}</div>
+          <div style={{ fontSize:14, fontWeight:700, color:C.text }}>{sale?.service || "—"}</div>
+          {note && <div style={{ fontSize:12, color:C.textSub, marginTop:4 }}>{note}</div>}
+
+          {divider}
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline" }}>
+            <span style={{ fontSize:12.5, fontWeight:700, color:C.text, textTransform:"uppercase", letterSpacing:0.5 }}>{t("total")}</span>
+            <span style={{ fontSize:19, fontWeight:800, color:C.accentStrong }}>{TZS(sale?.amount)}</span>
+          </div>
+          {paymentLabel && (
+            <div style={{ ...printLine, marginTop:6 }}><span style={{ color:C.textSub }}>{t("receiptPaymentMethod")}</span><span style={{ fontWeight:600 }}>{paymentLabel}</span></div>
+          )}
+
+          {servedByName && (
+            <div style={{ ...printLine, marginTop:4 }}><span style={{ color:C.textFaint }}>{t("receiptServedBy")}</span><span style={{ color:C.textFaint }}>{servedByName}</span></div>
+          )}
+
+          {divider}
+          <div style={{ textAlign:"center", fontSize:11.5, color:C.textSub, fontWeight:500 }}>{t("receiptThankYou")}</div>
+        </div>
+
+        <div style={{ display:"flex", gap:10, marginTop:18 }}>
+          <button
+            type="button"
+            onClick={onClose}
+            className="stv-btn stv-btn-secondary"
+            style={{ flex:1, padding:"12px", borderRadius:RADIUS.sm, border:`1px solid ${C.border}`, background:C.surface, color:C.text, cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5 }}
+          >
+            {t("receiptClose")}
+          </button>
+          <button
+            type="button"
+            onClick={() => window.print()}
+            className="stv-btn stv-btn-primary"
+            style={{ flex:1, padding:"12px", borderRadius:RADIUS.sm, border:"none", background:C.accentStrong, color:"#fff", cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5 }}
+          >
+            {t("printReceipt")}
+          </button>
+        </div>
+      </div>
+
+      {/* Print-only view: hide everything except the receipt itself. A
+          browser's own "Save as PDF" print destination covers the PDF
+          case without adding a PDF-generation dependency. */}
+      <style>{`
+        @media print {
+          body * { visibility: hidden; }
+          .stv-receipt-print, .stv-receipt-print * { visibility: visible; }
+          .stv-receipt-print {
+            position: fixed; inset: 0; margin: 0; border: none !important;
+            width: 100%; max-width: 340px; left: 50%; transform: translateX(-50%);
+          }
+        }
+      `}</style>
+    </div>
+  )
+}
+
 /* ── OWNER DASHBOARD ─────────────────────────────────────── */
 function OwnerDashboard({ sales, expenses, services }) {
+  const { t, lang } = useLanguage()
   const today  = todayStr()
   const month  = thisMonth()
 
@@ -762,7 +1020,7 @@ function OwnerDashboard({ sales, expenses, services }) {
     const d = new Date(); d.setDate(d.getDate() - (6 - i))
     const ds = d.toISOString().split("T")[0]
     return {
-      day: d.toLocaleDateString("en-US", { weekday:"short" }),
+      day: d.toLocaleDateString(lang === "sw" ? "sw-TZ" : "en-US", { weekday:"short" }),
       Sales:    sales.filter(x => x.date?.startsWith(ds)).reduce((a, b) => a + Number(b.amount || 0), 0),
       Expenses: expenses.filter(x => x.date?.startsWith(ds)).reduce((a, b) => a + Number(b.cost || 0), 0),
     }
@@ -781,21 +1039,21 @@ function OwnerDashboard({ sales, expenses, services }) {
 
   return (
     <div>
-      <h1 style={pT}>Overview</h1>
-      <p style={{ margin:"0 0 " + SPACE.xl + "px", color:C.textSub, fontSize:13.5 }}>This month's performance</p>
+      <h1 style={pT}>{t("overview")}</h1>
+      <p style={{ margin:"0 0 " + SPACE.xl + "px", color:C.textSub, fontSize:13.5 }}>{t("monthPerformance")}</p>
 
       {/* Stat cards */}
       <div style={{ display:"grid", gap:SPACE.md, marginBottom:SPACE.xl, gridTemplateColumns:"repeat(auto-fit, minmax(200px, 1fr))" }}>
-        <StatCard label="Today's Sales"    value={TZS(todaySales)} color={C.accent} icon="💰" sub={`Today expenses: ${TZS(todayExp)}`} />
-        <StatCard label="Monthly Revenue"  value={TZS(monthSales)} color={C.accent} icon="📈" />
-        <StatCard label="Monthly Expenses" value={TZS(monthExp)}   color={C.warn} icon="🧾" />
-        <StatCard label="Net Profit"       value={TZS(netProfit)}  color={netProfit >= 0 ? C.accent : C.warn} icon={netProfit >= 0 ? "✅" : "⚠️"} />
+        <StatCard label={t("todaysSales")}    value={TZS(todaySales)} color={C.accent} icon="💰" sub={t("todayExpensesSub", { amount: TZS(todayExp) })} />
+        <StatCard label={t("monthlyRevenue")}  value={TZS(monthSales)} color={C.accent} icon="📈" />
+        <StatCard label={t("monthlyExpenses")} value={TZS(monthExp)}   color={C.warn} icon="🧾" />
+        <StatCard label={t("netProfit")}       value={TZS(netProfit)}  color={netProfit >= 0 ? C.accent : C.warn} icon={netProfit >= 0 ? "✅" : "⚠️"} />
       </div>
 
       {/* Charts row */}
       <div style={{ display:"flex", gap:SPACE.md, marginBottom:SPACE.xl, flexWrap:"wrap" }}>
         <div style={{ ...panelS, flex:2, minWidth:280 }}>
-          <h2 style={{ margin:"0 0 16px", fontSize:14, fontWeight:600, color:C.text }}>Sales vs Expenses — Last 7 Days</h2>
+          <h2 style={{ margin:"0 0 16px", fontSize:14, fontWeight:600, color:C.text }}>{t("salesVsExpenses7d")}</h2>
           <ResponsiveContainer width="100%" height={190}>
             <BarChart data={trend} barSize={13}>
               <CartesianGrid strokeDasharray="3 3" stroke="#F0EDE8" />
@@ -810,7 +1068,7 @@ function OwnerDashboard({ sales, expenses, services }) {
         </div>
 
         <div style={{ ...panelS, flex:1, minWidth:200 }}>
-          <h2 style={{ margin:"0 0 14px", fontSize:14, fontWeight:600, color:C.text }}>Revenue by Service</h2>
+          <h2 style={{ margin:"0 0 14px", fontSize:14, fontWeight:600, color:C.text }}>{t("revenueByService")}</h2>
           {byService.length > 0 ? (
             <>
               <ResponsiveContainer width="100%" height={150}>
@@ -829,19 +1087,19 @@ function OwnerDashboard({ sales, expenses, services }) {
               ))}
             </>
           ) : (
-            <div style={{ textAlign:"center", color:C.textFaint, fontSize:13, paddingTop:40 }}>No data this month</div>
+            <div style={{ textAlign:"center", color:C.textFaint, fontSize:13, paddingTop:40 }}>{t("noDataThisMonth")}</div>
           )}
         </div>
       </div>
 
       {/* Recent transactions */}
       <div style={panelS}>
-        <h2 style={{ margin:"0 0 14px", fontSize:14, fontWeight:600, color:C.text }}>Recent Transactions</h2>
+        <h2 style={{ margin:"0 0 14px", fontSize:14, fontWeight:600, color:C.text }}>{t("recentTransactions")}</h2>
         <div style={{ overflowX:"auto", WebkitOverflowScrolling:"touch" }}>
         <table className="stv-table" style={{ width:"100%", minWidth:480, borderCollapse:"collapse" }}>
           <thead>
             <tr style={{ borderBottom:`1.5px solid ${C.border}` }}>
-              {["Date","Service","Amount","Note"].map(h => (
+              {[t("colDate"),t("colService"),t("colAmount"),t("colNote")].map(h => (
                 <th key={h} scope="col" style={{ textAlign:"left", padding:"0 0 10px", fontSize:10.5, color:C.textFaint, fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
               ))}
             </tr>
@@ -856,7 +1114,7 @@ function OwnerDashboard({ sales, expenses, services }) {
               </tr>
             ))}
             {recent.length === 0 && (
-              <tr><td colSpan={4} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>No sales yet</td></tr>
+              <tr><td colSpan={4} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>{t("noSalesYet")}</td></tr>
             )}
           </tbody>
         </table>
@@ -868,16 +1126,17 @@ function OwnerDashboard({ sales, expenses, services }) {
 
 /* ── WORKER HOME ─────────────────────────────────────────── */
 function WorkerHome({ sales, displayName, setPage }) {
+  const { t } = useLanguage()
   const count      = sales.filter(s => s.date?.startsWith(todayStr())).length
   const todaySales = sales.filter(s => s.date?.startsWith(todayStr())).reduce((a, b) => a + Number(b.amount || 0), 0)
 
   return (
     <div>
-      <h1 style={pT}>Good day, {displayName} 👋</h1>
-      <p style={{ margin:"0 0 " + SPACE.xl + "px", color:C.textSub, fontSize:13.5 }}>What would you like to record today?</p>
+      <h1 style={pT}>{t("goodDay", { name: displayName })}</h1>
+      <p style={{ margin:"0 0 " + SPACE.xl + "px", color:C.textSub, fontSize:13.5 }}>{t("whatToRecordToday")}</p>
 
       <div style={{ display:"grid", gap:SPACE.md, marginBottom:SPACE.xl, gridTemplateColumns:"repeat(auto-fit, minmax(200px, 1fr))" }}>
-        <StatCard label="Today's Sales" value={TZS(todaySales)} color={C.accent} icon="💰" sub={`${count} transaction${count !== 1 ? "s" : ""} recorded`} />
+        <StatCard label={t("todaysSales")} value={TZS(todaySales)} color={C.accent} icon="💰" sub={t("transactionsRecorded", { count, plural: count !== 1 ? "s" : "" })} />
       </div>
 
       <div style={{ display:"grid", gap:SPACE.md, gridTemplateColumns:"repeat(auto-fit, minmax(220px, 1fr))" }}>
@@ -897,8 +1156,8 @@ function WorkerHome({ sales, displayName, setPage }) {
           onMouseLeave={e => e.currentTarget.style.transform = "none"}
         >
           <span style={{ fontSize:30, marginBottom:10, display:"block" }}>💰</span>
-          <span style={{ fontSize:15.5, fontWeight:700, display:"block" }}>Record Sale</span>
-          <span style={{ fontSize:12, opacity:.85, marginTop:5, display:"block" }}>Restaurant, Go Kart, Paintball…</span>
+          <span style={{ fontSize:15.5, fontWeight:700, display:"block" }}>{t("recordSale")}</span>
+          <span style={{ fontSize:12, opacity:.85, marginTop:5, display:"block" }}>{t("recordSaleCardSub")}</span>
         </button>
 
         <button
@@ -917,8 +1176,8 @@ function WorkerHome({ sales, displayName, setPage }) {
           onMouseLeave={e => e.currentTarget.style.transform = "none"}
         >
           <span style={{ fontSize:30, marginBottom:10, display:"block" }}>🧾</span>
-          <span style={{ fontSize:15.5, fontWeight:700, display:"block" }}>Record Expense</span>
-          <span style={{ fontSize:12, opacity:.85, marginTop:5, display:"block" }}>Supplies, purchases, costs…</span>
+          <span style={{ fontSize:15.5, fontWeight:700, display:"block" }}>{t("recordExpense")}</span>
+          <span style={{ fontSize:12, opacity:.85, marginTop:5, display:"block" }}>{t("recordExpenseCardSub")}</span>
         </button>
       </div>
     </div>
@@ -927,6 +1186,7 @@ function WorkerHome({ sales, displayName, setPage }) {
 
 /* ── SALES PAGE ──────────────────────────────────────────── */
 function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, onOpenAddService }) {
+  const { t, lang } = useLanguage()
   const [form, setForm] = useState({
     service: services[0]?.name || "",
     amount:  "",
@@ -936,14 +1196,33 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, onOpen
   const [filter, setFilter] = useState({ service:"All", from:"", to:"" })
   const [busy, setBusy]     = useState(false)
 
+  // Post-save "Sale saved ✓ [Print Receipt]" prompt -- the just-recorded
+  // row plus the current moment (real wall-clock time, unlike the sale's
+  // own stored `date`, which only ever carries a date and a fixed noon
+  // placeholder time; see ReceiptModal for why that distinction matters).
+  const [lastSaved, setLastSaved] = useState(null)
+  // Which sale (if any) the receipt modal is currently open for, and
+  // whether it's the "just saved" case (servedBy/time known and accurate)
+  // or a reprint of an older row (deliberately without those two fields --
+  // see ReceiptModal).
+  const [receiptTarget, setReceiptTarget] = useState(null)
+  // Customer name/contact/payment method are NEVER persisted to the sales
+  // table (no schema change for this) -- they only exist for as long as
+  // the receipt is open. This in-memory map just lets a worker re-open the
+  // same sale's receipt later in the session without retyping what they
+  // already entered; it's cleared on refresh like everything else here.
+  const [receiptDrafts, setReceiptDrafts] = useState({})
+
+  const displayName = user?.user_metadata?.name || user?.email?.split("@")[0] || "User"
+
   // Keep selected service valid when services list updates
   const svcNames     = services.map(s => s.name)
   const safeService  = svcNames.includes(form.service) ? form.service : (services[0]?.name || "")
 
   const submit = async () => {
-    if (!user?.id) { showToast("Not authenticated", "error"); return }
-    if (!form.amount || Number(form.amount) <= 0) { showToast("Enter a valid amount", "error"); return }
-    if (!safeService) { showToast("Select a service", "error"); return }
+    if (!user?.id) { showToast(t("notAuthenticated"), "error"); return }
+    if (!form.amount || Number(form.amount) <= 0) { showToast(t("enterValidAmount"), "error"); return }
+    if (!safeService) { showToast(t("selectService"), "error"); return }
     setBusy(true)
     const payload = {
       service: safeService,
@@ -953,20 +1232,26 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, onOpen
       user_id: user.id,
     }
     console.log("Inserting sale:", payload)
-    const { error } = await supabase.from("sales").insert([payload])
+    // .select() added so the receipt flow below can use the real inserted
+    // row (its id, for a human-readable receipt reference) -- this doesn't
+    // change what's written, only what comes back from the same insert.
+    const { data, error } = await supabase.from("sales").insert([payload]).select()
     setBusy(false)
     if (error) { console.error("Sale insert error:", error.message); showToast(error.message, "error"); return }
     setForm(f => ({ ...f, amount:"", note:"" }))
     fetchAll()
-    showToast("Sale recorded ✓")
+    showToast(t("saleRecorded"))
+    const saved = data?.[0] || { ...payload, id: null }
+    setLastSaved({ sale: saved, capturedAt: new Date() })
   }
 
   const deleteSale = async (id) => {
-    if (!confirm("Delete this sale?")) return
+    if (!confirm(t("confirmDeleteSale"))) return
     const { error } = await supabase.from("sales").delete().eq("id", id)
     if (error) { showToast(error.message, "error"); return }
     fetchAll()
-    showToast("Sale deleted")
+    showToast(t("saleDeleted"))
+    if (lastSaved?.sale?.id === id) setLastSaved(null)
   }
 
   const filtered = sales
@@ -979,14 +1264,14 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, onOpen
 
   return (
     <div>
-      <h1 style={pT}>Sales</h1>
+      <h1 style={pT}>{t("salesTitle")}</h1>
       <div style={{ display:"flex", gap:20, flexWrap:"wrap", alignItems:"flex-start" }}>
 
         {/* Form card */}
         <div style={{ ...fC, flex: isOwner ? "1 1 280px" : "1 1 100%", flexShrink:1, width:"auto", maxWidth: isOwner ? 340 : 460 }}>
-          <h2 style={fTi}>Record a Sale</h2>
+          <h2 style={fTi}>{t("recordASale")}</h2>
 
-          <label style={lS} id="sale-service-label">Service</label>
+          <label style={lS} id="sale-service-label">{t("serviceLabel")}</label>
           <div role="group" aria-labelledby="sale-service-label" style={{ display:"flex", flexWrap:"wrap", gap:7, marginBottom:8 }}>
             {services.map(s => (
               <button
@@ -1019,23 +1304,53 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, onOpen
               className="stv-btn stv-btn-ghost"
               style={{ display:"flex", alignItems:"center", gap:6, background:"none", border:`1.5px dashed ${C.borderStrong}`, color:C.textSub, borderRadius:RADIUS.sm, padding:"7px 12px", fontSize:12, fontWeight:500, cursor:"pointer", marginBottom:SPACE.md+2, fontFamily:FONT }}
             >
-              <span style={{ fontSize:15 }}>＋</span> Add New Service
+              <span style={{ fontSize:15 }}>＋</span> {t("addNewService")}
             </button>
           )}
           {!isOwner && <div style={{ marginBottom:16 }} />}
 
-          <label style={lS} htmlFor="sale-amount">Amount (TZS)</label>
-          <input id="sale-amount" type="number" placeholder="e.g. 15000" value={form.amount} onChange={e => setForm(f => ({ ...f, amount:e.target.value }))} style={{ ...iS, fontSize:21, fontWeight:700, marginBottom:14 }} />
+          <label style={lS} htmlFor="sale-amount">{t("amountTzs")}</label>
+          <input id="sale-amount" type="number" placeholder={t("amountPlaceholder")} value={form.amount} onChange={e => setForm(f => ({ ...f, amount:e.target.value }))} style={{ ...iS, fontSize:21, fontWeight:700, marginBottom:14 }} />
 
-          <label style={lS} htmlFor="sale-date">Date</label>
+          <label style={lS} htmlFor="sale-date">{t("dateLabel")}</label>
           <input id="sale-date" type="date" value={form.date} onChange={e => setForm(f => ({ ...f, date:e.target.value }))} style={{ ...iS, marginBottom:14 }} />
 
-          <label style={lS} htmlFor="sale-note">Notes (optional)</label>
-          <input id="sale-note" placeholder="e.g. Group of 5" value={form.note} onChange={e => setForm(f => ({ ...f, note:e.target.value }))} onKeyDown={e => e.key === "Enter" && submit()} style={{ ...iS, marginBottom:SPACE.lg+2 }} />
+          <label style={lS} htmlFor="sale-note">{t("notesOptional")}</label>
+          <input id="sale-note" placeholder={t("notesPlaceholderSale")} value={form.note} onChange={e => setForm(f => ({ ...f, note:e.target.value }))} onKeyDown={e => e.key === "Enter" && submit()} style={{ ...iS, marginBottom:SPACE.lg+2 }} />
 
           <button type="button" onClick={submit} disabled={busy} className="stv-btn stv-btn-primary" style={{ ...sB, opacity: busy ? 0.7 : 1 }}>
-            {busy ? "Saving…" : "✓ Record Sale"}
+            {busy ? t("saving") : t("recordSaleBtn")}
           </button>
+
+          {/* Natural next action after saving -- entirely optional, never
+              blocks recording the next sale. Clears itself once the worker
+              starts a new entry (see the amount-change effect isn't
+              needed: we simply clear it on next successful submit/delete,
+              or the worker can dismiss it directly). */}
+          {lastSaved && (
+            <div style={{ marginTop:12, padding:"10px 12px", background:C.accentSoft, borderRadius:RADIUS.sm, display:"flex", alignItems:"center", justifyContent:"space-between", gap:8, flexWrap:"wrap" }}>
+              <span style={{ fontSize:12.5, fontWeight:600, color:C.accentStrong }}>{t("saleSavedPrompt")}</span>
+              <div style={{ display:"flex", gap:6 }}>
+                <button
+                  type="button"
+                  onClick={() => setReceiptTarget({ sale: lastSaved.sale, servedByName: displayName, capturedAt: lastSaved.capturedAt })}
+                  className="stv-btn stv-btn-secondary"
+                  style={{ background:C.surface, color:C.accentStrong, border:`1.5px solid ${C.accentStrong}`, borderRadius:RADIUS.sm, padding:"6px 12px", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:FONT }}
+                >
+                  {t("printReceipt")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLastSaved(null)}
+                  className="stv-btn stv-btn-ghost"
+                  aria-label={t("receiptSkip")}
+                  style={{ background:"none", border:"none", color:C.accentStrong, borderRadius:RADIUS.sm, padding:"6px 10px", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:FONT }}
+                >
+                  {t("receiptSkip")}
+                </button>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Table (owner only) */}
@@ -1044,21 +1359,21 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, onOpen
             <div style={panelS}>
               {/* Filters */}
               <div style={{ display:"flex", gap:SPACE.sm, marginBottom:SPACE.md, flexWrap:"wrap", alignItems:"center" }}>
-                <select aria-label="Filter by service" value={filter.service} onChange={e => setFilter(f => ({ ...f, service:e.target.value }))} style={seS}>
-                  <option>All</option>
-                  {services.map(s => <option key={s.id}>{s.name}</option>)}
+                <select aria-label={t("filterByService")} value={filter.service} onChange={e => setFilter(f => ({ ...f, service:e.target.value }))} style={seS}>
+                  <option value="All">{t("allServices")}</option>
+                  {services.map(s => <option key={s.id} value={s.name}>{s.name}</option>)}
                 </select>
-                <input aria-label="From date" type="date" value={filter.from} onChange={e => setFilter(f => ({ ...f, from:e.target.value }))} style={seS} />
-                <input aria-label="To date" type="date" value={filter.to}   onChange={e => setFilter(f => ({ ...f, to:e.target.value }))}   style={seS} />
-                <button type="button" onClick={() => setFilter({ service:"All", from:"", to:"" })} className="stv-btn stv-btn-ghost" aria-label="Reset filters" style={{ ...seS, background:C.bg, border:"none", cursor:"pointer" }}>Reset</button>
-                <div style={{ marginLeft:"auto", fontWeight:700, color:C.text, fontSize:13 }}>Total: {TZS(total)}</div>
+                <input aria-label={t("fromDate")} type="date" value={filter.from} onChange={e => setFilter(f => ({ ...f, from:e.target.value }))} style={seS} />
+                <input aria-label={t("toDate")} type="date" value={filter.to}   onChange={e => setFilter(f => ({ ...f, to:e.target.value }))}   style={seS} />
+                <button type="button" onClick={() => setFilter({ service:"All", from:"", to:"" })} className="stv-btn stv-btn-ghost" aria-label={t("reset")} style={{ ...seS, background:C.bg, border:"none", cursor:"pointer" }}>{t("reset")}</button>
+                <div style={{ marginLeft:"auto", fontWeight:700, color:C.text, fontSize:13 }}>{t("total")}: {TZS(total)}</div>
               </div>
 
               <div style={{ overflowX:"auto", WebkitOverflowScrolling:"touch" }}>
               <table className="stv-table" style={{ width:"100%", minWidth:560, borderCollapse:"collapse" }}>
                 <thead>
                   <tr style={{ borderBottom:`1.5px solid ${C.border}` }}>
-                    {["Date","Service","Amount","Note",""].map(h => (
+                    {[t("colDate"),t("colService"),t("colAmount"),t("colNote"),""].map(h => (
                       <th key={h} scope="col" style={{ textAlign:"left", padding:"0 0 10px", fontSize:10.5, color:C.textFaint, fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
                     ))}
                   </tr>
@@ -1071,19 +1386,32 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, onOpen
                       <td style={{ ...tS, fontWeight:600 }}>{TZS(s.amount)}</td>
                       <td style={{ ...tS, color:C.textFaint }}>{s.note || "—"}</td>
                       <td style={tS}>
-                        <button
-                          type="button"
-                          onClick={() => deleteSale(s.id)}
-                          className="stv-btn stv-btn-danger"
-                          style={{ background:C.warnSoft, color:C.warnStrong, border:"none", padding:"5px 11px", borderRadius:RADIUS.sm, fontSize:11, cursor:"pointer", fontWeight:600 }}
-                        >
-                          Delete
-                        </button>
+                        <div style={{ display:"flex", gap:6 }}>
+                          <button
+                            type="button"
+                            onClick={() => setReceiptTarget({ sale: s })}
+                            className="stv-btn stv-btn-secondary"
+                            aria-label={t("printReceipt")}
+                            title={t("printReceipt")}
+                            style={{ background:C.surface, color:C.textSub, border:`1px solid ${C.border}`, padding:"5px 9px", borderRadius:RADIUS.sm, fontSize:12, cursor:"pointer" }}
+                          >
+                            🧾
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => deleteSale(s.id)}
+                            className="stv-btn stv-btn-danger"
+                            aria-label={t("delete")}
+                            style={{ background:C.warnSoft, color:C.warnStrong, border:"none", padding:"5px 11px", borderRadius:RADIUS.sm, fontSize:11, cursor:"pointer", fontWeight:600 }}
+                          >
+                            {t("delete")}
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}
                   {filtered.length === 0 && (
-                    <tr><td colSpan={5} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>No sales found</td></tr>
+                    <tr><td colSpan={5} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>{t("noSalesYet")}</td></tr>
                   )}
                 </tbody>
               </table>
@@ -1092,19 +1420,42 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, onOpen
           </div>
         )}
       </div>
+
+      {receiptTarget && (
+        <ReceiptModal
+          sale={receiptTarget.sale}
+          servedByName={receiptTarget.servedByName}
+          capturedAt={receiptTarget.capturedAt}
+          draft={receiptDrafts[receiptTarget.sale.id]}
+          onDraftChange={(d) => setReceiptDrafts(prev => ({ ...prev, [receiptTarget.sale.id]: d }))}
+          onClose={() => setReceiptTarget(null)}
+        />
+      )}
     </div>
   )
 }
 
 /* ── EXPENSES PAGE ───────────────────────────────────────── */
+const CAT_KEYS = {
+  Restaurant:    "catRestaurant",
+  "Go Kart":     "catGoKart",
+  Paintball:     "catPaintball",
+  "Park Entry":  "catParkEntry",
+  Utilities:     "catUtilities",
+  Staff:         "catStaff",
+  Maintenance:   "catMaintenance",
+  Other:         "catOther",
+}
+
 function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner }) {
+  const { t } = useLanguage()
   const [form, setForm] = useState({ category:EXPENSE_CATS[0], item:"", cost:"", date:todayStr() })
   const [busy, setBusy] = useState(false)
 
   const submit = async () => {
-    if (!user?.id) { showToast("Not authenticated", "error"); return }
-    if (!form.item.trim())            { showToast("Enter an item description", "error"); return }
-    if (!form.cost || Number(form.cost) <= 0) { showToast("Enter a valid cost", "error"); return }
+    if (!user?.id) { showToast(t("notAuthenticated"), "error"); return }
+    if (!form.item.trim())            { showToast(t("enterItemDescription"), "error"); return }
+    if (!form.cost || Number(form.cost) <= 0) { showToast(t("enterValidCost"), "error"); return }
     setBusy(true)
     const payload = {
       category:   form.category,
@@ -1120,15 +1471,15 @@ function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner }) {
     if (error) { console.error("Expense insert error:", error.message); showToast(error.message, "error"); return }
     setForm(f => ({ ...f, item:"", cost:"" }))
     fetchAll()
-    showToast("Expense recorded ✓")
+    showToast(t("expenseRecorded"))
   }
 
   const deleteExpense = async (id) => {
-    if (!confirm("Delete this expense?")) return
+    if (!confirm(t("confirmDeleteExpense"))) return
     const { error } = await supabase.from("expenses").delete().eq("id", id)
     if (error) { showToast(error.message, "error"); return }
     fetchAll()
-    showToast("Expense deleted")
+    showToast(t("expenseDeleted"))
   }
 
   const sorted = [...expenses].sort((a, b) => b.date?.localeCompare(a.date))
@@ -1136,29 +1487,29 @@ function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner }) {
 
   return (
     <div>
-      <h1 style={pT}>Expenses</h1>
+      <h1 style={pT}>{t("expensesTitle")}</h1>
       <div style={{ display:"flex", gap:20, flexWrap:"wrap", alignItems:"flex-start" }}>
 
         {/* Form */}
         <div style={{ ...fC, flex: isOwner ? "1 1 280px" : "1 1 100%", flexShrink:1, width:"auto", maxWidth: isOwner ? 340 : 460 }}>
-          <h2 style={fTi}>Record an Expense</h2>
+          <h2 style={fTi}>{t("recordAnExpense")}</h2>
 
-          <label style={lS} htmlFor="exp-category">Category</label>
+          <label style={lS} htmlFor="exp-category">{t("categoryLabel")}</label>
           <select id="exp-category" value={form.category} onChange={e => setForm(f => ({ ...f, category:e.target.value }))} style={{ ...iS, marginBottom:14 }}>
-            {EXPENSE_CATS.map(c => <option key={c}>{c}</option>)}
+            {EXPENSE_CATS.map(c => <option key={c} value={c}>{t(CAT_KEYS[c] || c)}</option>)}
           </select>
 
-          <label style={lS} htmlFor="exp-item">Item / Description</label>
-          <input id="exp-item" placeholder="e.g. Potato sack, Fuel…" value={form.item} onChange={e => setForm(f => ({ ...f, item:e.target.value }))} style={{ ...iS, marginBottom:14 }} />
+          <label style={lS} htmlFor="exp-item">{t("itemDescription")}</label>
+          <input id="exp-item" placeholder={t("itemPlaceholder")} value={form.item} onChange={e => setForm(f => ({ ...f, item:e.target.value }))} style={{ ...iS, marginBottom:14 }} />
 
-          <label style={lS} htmlFor="exp-cost">Cost (TZS)</label>
-          <input id="exp-cost" type="number" placeholder="e.g. 20000" value={form.cost} onChange={e => setForm(f => ({ ...f, cost:e.target.value }))} style={{ ...iS, fontSize:22, fontWeight:700, marginBottom:14 }} />
+          <label style={lS} htmlFor="exp-cost">{t("costTzs")}</label>
+          <input id="exp-cost" type="number" placeholder={t("costPlaceholder")} value={form.cost} onChange={e => setForm(f => ({ ...f, cost:e.target.value }))} style={{ ...iS, fontSize:22, fontWeight:700, marginBottom:14 }} />
 
-          <label style={lS} htmlFor="exp-date">Date</label>
+          <label style={lS} htmlFor="exp-date">{t("dateLabel")}</label>
           <input id="exp-date" type="date" value={form.date} onChange={e => setForm(f => ({ ...f, date:e.target.value }))} onKeyDown={e => e.key === "Enter" && submit()} style={{ ...iS, marginBottom:22 }} />
 
           <button type="button" onClick={submit} disabled={busy} className="stv-btn stv-btn-danger-solid" style={{ ...sB, background:C.warnStrong, opacity: busy ? 0.7 : 1 }}>
-            {busy ? "Saving…" : "✓ Record Expense"}
+            {busy ? t("saving") : t("recordExpenseBtn")}
           </button>
         </div>
 
@@ -1167,14 +1518,14 @@ function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner }) {
           <div style={{ flex:2, minWidth:0 }}>
             <div style={panelS}>
               <div style={{ fontWeight:700, color:C.text, marginBottom:SPACE.md, fontSize:13 }}>
-                Total: {TZS(total)}
+                {t("total")}: {TZS(total)}
               </div>
               <div style={{ overflowX:"auto", WebkitOverflowScrolling:"touch" }}>
               <table className="stv-table" style={{ width:"100%", minWidth:560, borderCollapse:"collapse" }}>
                 <thead>
                   <tr style={{ borderBottom:`1.5px solid ${C.border}` }}>
-                    {["Date","Category","Item","Cost",""].map(h => (
-                      <th key={h} scope="col" style={{ textAlign:"left", padding:"0 0 10px", fontSize:10.5, color:C.textFaint, fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
+                    {[t("colDate"),t("colCategory"),t("colItem"),t("colCost"),""].map((h, i) => (
+                      <th key={i} scope="col" style={{ textAlign:"left", padding:"0 0 10px", fontSize:10.5, color:C.textFaint, fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
                     ))}
                   </tr>
                 </thead>
@@ -1182,7 +1533,7 @@ function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner }) {
                   {sorted.slice(0, 50).map(e => (
                     <tr key={e.id} style={{ borderBottom:`1px solid ${C.bg}` }}>
                       <td style={tS}>{e.date?.slice(0, 10)}</td>
-                      <td style={tS}>{e.category}</td>
+                      <td style={tS}>{t(CAT_KEYS[e.category] || e.category)}</td>
                       <td style={tS}>{e.item}</td>
                       <td style={{ ...tS, fontWeight:600, color:C.warnStrong }}>{TZS(e.cost)}</td>
                       <td style={tS}>
@@ -1192,13 +1543,13 @@ function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner }) {
                           className="stv-btn stv-btn-danger"
                           style={{ background:C.warnSoft, color:C.warnStrong, border:"none", padding:"5px 11px", borderRadius:RADIUS.sm, fontSize:11, cursor:"pointer", fontWeight:600 }}
                         >
-                          Delete
+                          {t("delete")}
                         </button>
                       </td>
                     </tr>
                   ))}
                   {sorted.length === 0 && (
-                    <tr><td colSpan={5} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>No expenses yet</td></tr>
+                    <tr><td colSpan={5} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>{t("noExpensesYet")}</td></tr>
                   )}
                 </tbody>
               </table>
@@ -1435,6 +1786,7 @@ function buildTaxReportWorkbook({ rows, totalSales, totalExpenses, fromDisplay, 
 
 /* ── REPORTS PAGE ────────────────────────────────────────── */
 function ReportsPage({ sales, expenses, services, showToast }) {
+  const { t } = useLanguage()
   const [range, setRange]     = useState({ from:"", to:"" })
   const [service, setService] = useState("All")
 
@@ -1474,7 +1826,7 @@ function ReportsPage({ sales, expenses, services, showToast }) {
   const totalExp   = filtExp.reduce((a, b) => a + Number(b.cost || 0), 0)
 
   const exportCSV = () => {
-    if (!filtSales.length && !filtExp.length) { showToast("No data to export", "error"); return }
+    if (!filtSales.length && !filtExp.length) { showToast(t("noDataToExport"), "error"); return }
     const rows = [
       ["Date","Service","Amount","Note"],
       ...filtSales.map(s => [s.date?.slice(0, 10), s.service, s.amount, s.note || ""])
@@ -1484,16 +1836,16 @@ function ReportsPage({ sales, expenses, services, showToast }) {
     a.href = URL.createObjectURL(blob)
     a.download = "swahili_sales.csv"
     a.click()
-    showToast("CSV exported ✓")
+    showToast(t("csvExportedToast"))
   }
 
   const exportExcel = () => {
-    if (!filtSales.length && !filtExp.length) { showToast("No data to export", "error"); return }
+    if (!filtSales.length && !filtExp.length) { showToast(t("noDataToExport"), "error"); return }
     const wb = XLSX.utils.book_new()
     if (filtSales.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(filtSales), "Sales")
     if (filtExp.length)   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(filtExp),   "Expenses")
     XLSX.writeFile(wb, "report.xlsx")
-    showToast("Excel exported ✓")
+    showToast(t("excelExportedToast"))
   }
 
   // Clean, accountant-facing export for ZRA tax return preparation -- not
@@ -1512,52 +1864,52 @@ function ReportsPage({ sales, expenses, services, showToast }) {
     XLSXStyle.writeFile(wb, buildTaxReportFilename(range))
     showToast(
       rows.length === 0
-        ? "No transactions found for the selected period."
-        : "Tax report exported ✓"
+        ? t("noTaxDataToast")
+        : t("taxExportedToast")
     )
   }
 
   return (
     <div>
       <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:SPACE.xl, flexWrap:"wrap", gap:12 }}>
-        <h1 style={{ ...pT, marginBottom:0 }}>Reports</h1>
+        <h1 style={{ ...pT, marginBottom:0 }}>{t("reportsTitle")}</h1>
         <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-          <button type="button" onClick={exportCSV}   className="stv-btn stv-btn-secondary" style={{ background:C.surface, color:C.text, border:`1.5px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"10px 16px", fontSize:13, fontWeight:600, cursor:"pointer", fontFamily:FONT }}>↓ CSV</button>
-          <button type="button" onClick={exportExcel} className="stv-btn stv-btn-secondary" style={{ background:C.surface, color:C.text, border:`1.5px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"10px 16px", fontSize:13, fontWeight:600, cursor:"pointer", fontFamily:FONT }}>↓ Excel</button>
+          <button type="button" onClick={exportCSV}   className="stv-btn stv-btn-secondary" style={{ background:C.surface, color:C.text, border:`1.5px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"10px 16px", fontSize:13, fontWeight:600, cursor:"pointer", fontFamily:FONT }}>{t("exportCsv")}</button>
+          <button type="button" onClick={exportExcel} className="stv-btn stv-btn-secondary" style={{ background:C.surface, color:C.text, border:`1.5px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"10px 16px", fontSize:13, fontWeight:600, cursor:"pointer", fontFamily:FONT }}>{t("exportExcel")}</button>
           <button
             type="button"
             onClick={exportTaxExcel}
             className="stv-btn stv-btn-primary"
-            aria-label="Export Tax / Excel Report for accounting"
+            aria-label={t("exportTaxAria")}
             style={{ background:C.accentStrong, color:"#fff", border:"none", borderRadius:RADIUS.sm, padding:"10px 16px", fontSize:13, fontWeight:600, cursor:"pointer", fontFamily:FONT }}
           >
-            📊 Export Tax / Excel Report
+            {t("exportTaxExcel")}
           </button>
         </div>
       </div>
 
       {/* Filters */}
       <div style={{ display:"flex", gap:SPACE.sm, marginBottom:SPACE.lg, flexWrap:"wrap", alignItems:"center" }}>
-        <select aria-label="Filter by service" value={service} onChange={e => setService(e.target.value)} style={seS}>
-          <option>All</option>
-          {services.map(s => <option key={s.id}>{s.name}</option>)}
+        <select aria-label={t("filterByServiceReports")} value={service} onChange={e => setService(e.target.value)} style={seS}>
+          <option value="All">{t("allServices")}</option>
+          {services.map(s => <option key={s.id} value={s.name}>{s.name}</option>)}
         </select>
-        <input aria-label="From date" type="date" value={range.from} onChange={e => setRange(r => ({ ...r, from:e.target.value }))} style={seS} />
-        <input aria-label="To date" type="date" value={range.to}   onChange={e => setRange(r => ({ ...r, to:e.target.value }))}   style={seS} />
-        <button type="button" onClick={() => setRange({ from:"", to:"" })} className="stv-btn stv-btn-ghost" aria-label="Reset filters" style={{ ...seS, background:C.bg, border:"none", cursor:"pointer" }}>Reset</button>
+        <input aria-label={t("fromDate")} type="date" value={range.from} onChange={e => setRange(r => ({ ...r, from:e.target.value }))} style={seS} />
+        <input aria-label={t("toDate")} type="date" value={range.to}   onChange={e => setRange(r => ({ ...r, to:e.target.value }))}   style={seS} />
+        <button type="button" onClick={() => setRange({ from:"", to:"" })} className="stv-btn stv-btn-ghost" aria-label={t("resetFilters")} style={{ ...seS, background:C.bg, border:"none", cursor:"pointer" }}>{t("reset")}</button>
       </div>
 
       {/* Stat cards */}
       <div style={{ display:"grid", gap:SPACE.md, marginBottom:SPACE.xl, gridTemplateColumns:"repeat(auto-fit, minmax(200px, 1fr))" }}>
-        <StatCard label="Total Revenue"  value={TZS(totalSales)}            color={C.accent} icon="📈" />
-        <StatCard label="Total Expenses" value={TZS(totalExp)}              color={C.warn} icon="🧾" />
-        <StatCard label="Net Profit"     value={TZS(totalSales - totalExp)} color={totalSales - totalExp >= 0 ? C.accent : C.warn} icon="✅" />
+        <StatCard label={t("totalRevenue")}  value={TZS(totalSales)}            color={C.accent} icon="📈" />
+        <StatCard label={t("totalExpensesStat")} value={TZS(totalExp)}              color={C.warn} icon="🧾" />
+        <StatCard label={t("netProfit")}     value={TZS(totalSales - totalExp)} color={totalSales - totalExp >= 0 ? C.accent : C.warn} icon="✅" />
       </div>
 
       {/* Line chart */}
       {trend.length > 0 && (
         <div style={{ ...panelS, marginBottom:SPACE.md }}>
-          <h2 style={{ margin:"0 0 18px", fontSize:14, fontWeight:600, color:C.text }}>Revenue vs Expenses Over Time</h2>
+          <h2 style={{ margin:"0 0 18px", fontSize:14, fontWeight:600, color:C.text }}>{t("revenueVsExpensesTime")}</h2>
           <ResponsiveContainer width="100%" height={220}>
             <LineChart data={trend}>
               <CartesianGrid strokeDasharray="3 3" stroke="#F0EDE8" />
@@ -1575,7 +1927,7 @@ function ReportsPage({ sales, expenses, services, showToast }) {
       {/* Pie + Bar */}
       <div style={{ display:"grid", gap:14, gridTemplateColumns:"repeat(auto-fit, minmax(240px, 1fr))" }}>
         <div style={{ ...panelS, minWidth:0 }}>
-          <h2 style={{ margin:"0 0 14px", fontSize:14, fontWeight:600, color:C.text }}>Revenue by Service</h2>
+          <h2 style={{ margin:"0 0 14px", fontSize:14, fontWeight:600, color:C.text }}>{t("revenueByService")}</h2>
           {byService.length > 0 ? (
             <>
               <ResponsiveContainer width="100%" height={170}>
@@ -1597,12 +1949,12 @@ function ReportsPage({ sales, expenses, services, showToast }) {
               ))}
             </>
           ) : (
-            <div style={{ textAlign:"center", color:C.textFaint, fontSize:13, paddingTop:40 }}>No data</div>
+            <div style={{ textAlign:"center", color:C.textFaint, fontSize:13, paddingTop:40 }}>{t("noData")}</div>
           )}
         </div>
 
         <div style={{ ...panelS, minWidth:0 }}>
-          <h2 style={{ margin:"0 0 14px", fontSize:14, fontWeight:600, color:C.text }}>Revenue by Service (Bar)</h2>
+          <h2 style={{ margin:"0 0 14px", fontSize:14, fontWeight:600, color:C.text }}>{t("revenueByServiceBar")}</h2>
           {byService.length > 0 ? (
             <ResponsiveContainer width="100%" height={210}>
               <BarChart data={byService} layout="vertical">
@@ -1616,7 +1968,7 @@ function ReportsPage({ sales, expenses, services, showToast }) {
               </BarChart>
             </ResponsiveContainer>
           ) : (
-            <div style={{ textAlign:"center", color:C.textFaint, fontSize:13, paddingTop:40 }}>No data</div>
+            <div style={{ textAlign:"center", color:C.textFaint, fontSize:13, paddingTop:40 }}>{t("noData")}</div>
           )}
         </div>
       </div>
@@ -1626,6 +1978,7 @@ function ReportsPage({ sales, expenses, services, showToast }) {
 
 /* ── USERS PAGE ──────────────────────────────────────────── */
 function UsersPage({ showToast }) {
+  const { t } = useLanguage()
   const { accessToken } = useAuth()
   const [users,  setUsers]  = useState([])
   const [err,    setErr]    = useState("")
@@ -1645,7 +1998,7 @@ function UsersPage({ showToast }) {
   useEffect(() => { loadUsers() }, [])
 
   async function createUser() {
-    if (!newUser.email || !newUser.password) { showToast("Email and password required", "error"); return }
+    if (!newUser.email || !newUser.password) { showToast(t("emailAndPasswordRequired"), "error"); return }
     setBusy(true)
     try {
       await adminFetch("/users", accessToken, {
@@ -1655,7 +2008,7 @@ function UsersPage({ showToast }) {
       setNewUser({ email:"", password:"", name:"", role:"worker" })
       setShowForm(false)
       loadUsers()
-      showToast("User created ✓")
+      showToast(t("userCreated"))
     } catch (e) {
       showToast(e.message, "error")
     } finally {
@@ -1667,7 +2020,7 @@ function UsersPage({ showToast }) {
     try {
       await adminFetch("/role", accessToken, { method:"PATCH", body: JSON.stringify({ userId:id, role }) })
       loadUsers()
-      showToast("Role updated ✓")
+      showToast(t("roleUpdated"))
     } catch (e) {
       showToast(e.message, "error")
     }
@@ -1677,18 +2030,18 @@ function UsersPage({ showToast }) {
     try {
       await adminFetch("/active", accessToken, { method:"PATCH", body: JSON.stringify({ userId:id, active }) })
       loadUsers()
-      showToast(`User ${active ? "enabled" : "disabled"}`)
+      showToast(active ? t("userEnabledToast") : t("userDisabledToast"))
     } catch (e) {
       showToast(e.message, "error")
     }
   }
 
   async function revokeAccess(id) {
-    if (!confirm("Remove this person's access to the POS entirely?")) return
+    if (!confirm(t("confirmRevokeAccess"))) return
     try {
       await adminFetch(`/role/${id}`, accessToken, { method:"DELETE" })
       loadUsers()
-      showToast("Access revoked")
+      showToast(t("accessRevoked"))
     } catch (e) {
       showToast(e.message, "error")
     }
@@ -1697,7 +2050,7 @@ function UsersPage({ showToast }) {
   return (
     <div>
       <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:SPACE.xl, flexWrap:"wrap", gap:12 }}>
-        <h1 style={{ ...pT, marginBottom:0 }}>Users</h1>
+        <h1 style={{ ...pT, marginBottom:0 }}>{t("usersTitle")}</h1>
         <button
           type="button"
           onClick={() => setShowForm(!showForm)}
@@ -1706,7 +2059,7 @@ function UsersPage({ showToast }) {
             ? { background:C.surface, color:C.text, border:`1.5px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"10px 18px", fontSize:13, fontWeight:600, cursor:"pointer", fontFamily:FONT }
             : { ...sB, width:"auto", background:C.accentStrong, padding:"10px 18px", fontSize:13 }}
         >
-          {showForm ? "✕ Cancel" : "＋ Add User"}
+          {showForm ? `✕ ${t("cancel")}` : t("addUser")}
         </button>
       </div>
 
@@ -1715,31 +2068,31 @@ function UsersPage({ showToast }) {
       {/* Add User Form */}
       {showForm && (
         <div style={{ ...panelS, marginBottom:SPACE.xl, maxWidth:560 }}>
-          <h2 style={fTi}>New User</h2>
+          <h2 style={fTi}>{t("newUser")}</h2>
           <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(200px, 1fr))", gap:14, marginBottom:14 }}>
             <div>
-              <label style={lS} htmlFor="new-user-email">Email</label>
-              <input id="new-user-email" type="email" placeholder="user@example.com" value={newUser.email} onChange={e => setNewUser(u => ({ ...u, email:e.target.value }))} style={iS} />
+              <label style={lS} htmlFor="new-user-email">{t("emailLabel")}</label>
+              <input id="new-user-email" type="email" placeholder={t("emailPlaceholder")} value={newUser.email} onChange={e => setNewUser(u => ({ ...u, email:e.target.value }))} style={iS} />
             </div>
             <div>
-              <label style={lS} htmlFor="new-user-name">Display Name</label>
-              <input id="new-user-name" placeholder="e.g. John" value={newUser.name} onChange={e => setNewUser(u => ({ ...u, name:e.target.value }))} style={iS} />
+              <label style={lS} htmlFor="new-user-name">{t("displayNameLabel")}</label>
+              <input id="new-user-name" placeholder={t("namePlaceholder")} value={newUser.name} onChange={e => setNewUser(u => ({ ...u, name:e.target.value }))} style={iS} />
             </div>
             <div>
-              <label style={lS} htmlFor="new-user-password">Password</label>
-              <input id="new-user-password" type="password" placeholder="min 6 characters" value={newUser.password} onChange={e => setNewUser(u => ({ ...u, password:e.target.value }))} style={iS} />
+              <label style={lS} htmlFor="new-user-password">{t("passwordLabel")}</label>
+              <input id="new-user-password" type="password" placeholder={t("passwordHint")} value={newUser.password} onChange={e => setNewUser(u => ({ ...u, password:e.target.value }))} style={iS} />
             </div>
             <div>
-              <label style={lS} htmlFor="new-user-role">Role</label>
+              <label style={lS} htmlFor="new-user-role">{t("roleLabel")}</label>
               <select id="new-user-role" value={newUser.role} onChange={e => setNewUser(u => ({ ...u, role:e.target.value }))} style={iS}>
-                <option value="worker">Worker</option>
-                <option value="admin">Admin</option>
-                <option value="owner">Owner</option>
+                <option value="worker">{t("roleWorker")}</option>
+                <option value="admin">{t("roleAdmin")}</option>
+                <option value="owner">{t("roleOwner")}</option>
               </select>
             </div>
           </div>
           <button type="button" onClick={createUser} disabled={busy} className="stv-btn stv-btn-primary" style={{ ...sB, opacity: busy ? 0.7 : 1, width:"auto", padding:"12px 26px" }}>
-            {busy ? "Creating…" : "✓ Create User"}
+            {busy ? t("creating") : t("createUserBtn")}
           </button>
         </div>
       )}
@@ -1750,8 +2103,8 @@ function UsersPage({ showToast }) {
         <table className="stv-table" style={{ width:"100%", minWidth:620, borderCollapse:"collapse" }}>
           <thead>
             <tr style={{ borderBottom:`1.5px solid ${C.border}` }}>
-              {["Email","Name","Role","Status","Created","Actions"].map(h => (
-                <th key={h} scope="col" style={{ textAlign:"left", padding:"0 0 10px 0", paddingRight:12, fontSize:10.5, color:C.textFaint, fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
+              {[t("colEmail"),t("colName"),t("colRole"),t("colStatus"),t("colCreated"),t("colActions")].map((h, i) => (
+                <th key={i} scope="col" style={{ textAlign:"left", padding:"0 0 10px 0", paddingRight:12, fontSize:10.5, color:C.textFaint, fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
               ))}
             </tr>
           </thead>
@@ -1774,10 +2127,10 @@ function UsersPage({ showToast }) {
                       }}
                       style={{ ...seS, fontSize:12, padding:"5px 10px" }}
                     >
-                      <option value="">No access</option>
-                      <option value="worker">Worker</option>
-                      <option value="admin">Admin</option>
-                      <option value="owner">Owner</option>
+                      <option value="">{t("noAccessOption")}</option>
+                      <option value="worker">{t("roleWorker")}</option>
+                      <option value="admin">{t("roleAdmin")}</option>
+                      <option value="owner">{t("roleOwner")}</option>
                     </select>
                   </td>
                   <td style={tS}>
@@ -1786,7 +2139,7 @@ function UsersPage({ showToast }) {
                       background: active ? C.accentSoft : C.warnSoft,
                       color: active ? C.accentStrong : C.warnStrong,
                     }}>
-                      {active ? "Active" : "Disabled"}
+                      {active ? t("active") : t("disabled")}
                     </span>
                   </td>
                   <td style={{ ...tS, color:C.textFaint }}>
@@ -1804,7 +2157,7 @@ function UsersPage({ showToast }) {
                         fontSize:11, cursor:"pointer", fontWeight:600,
                       }}
                     >
-                      {active ? "Disable" : "Enable"}
+                      {active ? t("disable") : t("enable")}
                     </button>
                   </td>
                 </tr>
@@ -1813,7 +2166,7 @@ function UsersPage({ showToast }) {
             {users.length === 0 && (
               <tr>
                 <td colSpan={6} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>
-                  {err ? `Could not load users — ${err}` : "No users found"}
+                  {err ? t("couldNotLoadUsers", { error: err }) : t("noUsersFound")}
                 </td>
               </tr>
             )}
