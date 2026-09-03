@@ -14,6 +14,12 @@ import {
   XAxis, YAxis,
 } from "recharts"
 import * as XLSX from "xlsx"
+// Used ONLY for the Tax / Accounting Report export below. The existing CSV
+// and generic Excel exports above keep using plain "xlsx" untouched --
+// that library silently drops cell styling (fonts/fills/borders) on write,
+// which is fine for a raw data dump but not for an accountant-facing report.
+// xlsx-js-style is an API-compatible fork that writes styling correctly.
+import XLSXStyle from "xlsx-js-style"
 import { ADMIN_API } from "./api"
 import { supabase } from "./api/supabaseClient"
 import { useAuth } from "./context/AuthContext"
@@ -1205,6 +1211,228 @@ function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner }) {
   )
 }
 
+/* ── TAX / ACCOUNTING REPORT EXPORT ─────────────────────────
+   Pure, hook-free helpers (no React state) so the shaping logic is easy to
+   reason about and test in isolation. None of these ever mutate the
+   sales/expenses arrays passed in from ReportsPage -- every step below
+   only ever reads them and returns new arrays/objects. */
+
+// "YYYY-MM-DD" (or a full ISO timestamp) -> "DD/MM/YYYY". Returns "" for
+// anything that doesn't look like a date so a malformed record can't crash
+// the export.
+function formatDMY(dateStr) {
+  const d = (dateStr || "").slice(0, 10)
+  const [y, m, day] = d.split("-")
+  if (!y || !m || !day) return ""
+  return `${day}/${m}/${y}`
+}
+
+// Shapes the already-filtered sales/expenses into the flat
+// Date | Amount | Sales | Expenses | Note rows the Tax Report sheet uses,
+// combined and sorted chronologically ascending. Array.prototype.sort is
+// spec-guaranteed stable, so combining [...saleRows, ...expenseRows] before
+// sorting deterministically keeps "sales before expenses" for same-day
+// records without any extra tie-break bookkeeping.
+function buildTaxReportRows(filtSales, filtExp) {
+  const saleRows = filtSales.map((s) => ({
+    sortKey:  (s.date || "").slice(0, 10),
+    date:     formatDMY(s.date),
+    amount:   Number(s.amount) || 0,
+    sales:    Number(s.amount) || 0,
+    expenses: null,
+    note:     s.service || "Sale",
+  }))
+  const expenseRows = filtExp.map((e) => {
+    const category = (e.category || "").trim()
+    const item      = (e.item || "").trim()
+    const note = category && item
+      ? `${category} — ${item}`
+      : (category || item || "Expense")
+    return {
+      sortKey:  (e.date || "").slice(0, 10),
+      date:     formatDMY(e.date),
+      amount:   Number(e.cost) || 0,
+      sales:    null,
+      expenses: Number(e.cost) || 0,
+      note,
+    }
+  })
+  return [...saleRows, ...expenseRows].sort((a, b) => a.sortKey.localeCompare(b.sortKey))
+}
+
+function buildTaxReportFilename(range) {
+  const safe = (s) => (s || "").replace(/[^0-9-]/g, "")
+  if (range.from && range.to) return `Swahili_Tent_Village_Tax_Report_${safe(range.from)}_to_${safe(range.to)}.xlsx`
+  if (range.from) return `Swahili_Tent_Village_Tax_Report_from_${safe(range.from)}.xlsx`
+  if (range.to)   return `Swahili_Tent_Village_Tax_Report_to_${safe(range.to)}.xlsx`
+  return `Swahili_Tent_Village_Tax_Report.xlsx`
+}
+
+// Builds the two-sheet workbook (Tax Report + Summary). Styling colors are
+// pulled from the app's own design tokens (C) so the exported file reads as
+// an extension of the POS's brand rather than an arbitrary color scheme.
+//
+// Totals use real Excel formulas (SUM / subtraction / COUNT) referencing the
+// data range, not hardcoded numbers, whenever there is at least one row to
+// sum -- for the zero-row (empty period) case there is no data range to
+// reference, so the totals are written as plain 0 values instead.
+//
+// Known limitation (xlsx-js-style, verified empirically against the raw
+// OOXML it writes): frozen header rows (`!views`) and page setup / print
+// orientation (`!pageSetup`) are silently dropped by this library on write,
+// so they are intentionally left out below rather than set-and-hope. Column
+// AutoFilter, a defined Print Area, and print margins DO write correctly and
+// are included.
+function buildTaxReportWorkbook({ rows, totalSales, totalExpenses, fromDisplay, toDisplay }) {
+  const net = totalSales - totalExpenses
+  const currencyFmt = '"TZS "#,##0'
+  const hairline      = { style: "thin", color: { rgb: "FFEBE8E3" } } // C.border
+  const thickHairline = { style: "thin", color: { rgb: "FFDCD8D1" } } // C.borderStrong
+  const cellBorder = { top: hairline, bottom: hairline, left: hairline, right: hairline }
+
+  const titleStyle    = { font: { bold: true, sz: 16, color: { rgb: "FF1F2233" } }, alignment: { horizontal: "center" } } // C.text
+  const subtitleStyle = { font: { bold: true, sz: 12, color: { rgb: "FF4B5163" } }, alignment: { horizontal: "center" } } // C.textSub
+  const periodStyle   = { font: { italic: true, sz: 10, color: { rgb: "FF6B7080" } }, alignment: { horizontal: "center" } } // C.textFaint
+  const headerStyle   = {
+    font: { bold: true, sz: 11, color: { rgb: "FFFFFFFF" } },
+    fill: { fgColor: { rgb: "FF3F7259" } }, // C.accentStrong
+    alignment: { horizontal: "center", vertical: "center" },
+    border: cellBorder,
+  }
+  const dataCellStyle   = { border: cellBorder, alignment: { vertical: "center" } }
+  const amountCellStyle = { border: cellBorder, alignment: { vertical: "center", horizontal: "right" } }
+  const noteCellStyle   = { border: cellBorder, alignment: { vertical: "center", wrapText: true } }
+  const totalLabelStyle = { font: { bold: true, sz: 11, color: { rgb: "FF1F2233" } }, border: { top: thickHairline } }
+  const totalValueStyle = { font: { bold: true, sz: 11, color: { rgb: "FF1F2233" } }, border: { top: thickHairline }, alignment: { horizontal: "right" } }
+  const netBorder      = { top: thickHairline, bottom: { style: "double", color: { rgb: "FF3F7259" } } }
+  const netLabelStyle  = { font: { bold: true, sz: 12, color: { rgb: "FF1F2233" } }, border: netBorder }
+  const netValueStyle  = { font: { bold: true, sz: 12, color: { rgb: "FF1F2233" } }, border: netBorder, alignment: { horizontal: "right" } }
+
+  const HEADERS = ["Date", "Amount", "Sales", "Expenses", "Note"]
+  const headerRowIdx = 4 // 0-based: rows 0-2 title block, row 3 spacer, row 4 header
+  const dataStart = headerRowIdx + 1
+  const dataEnd   = dataStart + rows.length - 1
+  const hasRows   = rows.length > 0
+  const totalsStart = hasRows ? dataEnd + 2 : dataStart + 1 // one spacer row, or one blank placeholder row when empty
+
+  const aoa = [
+    ["SWAHILI TENT VILLAGE", "", "", "", ""],
+    ["TAX / ACCOUNTING REPORT", "", "", "", ""],
+    [`Period: ${fromDisplay} - ${toDisplay}`, "", "", "", ""],
+    ["", "", "", "", ""],
+    HEADERS,
+    ...(hasRows ? rows.map((r) => [r.date, r.amount, r.sales ?? "", r.expenses ?? "", r.note]) : [["", "", "", "", ""]]),
+    ["", "", "", "", ""],
+    ["TOTAL SALES", totalSales, "", "", ""],
+    ["TOTAL EXPENSES", totalExpenses, "", "", ""],
+    ["NET", net, "", "", ""],
+  ]
+
+  const ws = XLSXStyle.utils.aoa_to_sheet(aoa)
+
+  // Totals as real formulas over the data range (not hardcoded), when there
+  // is a data range to reference.
+  const totalSalesRef = XLSXStyle.utils.encode_cell({ r: totalsStart, c: 1 })
+  const totalExpRef   = XLSXStyle.utils.encode_cell({ r: totalsStart + 1, c: 1 })
+  const netRef         = XLSXStyle.utils.encode_cell({ r: totalsStart + 2, c: 1 })
+  if (hasRows) {
+    ws[totalSalesRef].f = `SUM(C${dataStart + 1}:C${dataEnd + 1})`
+    ws[totalExpRef].f   = `SUM(D${dataStart + 1}:D${dataEnd + 1})`
+    ws[netRef].f         = `${totalSalesRef}-${totalExpRef}`
+  }
+
+  ws["!merges"] = [
+    { s: { r: 0, c: 0 }, e: { r: 0, c: 4 } },
+    { s: { r: 1, c: 0 }, e: { r: 1, c: 4 } },
+    { s: { r: 2, c: 0 }, e: { r: 2, c: 4 } },
+  ]
+  if (ws.A1) ws.A1.s = titleStyle
+  if (ws.A2) ws.A2.s = subtitleStyle
+  if (ws.A3) ws.A3.s = periodStyle
+
+  HEADERS.forEach((_, c) => {
+    const ref = XLSXStyle.utils.encode_cell({ r: headerRowIdx, c })
+    if (ws[ref]) ws[ref].s = headerStyle
+  })
+
+  const bodyLastRow = hasRows ? dataEnd : dataStart
+  for (let r = dataStart; r <= bodyLastRow; r++) {
+    for (let c = 0; c < 5; c++) {
+      const ref = XLSXStyle.utils.encode_cell({ r, c })
+      const cell = ws[ref]
+      if (!cell) continue
+      cell.s = c === 4 ? noteCellStyle : c === 0 ? dataCellStyle : amountCellStyle
+      if ((c === 1 || c === 2 || c === 3) && typeof cell.v === "number") cell.z = currencyFmt
+    }
+  }
+
+  const totalRowDefs = [
+    { r: totalsStart,     labelStyle: totalLabelStyle, valueStyle: totalValueStyle },
+    { r: totalsStart + 1, labelStyle: totalLabelStyle, valueStyle: totalValueStyle },
+    { r: totalsStart + 2, labelStyle: netLabelStyle,   valueStyle: netValueStyle },
+  ]
+  totalRowDefs.forEach(({ r, labelStyle, valueStyle }) => {
+    const labelRef = XLSXStyle.utils.encode_cell({ r, c: 0 })
+    const valueRef = XLSXStyle.utils.encode_cell({ r, c: 1 })
+    if (ws[labelRef]) ws[labelRef].s = labelStyle
+    if (ws[valueRef]) { ws[valueRef].s = valueStyle; ws[valueRef].z = currencyFmt }
+  })
+
+  ws["!cols"] = [{ wch: 14 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 42 }]
+  const lastRow = totalsStart + 2
+  ws["!ref"] = XLSXStyle.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: lastRow, c: 4 } })
+  // AutoFilter over header + data rows only. Note: when there's no data
+  // (hasRows === false) this writer's OOXML output extends a single-row
+  // filter range down to the sheet's last row -- a quirk in how it computes
+  // the autoFilter element, verified against the raw XML. That only affects
+  // the empty-period edge case cosmetically (the totals rows sit inside the
+  // filterable range); it doesn't hide or corrupt any data.
+  const filterEnd = hasRows ? dataEnd : headerRowIdx
+  ws["!autofilter"] = { ref: XLSXStyle.utils.encode_range({ s: { r: headerRowIdx, c: 0 }, e: { r: filterEnd, c: 4 } }) }
+  ws["!margins"] = { left: 0.5, right: 0.5, top: 0.6, bottom: 0.6, header: 0.3, footer: 0.3 }
+
+  const wb = XLSXStyle.utils.book_new()
+  XLSXStyle.utils.book_append_sheet(wb, ws, "Tax Report")
+  // Defined Print Area confined to the actual used range, so printing this
+  // sheet doesn't spill onto blank pages.
+  wb.Workbook = wb.Workbook || {}
+  wb.Workbook.Names = [
+    { Sheet: 0, Name: "_xlnm.Print_Area", Ref: `'Tax Report'!$A$1:$E$${lastRow + 1}` },
+  ]
+
+  const salesCount = rows.filter((r) => r.sales !== null).length
+  const expCount   = rows.filter((r) => r.expenses !== null).length
+
+  const summaryWs = XLSXStyle.utils.aoa_to_sheet([
+    ["Swahili Tent Village — Tax / Accounting Report Summary", "", ""],
+    [`Period: ${fromDisplay} - ${toDisplay}`, "", ""],
+    ["", "", ""],
+    ["Total Sales", totalSales, ""],
+    ["Total Expenses", totalExpenses, ""],
+    ["Net", net, ""],
+    ["Sales Transactions", salesCount, ""],
+    ["Expense Transactions", expCount, ""],
+  ])
+  // Summary figures reference the Tax Report sheet's own totals/formulas
+  // rather than duplicating hardcoded numbers, so the two sheets can never
+  // drift out of sync.
+  if (hasRows) {
+    summaryWs.B4.f = `'Tax Report'!${totalSalesRef}`
+    summaryWs.B5.f = `'Tax Report'!${totalExpRef}`
+    summaryWs.B6.f = `'Tax Report'!${netRef}`
+    summaryWs.B7.f = `COUNT('Tax Report'!C${dataStart + 1}:C${dataEnd + 1})`
+    summaryWs.B8.f = `COUNT('Tax Report'!D${dataStart + 1}:D${dataEnd + 1})`
+  }
+  if (summaryWs.A1) summaryWs.A1.s = { font: { bold: true, sz: 13, color: { rgb: "FF1F2233" } } }
+  if (summaryWs.A2) summaryWs.A2.s = { font: { italic: true, sz: 10, color: { rgb: "FF6B7080" } } }
+  ;["B4", "B5", "B6"].forEach((ref) => { if (summaryWs[ref]) summaryWs[ref].z = currencyFmt })
+  summaryWs["!cols"] = [{ wch: 28 }, { wch: 20 }, { wch: 4 }]
+  summaryWs["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 2 } }]
+  XLSXStyle.utils.book_append_sheet(wb, summaryWs, "Summary")
+
+  return wb
+}
+
 /* ── REPORTS PAGE ────────────────────────────────────────── */
 function ReportsPage({ sales, expenses, services, showToast }) {
   const [range, setRange]     = useState({ from:"", to:"" })
@@ -1268,13 +1496,43 @@ function ReportsPage({ sales, expenses, services, showToast }) {
     showToast("Excel exported ✓")
   }
 
+  // Clean, accountant-facing export for ZRA tax return preparation -- not
+  // an official ZRA filing format, just a readable Date/Amount/Sales/
+  // Expenses/Note transaction report a tax preparer can work from. Reuses
+  // the same filtSales/filtExp this page already computes above (sales
+  // respect the service filter, expenses follow the date filter only), and
+  // never mutates either array.
+  const exportTaxExcel = () => {
+    const rows = buildTaxReportRows(filtSales, filtExp)
+    const fromDisplay = range.from ? formatDMY(range.from) : (rows[0]?.date || "—")
+    const toDisplay   = range.to   ? formatDMY(range.to)   : (rows[rows.length - 1]?.date || "—")
+    const wb = buildTaxReportWorkbook({
+      rows, totalSales, totalExpenses: totalExp, fromDisplay, toDisplay,
+    })
+    XLSXStyle.writeFile(wb, buildTaxReportFilename(range))
+    showToast(
+      rows.length === 0
+        ? "No transactions found for the selected period."
+        : "Tax report exported ✓"
+    )
+  }
+
   return (
     <div>
       <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:SPACE.xl, flexWrap:"wrap", gap:12 }}>
         <h1 style={{ ...pT, marginBottom:0 }}>Reports</h1>
-        <div style={{ display:"flex", gap:8 }}>
+        <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
           <button type="button" onClick={exportCSV}   className="stv-btn stv-btn-secondary" style={{ background:C.surface, color:C.text, border:`1.5px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"10px 16px", fontSize:13, fontWeight:600, cursor:"pointer", fontFamily:FONT }}>↓ CSV</button>
           <button type="button" onClick={exportExcel} className="stv-btn stv-btn-secondary" style={{ background:C.surface, color:C.text, border:`1.5px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"10px 16px", fontSize:13, fontWeight:600, cursor:"pointer", fontFamily:FONT }}>↓ Excel</button>
+          <button
+            type="button"
+            onClick={exportTaxExcel}
+            className="stv-btn stv-btn-primary"
+            aria-label="Export Tax / Excel Report for accounting"
+            style={{ background:C.accentStrong, color:"#fff", border:"none", borderRadius:RADIUS.sm, padding:"10px 16px", fontSize:13, fontWeight:600, cursor:"pointer", fontFamily:FONT }}
+          >
+            📊 Export Tax / Excel Report
+          </button>
         </div>
       </div>
 
