@@ -30,6 +30,7 @@ const LOGO        = "/logo.png"
 const TZS         = (n) => `TZS ${Number(n || 0).toLocaleString()}`
 const todayStr    = () => new Date().toISOString().split("T")[0]
 const thisMonth   = () => new Date().toISOString().slice(0, 7)
+const nowTimeStr  = () => new Date().toTimeString().slice(0, 5) // "HH:MM", local clock
 
 const PALETTE = ["#E07A5F","#3D405B","#81B29A","#F2CC8F","#9C89B8","#F0A500","#00B4D8","#E63946","#2DC653","#FF6B6B"]
 const EMOJI_LIST  = ["🍽️","🏎️","🎯","🎟️","🏊","🎪","🎭","⚽","🎸","🧗","🏄","🎡","🛶","🎠","🏋️","🎳","🤸","🧩","🎨","🎮","🧘","🎲","🚀","💆","🎉"]
@@ -94,7 +95,7 @@ async function adminFetch(path, accessToken, opts = {}) {
 
 /* ── ROOT APP ────────────────────────────────────────────── */
 export default function App() {
-  const { user, isOwner, logout, ready, hasAccess, permissionsPending } = useAuth()
+  const { user, isOwner, logout, ready, hasAccess, permissionsPending, permissionsError, refresh } = useAuth()
   const { t, lang } = useLanguage()
 
   const [sales,    setSales]    = useState([])
@@ -180,9 +181,26 @@ export default function App() {
   // background and can still redirect to AccessDeniedPage the moment it
   // comes back if it disagrees. See src/context/AuthContext.jsx for the
   // full reasoning (hint caching, namespacing, fail-closed timeouts).
+  //
+  // Every one of these four checks is bounded and terminal -- `ready` and
+  // `permissionsPending` are both backed by their own failsafe timeout in
+  // AuthContext, so this component can never sit on FullScreenLoader
+  // forever. `permissionsError` (a check that genuinely failed/timed out,
+  // as opposed to succeeding with "no grant") gets its own screen rather
+  // than being folded into AccessDeniedPage -- "we couldn't verify you"
+  // and "we verified you and you're not allowed in" are different facts,
+  // and only the second one is really "Access Denied". Note this can never
+  // be used to grant access: loadPermissions() in AuthContext only sets
+  // hasAccess-affecting state from a REAL result; a failed/timed-out check
+  // either fails closed (first check for this user) or leaves the last
+  // known-good result untouched (a later background re-check, e.g. a
+  // token refresh) -- it never invents a "yes".
   if (!ready) return <FullScreenLoader />
   if (!user) return <LoginPage />
   if (permissionsPending) return <FullScreenLoader />
+  if (permissionsError && !hasAccess) {
+    return <PermissionErrorPage onRetry={refresh} onLogout={logout} />
+  }
   if (!hasAccess) return <AccessDeniedPage onLogout={logout} email={user.email} />
 
   const displayName = user.user_metadata?.name || user.email?.split("@")[0] || "User"
@@ -234,6 +252,9 @@ export default function App() {
               expenses={expenses} fetchAll={fetchAll}
               user={user} showToast={showToast} isOwner={isOwner}
             />
+          )}
+          {page === "inventory" && (
+            <InventoryPage user={user} isOwner={isOwner} showToast={showToast} />
           )}
           {page === "reports" && isOwner && (
             <ReportsPage sales={sales} expenses={expenses} services={services} showToast={showToast} />
@@ -391,6 +412,59 @@ function AccessDeniedPage({ onLogout, email }) {
   )
 }
 
+// Shown when a permission check genuinely failed or timed out (Supabase
+// unreachable, slow network, RPC error) -- as opposed to succeeding and
+// finding no grant, which is AccessDeniedPage above. Deliberately never
+// implies the person lacks access (we don't know either way yet), and
+// deliberately never auto-retries into granting access -- retrying re-runs
+// the same real permission check, which still fails closed on its own if
+// it fails again.
+function PermissionErrorPage({ onRetry, onLogout }) {
+  const { t } = useLanguage()
+  const [retrying, setRetrying] = useState(false)
+
+  const handleRetry = async () => {
+    setRetrying(true)
+    try {
+      await onRetry()
+    } finally {
+      setRetrying(false)
+    }
+  }
+
+  return (
+    <div style={{
+      minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center",
+      background:C.bg, fontFamily:FONT, padding:20,
+    }}>
+      <div style={{ background:C.surface, borderRadius:RADIUS.lg, padding:"40px 36px", width:"min(92vw, 420px)", textAlign:"center", boxShadow:SHADOW.modal }}>
+        <div style={{ fontSize:34, marginBottom:14 }} aria-hidden="true">⚠️</div>
+        <h1 style={{ margin:"0 0 10px", fontFamily:FONT, fontWeight:700, fontSize:19, color:C.text }}>{t("permissionErrorTitle")}</h1>
+        <p style={{ margin:"0 0 24px", color:C.textSub, fontSize:13.5, lineHeight:1.5 }}>
+          {t("permissionErrorBody")}
+        </p>
+        <button
+          type="button"
+          onClick={handleRetry}
+          disabled={retrying}
+          className="stv-btn stv-btn-primary"
+          style={{ width:"100%", padding:"12px", marginBottom:10, background:C.accentStrong, color:"#fff", border:"none", borderRadius:RADIUS.sm, fontSize:14, fontWeight:600, cursor:"pointer", fontFamily:FONT, opacity: retrying ? 0.7 : 1 }}
+        >
+          {retrying ? t("retryingBtn") : t("tryAgainBtn")}
+        </button>
+        <button
+          type="button"
+          onClick={onLogout}
+          className="stv-btn stv-btn-secondary"
+          style={{ width:"100%", padding:"12px", background:C.surface, color:C.text, border:`1.5px solid ${C.border}`, borderRadius:RADIUS.sm, fontSize:14, fontWeight:600, cursor:"pointer", fontFamily:FONT }}
+        >
+          {t("signOut")}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 /* ── LOGIN ───────────────────────────────────────────────── */
 function LoginPage() {
   const { login } = useAuth()
@@ -473,16 +547,18 @@ function LoginPage() {
 function Sidebar({ page, setPage, isOwner, displayName, onLogout, open, onClose }) {
   const { t, lang, setLang } = useLanguage()
   const ownerNav = [
-    { id:"dashboard", label:t("navDashboard"), icon:"📊" },
-    { id:"sales",     label:t("navSales"),     icon:"💰" },
-    { id:"expenses",  label:t("navExpenses"),  icon:"🧾" },
-    { id:"reports",   label:t("navReports"),   icon:"📈" },
-    { id:"users",     label:t("navUsers"),     icon:"👥" },
+    { id:"dashboard",  label:t("navDashboard"),  icon:"📊" },
+    { id:"sales",      label:t("navSales"),      icon:"💰" },
+    { id:"expenses",   label:t("navExpenses"),   icon:"🧾" },
+    { id:"inventory",  label:t("navInventory"),  icon:"📦" },
+    { id:"reports",    label:t("navReports"),    icon:"📈" },
+    { id:"users",      label:t("navUsers"),      icon:"👥" },
   ]
   const workerNav = [
-    { id:"dashboard", label:t("navHome"),       icon:"🏠" },
-    { id:"sales",     label:t("navRecordSale"), icon:"💰" },
-    { id:"expenses",  label:t("navExpenses"),   icon:"🧾" },
+    { id:"dashboard",  label:t("navHome"),       icon:"🏠" },
+    { id:"sales",      label:t("navRecordSale"), icon:"💰" },
+    { id:"expenses",   label:t("navExpenses"),   icon:"🧾" },
+    { id:"inventory",  label:t("navInventory"),  icon:"📦" },
   ]
   const nav = isOwner ? ownerNav : workerNav
 
@@ -1449,7 +1525,7 @@ const CAT_KEYS = {
 
 function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner }) {
   const { t } = useLanguage()
-  const [form, setForm] = useState({ category:EXPENSE_CATS[0], item:"", cost:"", date:todayStr() })
+  const [form, setForm] = useState({ category:EXPENSE_CATS[0], item:"", cost:"", date:todayStr(), time:nowTimeStr() })
   const [busy, setBusy] = useState(false)
 
   const submit = async () => {
@@ -1457,11 +1533,27 @@ function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner }) {
     if (!form.item.trim())            { showToast(t("enterItemDescription"), "error"); return }
     if (!form.cost || Number(form.cost) <= 0) { showToast(t("enterValidCost"), "error"); return }
     setBusy(true)
+    // Combine the user-selected date AND time into one timestamp -- the
+    // `expenses.date` column is already `timestamptz` (same as `sales.date`),
+    // so no schema change was needed here. Previously this always hardcoded
+    // "T12:00:00", silently discarding any notion of time of day.
+    //
+    // Built directly as a "Z"-suffixed string (never via `new Date(local
+    // string).toISOString()`) so the stored date/time are NOT reinterpreted
+    // through the browser's timezone. That matters because every existing
+    // report/filter/sort in this app (Reports, Tax export, this same table)
+    // reads the date by string-slicing the first 10 characters of this
+    // field -- e.g. `e.date.slice(0,10)`. Parsing through a local Date
+    // object first would risk the UTC-converted date rolling back a day for
+    // early-morning times, silently moving the expense into the wrong day
+    // in every report. Building the ISO string directly guarantees the
+    // stored date always equals exactly the date the user picked.
+    const timePart = /^\d{2}:\d{2}$/.test(form.time || "") ? form.time : "12:00"
     const payload = {
       category:   form.category,
       item:       form.item,
       cost:       Number(form.cost),
-      date:       new Date(form.date + "T12:00:00").toISOString(),
+      date:       `${form.date}T${timePart}:00.000Z`,
       user_id:    user.id,
       created_by: user.email,
     }
@@ -1505,8 +1597,16 @@ function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner }) {
           <label style={lS} htmlFor="exp-cost">{t("costTzs")}</label>
           <input id="exp-cost" type="number" placeholder={t("costPlaceholder")} value={form.cost} onChange={e => setForm(f => ({ ...f, cost:e.target.value }))} style={{ ...iS, fontSize:22, fontWeight:700, marginBottom:14 }} />
 
-          <label style={lS} htmlFor="exp-date">{t("dateLabel")}</label>
-          <input id="exp-date" type="date" value={form.date} onChange={e => setForm(f => ({ ...f, date:e.target.value }))} onKeyDown={e => e.key === "Enter" && submit()} style={{ ...iS, marginBottom:22 }} />
+          <div style={{ display:"flex", gap:10, marginBottom:22 }}>
+            <div style={{ flex:1, minWidth:0 }}>
+              <label style={lS} htmlFor="exp-date">{t("dateLabel")}</label>
+              <input id="exp-date" type="date" value={form.date} onChange={e => setForm(f => ({ ...f, date:e.target.value }))} onKeyDown={e => e.key === "Enter" && submit()} style={iS} />
+            </div>
+            <div style={{ flex:1, minWidth:0 }}>
+              <label style={lS} htmlFor="exp-time">{t("timeLabel")}</label>
+              <input id="exp-time" type="time" value={form.time} onChange={e => setForm(f => ({ ...f, time:e.target.value }))} onKeyDown={e => e.key === "Enter" && submit()} style={iS} />
+            </div>
+          </div>
 
           <button type="button" onClick={submit} disabled={busy} className="stv-btn stv-btn-danger-solid" style={{ ...sB, background:C.warnStrong, opacity: busy ? 0.7 : 1 }}>
             {busy ? t("saving") : t("recordExpenseBtn")}
@@ -1524,7 +1624,7 @@ function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner }) {
               <table className="stv-table" style={{ width:"100%", minWidth:560, borderCollapse:"collapse" }}>
                 <thead>
                   <tr style={{ borderBottom:`1.5px solid ${C.border}` }}>
-                    {[t("colDate"),t("colCategory"),t("colItem"),t("colCost"),""].map((h, i) => (
+                    {[t("colDate"),t("timeLabel"),t("colCategory"),t("colItem"),t("colCost"),""].map((h, i) => (
                       <th key={i} scope="col" style={{ textAlign:"left", padding:"0 0 10px", fontSize:10.5, color:C.textFaint, fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
                     ))}
                   </tr>
@@ -1533,6 +1633,7 @@ function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner }) {
                   {sorted.slice(0, 50).map(e => (
                     <tr key={e.id} style={{ borderBottom:`1px solid ${C.bg}` }}>
                       <td style={tS}>{e.date?.slice(0, 10)}</td>
+                      <td style={tS}>{/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(e.date || "") ? e.date.slice(11, 16) : "—"}</td>
                       <td style={tS}>{t(CAT_KEYS[e.category] || e.category)}</td>
                       <td style={tS}>{e.item}</td>
                       <td style={{ ...tS, fontWeight:600, color:C.warnStrong }}>{TZS(e.cost)}</td>
@@ -1549,7 +1650,7 @@ function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner }) {
                     </tr>
                   ))}
                   {sorted.length === 0 && (
-                    <tr><td colSpan={5} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>{t("noExpensesYet")}</td></tr>
+                    <tr><td colSpan={6} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>{t("noExpensesYet")}</td></tr>
                   )}
                 </tbody>
               </table>
@@ -1557,6 +1658,1194 @@ function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner }) {
             </div>
           </div>
         )}
+      </div>
+    </div>
+  )
+}
+
+/* ── INVENTORY ───────────────────────────────────────────────
+   A lightweight stock-awareness system -- NOT a warehouse/ERP/recipe/
+   procurement system. It answers three questions per item: how much do we
+   have, is it running low, and who changed it and when. It deliberately
+   does NOT connect to Sales -- nothing here auto-deducts stock when a sale
+   is recorded, and there is no recipe/ingredient deduction anywhere.
+
+   Data lives in Supabase (inventory_categories / inventory_items /
+   inventory_movements / drink_weeks / drink_week_lines /
+   drink_week_additions), guarded by the exact same
+   has_application_access('stv-pos') / has_minimum_role('stv-pos','admin')
+   RLS pattern already used for sales/expenses/services -- no parallel
+   permission system. The only way inventory_items.quantity ever changes is
+   the record_inventory_movement() RPC (SECURITY DEFINER), which updates
+   the item and writes its history row atomically, and itself enforces who
+   may call it (any app member for 'add', admin+ for 'adjustment') -- so a
+   Worker can never write directly to quantity or to the movement log, even
+   if a UI check were somehow bypassed.
+
+   Categories are a real table (inventory_categories), not a hardcoded
+   list, so a new category can be added later with a plain INSERT and no
+   code change -- catDisplayName() below only translates the five
+   categories this task shipped with; anything else falls back to its own
+   `name` column untranslated, since at that point it's business data the
+   Owner typed in, not interface text. */
+
+const INV_CATEGORY_KEYS = {
+  drinks:    "invCatDrinks",
+  groceries: "invCatGroceries",
+  bnb:       "invCatBnb",
+  park:      "invCatPark",
+  other:     "invCatOther",
+}
+function catDisplayName(cat, t) {
+  if (!cat) return ""
+  const key = INV_CATEGORY_KEYS[cat.id]
+  return key ? t(key) : cat.name
+}
+
+const UNIT_KEYS = {
+  Pieces:  "unitPieces",
+  Kg:      "unitKg",
+  Grams:   "unitGrams",
+  Litres:  "unitLitres",
+  Bottles: "unitBottles",
+  Cans:    "unitCans",
+  Packs:   "unitPacks",
+  Boxes:   "unitBoxes",
+  Dozens:  "unitDozens",
+  Other:   "unitOther",
+}
+const UNIT_OPTIONS = Object.keys(UNIT_KEYS)
+function unitDisplayName(unit, t) {
+  return UNIT_KEYS[unit] ? t(UNIT_KEYS[unit]) : (unit || "")
+}
+
+// Trims trailing zeros without ever showing false precision.
+function fmtQty(n) {
+  return (Number(n) || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })
+}
+
+// Exactly three levels, on purpose -- Finished = 0 or below, Low = above
+// zero but at/under the minimum, Good = above the minimum. No further
+// alert tiers.
+function inventoryStatus(item) {
+  const qty = Number(item?.quantity) || 0
+  const min = Number(item?.min_quantity) || 0
+  if (qty <= 0) return "finished"
+  if (qty <= min) return "low"
+  return "good"
+}
+
+const STATUS_META = {
+  good:     { emoji: "🟢", key: "statusGood",     color: C.accentStrong, bg: C.accentSoft },
+  low:      { emoji: "🟡", key: "statusLow",      color: "#8A6416",      bg: "#FBF0D9" },
+  finished: { emoji: "🔴", key: "statusFinished", color: C.warnStrong,   bg: C.warnSoft },
+}
+
+// Status is always emoji + text together -- never color alone.
+function StatusBadge({ status }) {
+  const { t } = useLanguage()
+  const meta = STATUS_META[status] || STATUS_META.good
+  return (
+    <span style={{
+      display:"inline-flex", alignItems:"center", gap:5,
+      background: meta.bg, color: meta.color,
+      border:`1px solid ${meta.color}33`,
+      padding:"4px 10px", borderRadius:RADIUS.pill,
+      fontSize:11.5, fontWeight:600, whiteSpace:"nowrap",
+    }}>
+      <span aria-hidden="true">{meta.emoji}</span>
+      {t(meta.key)}
+    </span>
+  )
+}
+
+/* ── INVENTORY DASHBOARD ─────────────────────────────────── */
+function InventoryPage({ user, isOwner, showToast }) {
+  const { t } = useLanguage()
+  const [categories, setCategories] = useState([])
+  const [items,      setItems]      = useState([])
+  const [loading,    setLoading]    = useState(true)
+  const [activeCat,  setActiveCat]  = useState(null) // category id, or null = dashboard
+
+  async function loadAll() {
+    const [{ data: cats, error: catErr }, { data: itms, error: itmErr }] = await Promise.all([
+      supabase.from("inventory_categories").select("*").eq("is_active", true).order("sort_order", { ascending:true }),
+      supabase.from("inventory_items").select("*").eq("is_active", true).order("name", { ascending:true }),
+    ])
+    if (catErr) console.error("Inventory categories fetch error:", catErr.message)
+    if (itmErr) console.error("Inventory items fetch error:", itmErr.message)
+    setCategories(cats || [])
+    setItems(itms || [])
+    setLoading(false)
+  }
+
+  useEffect(() => { loadAll() }, [])
+
+  if (loading) return <p style={{ color:C.textFaint, fontSize:13 }}>{t("loadingLabel")}</p>
+
+  const activeCategory = categories.find(c => c.id === activeCat) || null
+
+  if (activeCategory) {
+    const catItems = items.filter(i => i.category === activeCategory.id)
+    return (
+      <div>
+        <button
+          type="button"
+          onClick={() => setActiveCat(null)}
+          className="stv-btn stv-btn-ghost"
+          style={{ background:"none", border:"none", color:C.textSub, fontSize:12.5, fontWeight:600, cursor:"pointer", padding:0, marginBottom:16, fontFamily:FONT }}
+        >
+          {t("backToInventory")}
+        </button>
+        {activeCategory.id === "drinks" ? (
+          <DrinksCategoryView
+            category={activeCategory} items={catItems}
+            user={user} isOwner={isOwner} showToast={showToast}
+            reloadItems={loadAll}
+          />
+        ) : (
+          <InventoryCategoryView
+            category={activeCategory} items={catItems}
+            user={user} isOwner={isOwner} showToast={showToast}
+            reloadItems={loadAll}
+          />
+        )}
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      <h1 style={pT}>{t("inventoryTitle")}</h1>
+      <p style={{ margin:"0 0 24px", color:C.textFaint, fontSize:13 }}>{t("inventoryDashboardSubtitle")}</p>
+
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(220px, 1fr))", gap:16 }}>
+        {categories.map(cat => {
+          const catItems = items.filter(i => i.category === cat.id)
+          const lowCount = catItems.filter(i => inventoryStatus(i) === "low").length
+          const finishedCount = catItems.filter(i => inventoryStatus(i) === "finished").length
+          return (
+            <button
+              key={cat.id}
+              type="button"
+              onClick={() => setActiveCat(cat.id)}
+              className="stv-card stv-card-hover stv-btn"
+              style={{
+                textAlign:"left", cursor:"pointer",
+                background:C.surface, border:`1px solid ${C.border}`, borderRadius:RADIUS.md,
+                padding:"18px 20px", boxShadow:SHADOW.card, fontFamily:FONT,
+                display:"flex", flexDirection:"column", gap:10,
+              }}
+            >
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+                <span style={{ fontSize:14.5, fontWeight:700, color:C.text }}>{catDisplayName(cat, t)}</span>
+                <span aria-hidden="true" style={{ fontSize:18 }}>
+                  {finishedCount > 0 ? "🔴" : lowCount > 0 ? "🟡" : "🟢"}
+                </span>
+              </div>
+              <div style={{ fontSize:12.5, color:C.textSub, fontWeight:500 }}>
+                {t("itemsCount", { count: catItems.length })}
+              </div>
+              <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+                {lowCount > 0 && (
+                  <span style={{ fontSize:11, fontWeight:600, color:STATUS_META.low.color, background:STATUS_META.low.bg, padding:"3px 9px", borderRadius:RADIUS.pill }}>
+                    {t("lowStockCount", { count: lowCount })}
+                  </span>
+                )}
+                {finishedCount > 0 && (
+                  <span style={{ fontSize:11, fontWeight:600, color:STATUS_META.finished.color, background:STATUS_META.finished.bg, padding:"3px 9px", borderRadius:RADIUS.pill }}>
+                    {t("finishedCount", { count: finishedCount })}
+                  </span>
+                )}
+                {lowCount === 0 && finishedCount === 0 && (
+                  <span style={{ fontSize:11, fontWeight:600, color:STATUS_META.good.color, background:STATUS_META.good.bg, padding:"3px 9px", borderRadius:RADIUS.pill }}>
+                    {t("statusGood")}
+                  </span>
+                )}
+              </div>
+            </button>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+/* ── GENERIC CATEGORY VIEW (Groceries / BnB / Park / Other, and the
+   "Stock" tab of Drinks) ─────────────────────────────────── */
+function InventoryCategoryView({ category, items, user, isOwner, showToast, reloadItems, skipTitle }) {
+  const { t } = useLanguage()
+  const [showAdd,     setShowAdd]     = useState(false)
+  const [stockItem,   setStockItem]   = useState(null)
+  const [adjustItem,  setAdjustItem]  = useState(null)
+  const [historyItem, setHistoryItem] = useState(null)
+
+  const sorted = [...items].sort((a, b) => a.name.localeCompare(b.name))
+
+  return (
+    <div>
+      <div style={{ display:"flex", alignItems:"center", justifyContent: skipTitle ? "flex-end" : "space-between", marginBottom:SPACE.lg, flexWrap:"wrap", gap:12 }}>
+        {!skipTitle && <h1 style={{ ...pT, marginBottom:0 }}>{catDisplayName(category, t)}</h1>}
+        {isOwner && (
+          <button
+            type="button"
+            onClick={() => setShowAdd(true)}
+            className="stv-btn stv-btn-primary"
+            style={{ ...sB, width:"auto", padding:"10px 18px", fontSize:13 }}
+          >
+            {t("addInventoryItem")}
+          </button>
+        )}
+      </div>
+
+      <div style={panelS}>
+        <div style={{ overflowX:"auto", WebkitOverflowScrolling:"touch" }}>
+          <table className="stv-table" style={{ width:"100%", minWidth:640, borderCollapse:"collapse" }}>
+            <thead>
+              <tr style={{ borderBottom:`1.5px solid ${C.border}` }}>
+                {[t("colItemName"),t("colUnit"),t("colQuantity"),t("colMin"),t("colStatus"),t("colActions")].map((h, i) => (
+                  <th key={i} scope="col" style={{ textAlign:"left", padding:"0 0 10px", paddingRight:12, fontSize:10.5, color:C.textFaint, fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.map(item => {
+                const status = inventoryStatus(item)
+                return (
+                  <tr key={item.id} style={{ borderBottom:`1px solid ${C.bg}` }}>
+                    <td style={{ ...tS, fontWeight:600 }}>{item.name}</td>
+                    <td style={tS}>{unitDisplayName(item.unit, t)}</td>
+                    <td style={tS}>{fmtQty(item.quantity)}</td>
+                    <td style={{ ...tS, color:C.textFaint }}>{fmtQty(item.min_quantity)}</td>
+                    <td style={tS}><StatusBadge status={status} /></td>
+                    <td style={tS}>
+                      <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                        <button type="button" onClick={() => setStockItem(item)} className="stv-btn stv-btn-accent"
+                          style={{ background:C.accentSoft, color:C.accentStrong, border:"none", padding:"5px 11px", borderRadius:RADIUS.sm, fontSize:11, cursor:"pointer", fontWeight:600 }}>
+                          {t("addStock")}
+                        </button>
+                        {isOwner && (
+                          <button type="button" onClick={() => setAdjustItem(item)} className="stv-btn stv-btn-secondary"
+                            style={{ background:C.surface, color:C.textSub, border:`1px solid ${C.border}`, padding:"5px 11px", borderRadius:RADIUS.sm, fontSize:11, cursor:"pointer", fontWeight:600 }}>
+                            {t("adjustStock")}
+                          </button>
+                        )}
+                        <button type="button" onClick={() => setHistoryItem(item)} className="stv-btn stv-btn-ghost"
+                          style={{ background:"none", color:C.textFaint, border:"none", padding:"5px 11px", borderRadius:RADIUS.sm, fontSize:11, cursor:"pointer", fontWeight:600 }}>
+                          {t("viewHistory")}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                )
+              })}
+              {sorted.length === 0 && (
+                <tr><td colSpan={6} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>{t("noItemsInCategory")}</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {showAdd && (
+        <AddInventoryItemModal
+          category={category} existing={items} user={user} showToast={showToast}
+          onClose={() => setShowAdd(false)}
+          onSaved={() => { setShowAdd(false); reloadItems() }}
+        />
+      )}
+      {stockItem && (
+        <AddStockModal
+          item={stockItem} user={user} showToast={showToast}
+          onClose={() => setStockItem(null)}
+          onSaved={() => { setStockItem(null); reloadItems() }}
+        />
+      )}
+      {adjustItem && (
+        <AdjustStockModal
+          item={adjustItem} user={user} showToast={showToast}
+          onClose={() => setAdjustItem(null)}
+          onSaved={() => { setAdjustItem(null); reloadItems() }}
+        />
+      )}
+      {historyItem && (
+        <InventoryHistoryModal item={historyItem} onClose={() => setHistoryItem(null)} />
+      )}
+    </div>
+  )
+}
+
+/* ── ADD INVENTORY ITEM ─────────────────────────────────────
+   One shared modal for every category. Selling price only appears for
+   Drinks -- generic items (Groceries/BnB/Park/Other) never asked for one
+   per the spec, so it stays hidden rather than being an unused mandatory
+   field. */
+function AddInventoryItemModal({ category, existing, user, showToast, onClose, onSaved }) {
+  const { t } = useLanguage()
+  const isDrinks = category.id === "drinks"
+  const [name,         setName]         = useState("")
+  const [unit,         setUnit]         = useState(UNIT_OPTIONS[0])
+  const [qty,          setQty]          = useState("")
+  const [minQty,       setMinQty]       = useState("")
+  const [cost,         setCost]         = useState("")
+  const [sellingPrice, setSellingPrice] = useState("")
+  const [err,  setErr]  = useState("")
+  const [busy, setBusy] = useState(false)
+
+  const submit = async () => {
+    const trimmed = name.trim()
+    if (!trimmed) { setErr(t("itemNameRequired")); return }
+    if (existing.some(i => i.name.toLowerCase() === trimmed.toLowerCase())) {
+      setErr(t("itemNameExists")); return
+    }
+    if (qty === "" || isNaN(Number(qty)) || Number(qty) < 0) { setErr(t("enterValidQuantity")); return }
+    if (minQty === "" || isNaN(Number(minQty)) || Number(minQty) < 0) { setErr(t("enterValidMinQuantity")); return }
+    setBusy(true)
+    const { error } = await supabase.from("inventory_items").insert([{
+      category: category.id,
+      name: trimmed,
+      unit,
+      quantity: Number(qty),
+      min_quantity: Number(minQty),
+      cost_per_unit: cost === "" ? null : Number(cost),
+      selling_price: isDrinks && sellingPrice !== "" ? Number(sellingPrice) : null,
+      created_by: user?.id || null,
+      created_by_name: user?.user_metadata?.name || user?.email || null,
+    }])
+    setBusy(false)
+    if (error) { showToast(error.message, "error"); return }
+    showToast(t("itemSavedToast"))
+    onSaved()
+  }
+
+  return (
+    <div onClick={onClose} style={{ position:"fixed", inset:0, background:"rgba(20,20,30,0.5)", zIndex:1000, display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}>
+      <div onClick={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="add-item-title"
+        style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:RADIUS.lg, padding:"clamp(22px,5vw,32px)", width:"min(92vw, 420px)", maxHeight:"90vh", overflowY:"auto", boxShadow:SHADOW.modal }}>
+        <h2 id="add-item-title" style={{ margin:"0 0 4px", fontFamily:FONT, fontWeight:700, fontSize:17, color:C.text }}>{t("addInventoryItemTitle")}</h2>
+        <p style={{ margin:"0 0 20px", fontSize:12.5, color:C.textFaint }}>{catDisplayName(category, t)}</p>
+
+        <label style={lS} htmlFor="inv-item-name">{t("itemNameLabel")}</label>
+        <input id="inv-item-name" autoFocus placeholder={t("itemNamePlaceholder")} value={name}
+          onChange={e => { setName(e.target.value); setErr("") }} style={{ ...iS, marginBottom:14 }} />
+
+        <label style={lS} htmlFor="inv-item-unit">{t("unitLabel")}</label>
+        <select id="inv-item-unit" value={unit} onChange={e => setUnit(e.target.value)} style={{ ...iS, marginBottom:14 }}>
+          {UNIT_OPTIONS.map(u => <option key={u} value={u}>{t(UNIT_KEYS[u])}</option>)}
+        </select>
+
+        <div style={{ display:"flex", gap:10, marginBottom:14 }}>
+          <div style={{ flex:1, minWidth:0 }}>
+            <label style={lS} htmlFor="inv-item-qty">{t("currentQuantityLabel")}</label>
+            <input id="inv-item-qty" type="number" min="0" step="any" value={qty} onChange={e => { setQty(e.target.value); setErr("") }} style={iS} />
+          </div>
+          <div style={{ flex:1, minWidth:0 }}>
+            <label style={lS} htmlFor="inv-item-min">{t("minQuantityLabel")}</label>
+            <input id="inv-item-min" type="number" min="0" step="any" value={minQty} onChange={e => { setMinQty(e.target.value); setErr("") }} style={iS} />
+          </div>
+        </div>
+
+        <div style={{ display:"flex", gap:10, marginBottom:14 }}>
+          <div style={{ flex:1, minWidth:0 }}>
+            <label style={lS} htmlFor="inv-item-cost">{t("costPerUnitLabel")}</label>
+            <input id="inv-item-cost" type="number" min="0" step="any" value={cost} onChange={e => setCost(e.target.value)} style={iS} />
+          </div>
+          {isDrinks && (
+            <div style={{ flex:1, minWidth:0 }}>
+              <label style={lS} htmlFor="inv-item-price">{t("sellingPriceLabel")}</label>
+              <input id="inv-item-price" type="number" min="0" step="any" value={sellingPrice} onChange={e => setSellingPrice(e.target.value)} style={iS} />
+            </div>
+          )}
+        </div>
+
+        {err && <p role="alert" style={{ color:C.warnStrong, fontSize:12, margin:"0 0 14px" }}>{err}</p>}
+
+        <div style={{ display:"flex", gap:10, marginTop:8 }}>
+          <button type="button" onClick={onClose} className="stv-btn stv-btn-secondary"
+            style={{ flex:1, padding:"12px", borderRadius:RADIUS.sm, border:`1px solid ${C.border}`, background:C.surface, color:C.text, cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5 }}>
+            {t("cancel")}
+          </button>
+          <button type="button" onClick={submit} disabled={busy} className="stv-btn stv-btn-primary"
+            style={{ flex:1, padding:"12px", borderRadius:RADIUS.sm, border:"none", background:C.accentStrong, color:"#fff", cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5, opacity: busy ? 0.7 : 1 }}>
+            {busy ? t("saving") : t("saveItemBtn")}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/* ── ADD STOCK -- "opening 25kg + 20 added = 45kg", computed, never typed
+   in by hand. Any signed-in app member may do this (matches the
+   record_inventory_movement RPC's own 'add' permission check). ────── */
+function AddStockModal({ item, showToast, onClose, onSaved }) {
+  const { t } = useLanguage()
+  const [qty,  setQty]  = useState("")
+  const [note, setNote] = useState("")
+  const [err,  setErr]  = useState("")
+  const [busy, setBusy] = useState(false)
+
+  const numQty = Number(qty)
+  const newTotal = qty !== "" && !isNaN(numQty) ? Number(item.quantity || 0) + numQty : null
+
+  const submit = async () => {
+    if (qty === "" || isNaN(Number(qty)) || Number(qty) <= 0) { setErr(t("enterQuantityToAdd")); return }
+    setBusy(true)
+    const { error } = await supabase.rpc("record_inventory_movement", {
+      p_item_id: item.id,
+      p_delta: Number(qty),
+      p_movement_type: "add",
+      p_reason: null,
+      p_note: note.trim() || null,
+    })
+    setBusy(false)
+    if (error) { showToast(error.message, "error"); return }
+    showToast(t("stockAddedToast"))
+    onSaved()
+  }
+
+  return (
+    <div onClick={onClose} style={{ position:"fixed", inset:0, background:"rgba(20,20,30,0.5)", zIndex:1000, display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}>
+      <div onClick={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="add-stock-title"
+        style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:RADIUS.lg, padding:"clamp(22px,5vw,32px)", width:"min(92vw, 380px)", boxShadow:SHADOW.modal }}>
+        <h2 id="add-stock-title" style={{ margin:"0 0 4px", fontFamily:FONT, fontWeight:700, fontSize:17, color:C.text }}>{t("addStockTitle")}</h2>
+        <p style={{ margin:"0 0 20px", fontSize:12.5, color:C.textFaint }}>{item.name} · {fmtQty(item.quantity)} {unitDisplayName(item.unit, t)}</p>
+
+        <label style={lS} htmlFor="add-stock-qty">{t("quantityAddedLabel")}</label>
+        <input id="add-stock-qty" type="number" min="0" step="any" autoFocus value={qty} onChange={e => { setQty(e.target.value); setErr("") }} style={{ ...iS, marginBottom:6 }} />
+
+        {newTotal !== null && (
+          <p style={{ margin:"0 0 14px", fontSize:12.5, color:C.accentStrong, fontWeight:600 }}>
+            {t("newTotalLabel")}: {fmtQty(newTotal)} {unitDisplayName(item.unit, t)}
+          </p>
+        )}
+
+        <label style={{ ...lS, marginTop: newTotal === null ? 8 : 0 }} htmlFor="add-stock-note">{t("optionalNoteLabel")}</label>
+        <input id="add-stock-note" value={note} onChange={e => setNote(e.target.value)} style={{ ...iS, marginBottom:14 }} />
+
+        {err && <p role="alert" style={{ color:C.warnStrong, fontSize:12, margin:"0 0 14px" }}>{err}</p>}
+
+        <div style={{ display:"flex", gap:10 }}>
+          <button type="button" onClick={onClose} className="stv-btn stv-btn-secondary"
+            style={{ flex:1, padding:"12px", borderRadius:RADIUS.sm, border:`1px solid ${C.border}`, background:C.surface, color:C.text, cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5 }}>
+            {t("cancel")}
+          </button>
+          <button type="button" onClick={submit} disabled={busy} className="stv-btn stv-btn-primary"
+            style={{ flex:1, padding:"12px", borderRadius:RADIUS.sm, border:"none", background:C.accentStrong, color:"#fff", cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5, opacity: busy ? 0.7 : 1 }}>
+            {busy ? t("saving") : t("addStockBtn")}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/* ── ADJUST STOCK -- Owner/Admin only (also enforced by the RPC itself
+   and by RLS on inventory_items/inventory_movements), always requires a
+   reason, always logged. Never a silent overwrite of the quantity. ─── */
+function AdjustStockModal({ item, showToast, onClose, onSaved }) {
+  const { t } = useLanguage()
+  const [delta,  setDelta]  = useState("")
+  const [reason, setReason] = useState("")
+  const [note,   setNote]   = useState("")
+  const [err,    setErr]    = useState("")
+  const [busy,   setBusy]   = useState(false)
+
+  const numDelta = Number(delta)
+  const newTotal = delta !== "" && !isNaN(numDelta) ? Number(item.quantity || 0) + numDelta : null
+
+  const submit = async () => {
+    if (delta === "" || isNaN(numDelta) || numDelta === 0) { setErr(t("enterAdjustmentQuantity")); return }
+    if (!reason.trim()) { setErr(t("reasonLabel")); return }
+    setBusy(true)
+    const { error } = await supabase.rpc("record_inventory_movement", {
+      p_item_id: item.id,
+      p_delta: numDelta,
+      p_movement_type: "adjustment",
+      p_reason: reason.trim(),
+      p_note: note.trim() || null,
+    })
+    setBusy(false)
+    if (error) { showToast(error.message, "error"); return }
+    showToast(t("stockAdjustedToast"))
+    onSaved()
+  }
+
+  return (
+    <div onClick={onClose} style={{ position:"fixed", inset:0, background:"rgba(20,20,30,0.5)", zIndex:1000, display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}>
+      <div onClick={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="adjust-stock-title"
+        style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:RADIUS.lg, padding:"clamp(22px,5vw,32px)", width:"min(92vw, 400px)", boxShadow:SHADOW.modal }}>
+        <h2 id="adjust-stock-title" style={{ margin:"0 0 4px", fontFamily:FONT, fontWeight:700, fontSize:17, color:C.text }}>{t("adjustStockTitle")}</h2>
+        <p style={{ margin:"0 0 20px", fontSize:12.5, color:C.textFaint }}>{item.name} · {fmtQty(item.quantity)} {unitDisplayName(item.unit, t)}</p>
+
+        <label style={lS} htmlFor="adjust-delta">{t("adjustmentLabel")}</label>
+        <input id="adjust-delta" type="number" step="any" autoFocus value={delta} onChange={e => { setDelta(e.target.value); setErr("") }} style={{ ...iS, marginBottom:6 }} />
+        <p style={{ margin:"0 0 14px", fontSize:11.5, color:C.textFaint }}>{t("adjustmentHint")}</p>
+
+        {newTotal !== null && (
+          <p style={{ margin:"0 0 14px", fontSize:12.5, color: newTotal < 0 ? C.warnStrong : C.accentStrong, fontWeight:600 }}>
+            {t("newTotalLabel")}: {fmtQty(newTotal)} {unitDisplayName(item.unit, t)}
+          </p>
+        )}
+
+        <label style={lS} htmlFor="adjust-reason">{t("reasonLabel")}</label>
+        <input id="adjust-reason" placeholder={t("reasonPlaceholder")} value={reason} onChange={e => { setReason(e.target.value); setErr("") }} style={{ ...iS, marginBottom:14 }} />
+
+        <label style={lS} htmlFor="adjust-note">{t("optionalNoteLabel")}</label>
+        <input id="adjust-note" value={note} onChange={e => setNote(e.target.value)} style={{ ...iS, marginBottom:14 }} />
+
+        {err && <p role="alert" style={{ color:C.warnStrong, fontSize:12, margin:"0 0 14px" }}>{err}</p>}
+
+        <div style={{ display:"flex", gap:10 }}>
+          <button type="button" onClick={onClose} className="stv-btn stv-btn-secondary"
+            style={{ flex:1, padding:"12px", borderRadius:RADIUS.sm, border:`1px solid ${C.border}`, background:C.surface, color:C.text, cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5 }}>
+            {t("cancel")}
+          </button>
+          <button type="button" onClick={submit} disabled={busy} className="stv-btn stv-btn-danger-solid"
+            style={{ flex:1, padding:"12px", borderRadius:RADIUS.sm, border:"none", background:C.warnStrong, color:"#fff", cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5, opacity: busy ? 0.7 : 1 }}>
+            {busy ? t("saving") : t("saveAdjustmentBtn")}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/* ── INVENTORY HISTORY -- lightweight movement log, not a full audit
+   system: just what changed, by how much, by whom, and when. ───────── */
+function InventoryHistoryModal({ item, onClose }) {
+  const { t } = useLanguage()
+  const [movements, setMovements] = useState([])
+  const [loading,    setLoading]  = useState(true)
+
+  useEffect(() => {
+    let active = true
+    supabase.from("inventory_movements").select("*").eq("item_id", item.id).order("created_at", { ascending:false })
+      .then(({ data, error }) => {
+        if (!active) return
+        if (error) console.error("Inventory history fetch error:", error.message)
+        setMovements(data || [])
+        setLoading(false)
+      })
+    return () => { active = false }
+  }, [item.id])
+
+  return (
+    <div onClick={onClose} style={{ position:"fixed", inset:0, background:"rgba(20,20,30,0.5)", zIndex:1000, display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}>
+      <div onClick={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="history-title"
+        style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:RADIUS.lg, padding:"clamp(22px,5vw,32px)", width:"min(92vw, 480px)", maxHeight:"84vh", overflowY:"auto", boxShadow:SHADOW.modal }}>
+        <h2 id="history-title" style={{ margin:"0 0 4px", fontFamily:FONT, fontWeight:700, fontSize:17, color:C.text }}>{t("inventoryHistoryTitle")}</h2>
+        <p style={{ margin:"0 0 20px", fontSize:12.5, color:C.textFaint }}>{item.name}</p>
+
+        {loading ? (
+          <p style={{ color:C.textFaint, fontSize:13 }}>{t("loadingLabel")}</p>
+        ) : movements.length === 0 ? (
+          <p style={{ color:C.textFaint, fontSize:13 }}>{t("noHistoryYet")}</p>
+        ) : (
+          <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+            {movements.map(m => (
+              <div key={m.id} style={{ borderBottom:`1px solid ${C.bg}`, paddingBottom:10 }}>
+                <div style={{ display:"flex", justifyContent:"space-between", gap:10 }}>
+                  <span style={{ fontWeight:700, fontSize:13.5, color: Number(m.delta) < 0 ? C.warnStrong : C.accentStrong }}>
+                    {Number(m.delta) > 0 ? "+" : ""}{fmtQty(m.delta)}
+                  </span>
+                  <span style={{ fontSize:11.5, color:C.textFaint }}>{new Date(m.created_at).toLocaleString()}</span>
+                </div>
+                <div style={{ fontSize:12, color:C.textSub, marginTop:2 }}>
+                  {m.movement_type === "adjustment" ? t("movementAdjustment") : t("movementAdd")}
+                  {m.reason ? ` — ${m.reason}` : ""}
+                </div>
+                {m.note && <div style={{ fontSize:11.5, color:C.textFaint, marginTop:2 }}>{m.note}</div>}
+                <div style={{ fontSize:11, color:C.textFaint, marginTop:2 }}>
+                  {m.created_by_name || "—"} · {t("newTotalLabel")}: {fmtQty(m.resulting_quantity)}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <button type="button" onClick={onClose} className="stv-btn stv-btn-secondary"
+          style={{ marginTop:20, width:"100%", padding:"12px", borderRadius:RADIUS.sm, border:`1px solid ${C.border}`, background:C.surface, color:C.text, cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5 }}>
+          {t("cancel")}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/* ── DRINKS ──────────────────────────────────────────────────
+   Drinks get everything the generic categories get (the "Stock" tab below
+   -- e.g. logging a supplier delivery into the storeroom count) PLUS a
+   second, completely separate workflow: the real Tuesday-to-Monday
+   physical count against the restaurant worker, which is what actually
+   answers "did the money collected match what was sold". These two are
+   intentionally decoupled -- the weekly count is never derived from, and
+   never writes to, inventory_items.quantity. The weekly physical count
+   stays the source of truth for what was sold and collected; this is a
+   design choice worth confirming with the Owner (see final report). */
+function DrinksCategoryView({ category, items, user, isOwner, showToast, reloadItems }) {
+  const { t } = useLanguage()
+  const [tab, setTab] = useState("stock") // "stock" | "weekly"
+
+  return (
+    <div>
+      <h1 style={{ ...pT, marginBottom:18 }}>{catDisplayName(category, t)}</h1>
+
+      <div role="tablist" aria-label={catDisplayName(category, t)} style={{ display:"flex", gap:0, marginBottom:20, borderBottom:`1.5px solid ${C.border}` }}>
+        {[["stock", t("invStockTab")], ["weekly", t("invWeeklyTab")]].map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            role="tab"
+            aria-selected={tab === id}
+            onClick={() => setTab(id)}
+            className="stv-btn"
+            style={{
+              padding:"10px 4px", marginRight:22, background:"none", border:"none",
+              borderBottom: tab === id ? `2px solid ${C.accentStrong}` : "2px solid transparent",
+              color: tab === id ? C.text : C.textFaint,
+              fontWeight: tab === id ? 700 : 500, fontSize:13.5, cursor:"pointer", fontFamily:FONT,
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {tab === "stock" ? (
+        <InventoryCategoryView category={category} items={items} user={user} isOwner={isOwner} showToast={showToast} reloadItems={reloadItems} skipTitle />
+      ) : (
+        <DrinksWeeklyView items={items} user={user} isOwner={isOwner} showToast={showToast} />
+      )}
+    </div>
+  )
+}
+
+/* ── DRINKS WEEKLY RECONCILIATION ────────────────────────────
+   Tuesday: opening count handed to the restaurant worker, per drink, with
+   its own selling price (different sizes = different items = different
+   prices -- never one price for all variants). During the week: more
+   stock can be handed over ("additions"), tracked separately and never
+   overwriting the opening count. Monday: physical remaining count is
+   entered; Sold and Expected Money are always computed, never typed in by
+   hand. Settling a week is one-way -- RLS itself blocks a Worker's own
+   update from ever setting status to 'settled' or touching an
+   already-settled week (see drink_weeks_stvpos_update_open's with_check),
+   so this is enforced at the database level, not just in this UI. */
+function DrinksWeeklyView({ items, user, isOwner, showToast }) {
+  const { t } = useLanguage()
+  const [weeks,      setWeeks]      = useState([])
+  const [lines,      setLines]      = useState([])
+  const [additions,  setAdditions]  = useState([])
+  const [loading,    setLoading]    = useState(true)
+  const [showNewWeek, setShowNewWeek] = useState(false)
+  const [showAddLine, setShowAddLine] = useState(false)
+  const [additionFor, setAdditionFor] = useState(null) // line object
+
+  async function loadAll() {
+    const [{ data: w, error: wErr }, { data: l, error: lErr }, { data: a, error: aErr }] = await Promise.all([
+      supabase.from("drink_weeks").select("*").order("week_start", { ascending:false }),
+      supabase.from("drink_week_lines").select("*"),
+      supabase.from("drink_week_additions").select("*"),
+    ])
+    if (wErr) console.error("Drink weeks fetch error:", wErr.message)
+    if (lErr) console.error("Drink week lines fetch error:", lErr.message)
+    if (aErr) console.error("Drink week additions fetch error:", aErr.message)
+    setWeeks(w || [])
+    setLines(l || [])
+    setAdditions(a || [])
+    setLoading(false)
+  }
+
+  useEffect(() => { loadAll() }, [])
+
+  if (loading) return <p style={{ color:C.textFaint, fontSize:13 }}>{t("loadingLabel")}</p>
+
+  const openWeek = weeks.find(w => w.status === "open") || null
+  const pastWeeks = weeks.filter(w => w.status !== "open")
+
+  const linesFor = (weekId) => lines.filter(l => l.week_id === weekId)
+  const additionsFor = (lineId) => additions.filter(a => a.week_line_id === lineId)
+
+  return (
+    <div>
+      {!openWeek && (
+        <div style={{ ...panelS, marginBottom:20, textAlign:"center", padding:"28px 20px" }}>
+          <p style={{ margin:"0 0 16px", color:C.textSub, fontSize:13.5 }}>{t("noWeeksYet")}</p>
+          <button type="button" onClick={() => setShowNewWeek(true)} className="stv-btn stv-btn-primary" style={{ ...sB, width:"auto", padding:"10px 20px" }}>
+            {t("newWeeklyDrinksCount")}
+          </button>
+        </div>
+      )}
+
+      {openWeek && (
+        <OpenDrinkWeekPanel
+          week={openWeek}
+          lines={linesFor(openWeek.id)}
+          additionsAll={additions}
+          items={items}
+          isOwner={isOwner}
+          user={user}
+          showToast={showToast}
+          reload={loadAll}
+          onAddLine={() => setShowAddLine(true)}
+          onAddAddition={(line) => setAdditionFor(line)}
+        />
+      )}
+
+      <h2 style={{ ...fTi, marginTop:32 }}>{t("drinkWeekHistory")}</h2>
+      <div style={panelS}>
+        <div style={{ overflowX:"auto", WebkitOverflowScrolling:"touch" }}>
+          <table className="stv-table" style={{ width:"100%", minWidth:640, borderCollapse:"collapse" }}>
+            <thead>
+              <tr style={{ borderBottom:`1.5px solid ${C.border}` }}>
+                {[t("weekLabel"),t("totalDrinksSold"),t("expectedLabel"),t("moneyReceivedLabel"),t("differenceLabel"),t("colStatus")].map((h, i) => (
+                  <th key={i} scope="col" style={{ textAlign:"left", padding:"0 0 10px", paddingRight:12, fontSize:10.5, color:C.textFaint, fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {pastWeeks.map(w => {
+                const wLines = linesFor(w.id)
+                let sold = 0, expected = 0
+                wLines.forEach(l => {
+                  const added = additionsFor(l.id).reduce((a, b) => a + Number(b.qty || 0), 0)
+                  if (l.closing_qty == null) return
+                  const s = Number(l.opening_qty || 0) + added - Number(l.closing_qty)
+                  sold += s
+                  expected += s * Number(l.selling_price || 0)
+                })
+                const received = w.money_received == null ? null : Number(w.money_received)
+                const diff = received == null ? null : received - expected
+                return (
+                  <tr key={w.id} style={{ borderBottom:`1px solid ${C.bg}` }}>
+                    <td style={tS}>{formatDMY(w.week_start)} – {formatDMY(w.week_end)}</td>
+                    <td style={tS}>{fmtQty(sold)}</td>
+                    <td style={tS}>{TZS(expected)}</td>
+                    <td style={tS}>{received == null ? "—" : TZS(received)}</td>
+                    <td style={{ ...tS, fontWeight:600, color: diff == null ? C.textFaint : diff < 0 ? C.warnStrong : C.accentStrong }}>
+                      {diff == null ? "—" : TZS(diff)}
+                    </td>
+                    <td style={tS}>
+                      <span style={{
+                        fontSize:11, fontWeight:600, padding:"4px 10px", borderRadius:RADIUS.pill,
+                        background: w.status === "settled" ? C.accentSoft : C.warnSoft,
+                        color: w.status === "settled" ? C.accentStrong : C.warnStrong,
+                      }}>
+                        {w.status === "settled" ? t("settledLabel") : t("openLabel")}
+                      </span>
+                    </td>
+                  </tr>
+                )
+              })}
+              {pastWeeks.length === 0 && (
+                <tr><td colSpan={6} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>{t("noWeeksYet")}</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {showNewWeek && (
+        <NewDrinkWeekModal user={user} showToast={showToast} onClose={() => setShowNewWeek(false)} onSaved={() => { setShowNewWeek(false); loadAll() }} />
+      )}
+      {showAddLine && openWeek && (
+        <AddDrinkLineModal
+          week={openWeek} items={items} existingLines={linesFor(openWeek.id)}
+          showToast={showToast}
+          onClose={() => setShowAddLine(false)}
+          onSaved={() => { setShowAddLine(false); loadAll() }}
+        />
+      )}
+      {additionFor && (
+        <AddDrinkAdditionModal
+          line={additionFor} item={items.find(i => i.id === additionFor.item_id)} user={user} showToast={showToast}
+          onClose={() => setAdditionFor(null)}
+          onSaved={() => { setAdditionFor(null); loadAll() }}
+        />
+      )}
+    </div>
+  )
+}
+
+function OpenDrinkWeekPanel({ week, lines, additionsAll, items, isOwner, user, showToast, reload, onAddLine, onAddAddition }) {
+  const { t } = useLanguage()
+  const [closingDrafts, setClosingDrafts] = useState({})
+  const [moneyReceived, setMoneyReceived] = useState(week.money_received ?? "")
+  const [note,          setNote]          = useState(week.reconciliation_note || "")
+  const [busy,          setBusy]          = useState(false)
+
+  useEffect(() => {
+    setMoneyReceived(week.money_received ?? "")
+    setNote(week.reconciliation_note || "")
+    setClosingDrafts({})
+    // Re-sync whenever a different week becomes the open one, or its saved
+    // values change underneath us (e.g. after saveReconciliation()).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [week.id, week.money_received, week.reconciliation_note])
+
+  const additionsFor = (lineId) => additionsAll.filter(a => a.week_line_id === lineId)
+
+  const rows = lines.map(line => {
+    const item = items.find(i => i.id === line.item_id)
+    const added = additionsFor(line.id).reduce((a, b) => a + Number(b.qty || 0), 0)
+    const available = Number(line.opening_qty || 0) + added
+    const draft = closingDrafts[line.id]
+    const closingVal = draft !== undefined ? draft : (line.closing_qty ?? "")
+    const hasClosing = closingVal !== "" && closingVal !== null && !isNaN(Number(closingVal))
+    const sold = hasClosing ? available - Number(closingVal) : null
+    const expected = sold == null ? null : sold * Number(line.selling_price || 0)
+    return { line, item, added, available, closingVal, sold, expected }
+  })
+
+  const totalSold = rows.reduce((a, r) => a + (r.sold || 0), 0)
+  const totalExpected = rows.reduce((a, r) => a + (r.expected || 0), 0)
+  const receivedNum = moneyReceived === "" || isNaN(Number(moneyReceived)) ? null : Number(moneyReceived)
+  const diff = receivedNum == null ? null : receivedNum - totalExpected
+  const allClosed = rows.length > 0 && rows.every(r => r.sold != null)
+  const hasClosingDrafts = Object.keys(closingDrafts).length > 0
+
+  async function saveClosingCounts() {
+    const toSave = rows.filter(r => closingDrafts[r.line.id] !== undefined && closingDrafts[r.line.id] !== "" && !isNaN(Number(closingDrafts[r.line.id])))
+    if (toSave.length === 0) return
+    setBusy(true)
+    const results = await Promise.all(toSave.map(r =>
+      supabase.from("drink_week_lines").update({ closing_qty: Number(r.closingVal) }).eq("id", r.line.id)
+    ))
+    setBusy(false)
+    const failed = results.find(r => r.error)
+    if (failed) { showToast(failed.error.message, "error"); return }
+    showToast(t("closingSavedToast"))
+    reload()
+  }
+
+  async function saveReconciliation() {
+    setBusy(true)
+    const { error } = await supabase.from("drink_weeks").update({
+      money_received: moneyReceived === "" ? null : Number(moneyReceived),
+      reconciliation_note: note.trim() || null,
+    }).eq("id", week.id)
+    setBusy(false)
+    if (error) { showToast(error.message, "error"); return }
+    showToast(t("closingSavedToast"))
+    reload()
+  }
+
+  async function settleWeek() {
+    if (!confirm(t("confirmSettleWeek"))) return
+    setBusy(true)
+    const { error } = await supabase.from("drink_weeks").update({
+      money_received: moneyReceived === "" ? null : Number(moneyReceived),
+      reconciliation_note: note.trim() || null,
+      status: "settled",
+      settled_by: user?.id || null,
+      settled_by_name: user?.user_metadata?.name || user?.email || null,
+      settled_at: new Date().toISOString(),
+    }).eq("id", week.id)
+    setBusy(false)
+    if (error) { showToast(error.message, "error"); return }
+    showToast(t("weekSettledToast"))
+    reload()
+  }
+
+  return (
+    <div style={{ ...panelS, marginBottom:24 }}>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:10, marginBottom:16 }}>
+        <div>
+          <div style={{ fontSize:11, color:C.textFaint, fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{t("weekLabel")}</div>
+          <div style={{ fontSize:16, fontWeight:700, color:C.text }}>{formatDMY(week.week_start)} – {formatDMY(week.week_end)}</div>
+        </div>
+        <button type="button" onClick={onAddLine} className="stv-btn stv-btn-secondary"
+          style={{ background:C.surface, color:C.text, border:`1px solid ${C.border}`, padding:"9px 16px", borderRadius:RADIUS.sm, fontSize:12.5, fontWeight:600, cursor:"pointer", fontFamily:FONT }}>
+          {t("addDrinkLineBtn")}
+        </button>
+      </div>
+
+      <div style={{ overflowX:"auto", WebkitOverflowScrolling:"touch", marginBottom: rows.length > 0 ? 14 : 20 }}>
+        <table className="stv-table" style={{ width:"100%", minWidth:760, borderCollapse:"collapse" }}>
+          <thead>
+            <tr style={{ borderBottom:`1.5px solid ${C.border}` }}>
+              {[t("drinkColLabel"),t("sellingPriceColLabel"),t("openingColLabel"),t("addedColLabel"),t("availableColLabel"),t("remainingLabel"),t("soldLabel"),t("expectedMoneyLabel")].map((h, i) => (
+                <th key={i} scope="col" style={{ textAlign:"left", padding:"0 0 10px", paddingRight:10, fontSize:10, color:C.textFaint, fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(({ line, item, added, available, closingVal, sold, expected }) => (
+              <tr key={line.id} style={{ borderBottom:`1px solid ${C.bg}` }}>
+                <td style={{ ...tS, fontWeight:600 }}>{item?.name || "—"}</td>
+                <td style={tS}>{TZS(line.selling_price)}</td>
+                <td style={tS}>{fmtQty(line.opening_qty)}</td>
+                <td style={tS}>
+                  {fmtQty(added)}
+                  <button type="button" onClick={() => onAddAddition(line)} className="stv-btn stv-btn-ghost"
+                    style={{ marginLeft:8, background:"none", border:"none", color:C.accentStrong, cursor:"pointer", fontSize:11, fontWeight:700, padding:0, fontFamily:FONT }}>
+                    {t("addAdditionBtn")}
+                  </button>
+                </td>
+                <td style={{ ...tS, fontWeight:600 }}>{fmtQty(available)}</td>
+                <td style={tS}>
+                  <input
+                    type="number" min="0" step="any"
+                    aria-label={`${t("remainingLabel")} — ${item?.name || ""}`}
+                    value={closingVal}
+                    onChange={e => setClosingDrafts(d => ({ ...d, [line.id]: e.target.value }))}
+                    style={{ ...seS, width:80, padding:"7px 9px" }}
+                  />
+                </td>
+                <td style={tS}>{sold == null ? <span style={{ color:C.textFaint }}>{t("pendingClosing")}</span> : fmtQty(sold)}</td>
+                <td style={{ ...tS, fontWeight:600 }}>{expected == null ? "—" : TZS(expected)}</td>
+              </tr>
+            ))}
+            {rows.length === 0 && (
+              <tr><td colSpan={8} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>{t("addDrinkItemFirst")}</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {rows.length > 0 && (
+        <button type="button" onClick={saveClosingCounts} disabled={busy || !hasClosingDrafts} className="stv-btn stv-btn-secondary"
+          style={{ marginBottom:28, background:C.surface, color:C.text, border:`1px solid ${C.border}`, padding:"10px 18px", borderRadius:RADIUS.sm, fontSize:12.5, fontWeight:600, cursor:"pointer", fontFamily:FONT, opacity: (busy || !hasClosingDrafts) ? 0.6 : 1 }}>
+          {t("saveClosingBtn")}
+        </button>
+      )}
+
+      <div style={{ borderTop:`1.5px solid ${C.border}`, paddingTop:20 }}>
+        <h3 style={{ ...fTi, marginBottom:16 }}>{t("weeklyReconciliation")}</h3>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(160px, 1fr))", gap:16, marginBottom:16 }}>
+          <div>
+            <div style={lS}>{t("totalDrinksSold")}</div>
+            <div style={{ fontSize:18, fontWeight:700, color:C.text }}>{fmtQty(totalSold)}</div>
+          </div>
+          <div>
+            <div style={lS}>{t("expectedLabel")}</div>
+            <div style={{ fontSize:18, fontWeight:700, color:C.text }}>{TZS(totalExpected)}</div>
+          </div>
+          <div>
+            <label style={lS} htmlFor="drink-money-received">{t("moneyReceivedLabel")}</label>
+            <input id="drink-money-received" type="number" min="0" step="any" placeholder={t("enterMoneyReceivedPlaceholder")}
+              value={moneyReceived} onChange={e => setMoneyReceived(e.target.value)} style={iS} />
+          </div>
+          <div>
+            <div style={lS}>{t("differenceLabel")}</div>
+            <div style={{ fontSize:18, fontWeight:700, color: diff == null ? C.textFaint : diff < 0 ? C.warnStrong : C.accentStrong }}>
+              {diff == null ? "—" : TZS(diff)}
+            </div>
+          </div>
+        </div>
+
+        <label style={lS} htmlFor="drink-note">{t("reconciliationNoteLabel")}</label>
+        <textarea id="drink-note" rows={2} placeholder={t("reconciliationNotePlaceholder")} value={note} onChange={e => setNote(e.target.value)}
+          style={{ ...iS, marginBottom:16, resize:"vertical", fontFamily:FONT }} />
+
+        <div style={{ display:"flex", gap:10, flexWrap:"wrap", alignItems:"center" }}>
+          <button type="button" onClick={saveReconciliation} disabled={busy} className="stv-btn stv-btn-secondary"
+            style={{ background:C.surface, color:C.text, border:`1px solid ${C.border}`, padding:"11px 20px", borderRadius:RADIUS.sm, fontSize:13, fontWeight:600, cursor:"pointer", fontFamily:FONT, opacity: busy ? 0.7 : 1 }}>
+            {t("saveBtn")}
+          </button>
+          {isOwner && (
+            <button type="button" onClick={settleWeek} disabled={busy || !allClosed} className="stv-btn stv-btn-primary"
+              title={!allClosed ? t("pendingClosing") : undefined}
+              style={{ ...sB, width:"auto", padding:"11px 22px", opacity: (busy || !allClosed) ? 0.6 : 1 }}>
+              {t("markSettledBtn")}
+            </button>
+          )}
+          {week.settled_by_name && (
+            <span style={{ fontSize:11.5, color:C.textFaint }}>{t("settledByLabel")}: {week.settled_by_name}</span>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function NewDrinkWeekModal({ user, showToast, onClose, onSaved }) {
+  const { t } = useLanguage()
+  const [weekStart, setWeekStart] = useState(todayStr())
+  const [weekEnd,    setWeekEnd]  = useState(() => {
+    const d = new Date(); d.setDate(d.getDate() + 6)
+    return d.toISOString().split("T")[0]
+  })
+  const [err,  setErr]  = useState("")
+  const [busy, setBusy] = useState(false)
+
+  const submit = async () => {
+    if (!weekStart || !weekEnd) { setErr(t("enterValidQuantity")); return }
+    setBusy(true)
+    const { error } = await supabase.from("drink_weeks").insert([{
+      week_start: weekStart,
+      week_end: weekEnd,
+      status: "open",
+      created_by: user?.id || null,
+      created_by_name: user?.user_metadata?.name || user?.email || null,
+    }])
+    setBusy(false)
+    if (error) { showToast(error.message, "error"); return }
+    showToast(t("weekCreatedToast"))
+    onSaved()
+  }
+
+  return (
+    <div onClick={onClose} style={{ position:"fixed", inset:0, background:"rgba(20,20,30,0.5)", zIndex:1000, display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}>
+      <div onClick={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="new-week-title"
+        style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:RADIUS.lg, padding:"clamp(22px,5vw,32px)", width:"min(92vw, 380px)", boxShadow:SHADOW.modal }}>
+        <h2 id="new-week-title" style={{ margin:"0 0 20px", fontFamily:FONT, fontWeight:700, fontSize:17, color:C.text }}>{t("newWeeklyDrinksCount")}</h2>
+
+        <label style={lS} htmlFor="week-start">{t("weekStartLabel")}</label>
+        <input id="week-start" type="date" value={weekStart} onChange={e => setWeekStart(e.target.value)} style={{ ...iS, marginBottom:14 }} />
+
+        <label style={lS} htmlFor="week-end">{t("weekEndLabel")}</label>
+        <input id="week-end" type="date" value={weekEnd} onChange={e => setWeekEnd(e.target.value)} style={{ ...iS, marginBottom:8 }} />
+
+        {err && <p role="alert" style={{ color:C.warnStrong, fontSize:12, margin:"0 0 14px" }}>{err}</p>}
+
+        <div style={{ display:"flex", gap:10, marginTop:14 }}>
+          <button type="button" onClick={onClose} className="stv-btn stv-btn-secondary"
+            style={{ flex:1, padding:"12px", borderRadius:RADIUS.sm, border:`1px solid ${C.border}`, background:C.surface, color:C.text, cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5 }}>
+            {t("cancel")}
+          </button>
+          <button type="button" onClick={submit} disabled={busy} className="stv-btn stv-btn-primary"
+            style={{ flex:1, padding:"12px", borderRadius:RADIUS.sm, border:"none", background:C.accentStrong, color:"#fff", cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5, opacity: busy ? 0.7 : 1 }}>
+            {busy ? t("saving") : t("startWeekBtn")}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function AddDrinkLineModal({ week, items, existingLines, showToast, onClose, onSaved }) {
+  const { t } = useLanguage()
+  const usedIds = new Set(existingLines.map(l => l.item_id))
+  const available = items.filter(i => !usedIds.has(i.id))
+  const [itemId,     setItemId]     = useState(available[0]?.id || "")
+  const [price,      setPrice]      = useState(available[0]?.selling_price ?? "")
+  const [openingQty, setOpeningQty] = useState("")
+  const [err,  setErr]  = useState("")
+  const [busy, setBusy] = useState(false)
+
+  const onSelectItem = (id) => {
+    setItemId(id)
+    const it = items.find(i => i.id === id)
+    setPrice(it?.selling_price ?? "")
+  }
+
+  const submit = async () => {
+    if (!itemId) { setErr(t("selectDrink")); return }
+    if (price === "" || isNaN(Number(price)) || Number(price) < 0) { setErr(t("enterValidPrice")); return }
+    if (openingQty === "" || isNaN(Number(openingQty)) || Number(openingQty) < 0) { setErr(t("enterValidQuantity")); return }
+    setBusy(true)
+    const { error } = await supabase.from("drink_week_lines").insert([{
+      week_id: week.id,
+      item_id: itemId,
+      selling_price: Number(price),
+      opening_qty: Number(openingQty),
+    }])
+    if (!error) {
+      // Keep the item's own price as a convenience default for next week --
+      // never required, always overridable per line.
+      await supabase.from("inventory_items").update({ selling_price: Number(price) }).eq("id", itemId)
+    }
+    setBusy(false)
+    if (error) { showToast(error.message, "error"); return }
+    onSaved()
+  }
+
+  return (
+    <div onClick={onClose} style={{ position:"fixed", inset:0, background:"rgba(20,20,30,0.5)", zIndex:1000, display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}>
+      <div onClick={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="add-line-title"
+        style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:RADIUS.lg, padding:"clamp(22px,5vw,32px)", width:"min(92vw, 400px)", boxShadow:SHADOW.modal }}>
+        <h2 id="add-line-title" style={{ margin:"0 0 20px", fontFamily:FONT, fontWeight:700, fontSize:17, color:C.text }}>{t("addDrinkLineBtn")}</h2>
+
+        {available.length === 0 ? (
+          <p style={{ color:C.textFaint, fontSize:13, marginBottom:20 }}>{t("addDrinkItemFirst")}</p>
+        ) : (
+          <>
+            <label style={lS} htmlFor="drink-line-item">{t("selectDrinkItemLabel")}</label>
+            <select id="drink-line-item" value={itemId} onChange={e => onSelectItem(e.target.value)} style={{ ...iS, marginBottom:14 }}>
+              {available.map(i => <option key={i.id} value={i.id}>{i.name}</option>)}
+            </select>
+
+            <div style={{ display:"flex", gap:10, marginBottom:8 }}>
+              <div style={{ flex:1, minWidth:0 }}>
+                <label style={lS} htmlFor="drink-line-price">{t("sellingPriceColLabel")}</label>
+                <input id="drink-line-price" type="number" min="0" step="any" value={price} onChange={e => { setPrice(e.target.value); setErr("") }} style={iS} />
+              </div>
+              <div style={{ flex:1, minWidth:0 }}>
+                <label style={lS} htmlFor="drink-line-opening">{t("openingQtyColLabel")}</label>
+                <input id="drink-line-opening" type="number" min="0" step="any" value={openingQty} onChange={e => { setOpeningQty(e.target.value); setErr("") }} style={iS} />
+              </div>
+            </div>
+            {err && <p role="alert" style={{ color:C.warnStrong, fontSize:12, margin:"0 0 14px" }}>{err}</p>}
+          </>
+        )}
+
+        <div style={{ display:"flex", gap:10, marginTop: available.length === 0 ? 0 : 8 }}>
+          <button type="button" onClick={onClose} className="stv-btn stv-btn-secondary"
+            style={{ flex:1, padding:"12px", borderRadius:RADIUS.sm, border:`1px solid ${C.border}`, background:C.surface, color:C.text, cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5 }}>
+            {t("cancel")}
+          </button>
+          {available.length > 0 && (
+            <button type="button" onClick={submit} disabled={busy} className="stv-btn stv-btn-primary"
+              style={{ flex:1, padding:"12px", borderRadius:RADIUS.sm, border:"none", background:C.accentStrong, color:"#fff", cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5, opacity: busy ? 0.7 : 1 }}>
+              {busy ? t("saving") : t("add")}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function AddDrinkAdditionModal({ line, item, user, showToast, onClose, onSaved }) {
+  const { t } = useLanguage()
+  const [qty,  setQty]  = useState("")
+  const [note, setNote] = useState("")
+  const [err,  setErr]  = useState("")
+  const [busy, setBusy] = useState(false)
+
+  const submit = async () => {
+    if (qty === "" || isNaN(Number(qty)) || Number(qty) <= 0) { setErr(t("enterValidQuantity")); return }
+    setBusy(true)
+    const { error } = await supabase.from("drink_week_additions").insert([{
+      week_line_id: line.id,
+      qty: Number(qty),
+      note: note.trim() || null,
+      created_by: user?.id || null,
+      created_by_name: user?.user_metadata?.name || user?.email || null,
+    }])
+    setBusy(false)
+    if (error) { showToast(error.message, "error"); return }
+    showToast(t("additionRecordedToast"))
+    onSaved()
+  }
+
+  return (
+    <div onClick={onClose} style={{ position:"fixed", inset:0, background:"rgba(20,20,30,0.5)", zIndex:1000, display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}>
+      <div onClick={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="add-addition-title"
+        style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:RADIUS.lg, padding:"clamp(22px,5vw,32px)", width:"min(92vw, 380px)", boxShadow:SHADOW.modal }}>
+        <h2 id="add-addition-title" style={{ margin:"0 0 4px", fontFamily:FONT, fontWeight:700, fontSize:17, color:C.text }}>{t("addAdditionBtn")}</h2>
+        <p style={{ margin:"0 0 20px", fontSize:12.5, color:C.textFaint }}>{item?.name || ""}</p>
+
+        <label style={lS} htmlFor="addition-qty">{t("quantityAddedLabel")}</label>
+        <input id="addition-qty" type="number" min="0" step="any" autoFocus value={qty} onChange={e => { setQty(e.target.value); setErr("") }} style={{ ...iS, marginBottom:14 }} />
+
+        <label style={lS} htmlFor="addition-note">{t("optionalNoteLabel")}</label>
+        <input id="addition-note" value={note} onChange={e => setNote(e.target.value)} style={{ ...iS, marginBottom:14 }} />
+
+        {err && <p role="alert" style={{ color:C.warnStrong, fontSize:12, margin:"0 0 14px" }}>{err}</p>}
+
+        <div style={{ display:"flex", gap:10 }}>
+          <button type="button" onClick={onClose} className="stv-btn stv-btn-secondary"
+            style={{ flex:1, padding:"12px", borderRadius:RADIUS.sm, border:`1px solid ${C.border}`, background:C.surface, color:C.text, cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5 }}>
+            {t("cancel")}
+          </button>
+          <button type="button" onClick={submit} disabled={busy} className="stv-btn stv-btn-primary"
+            style={{ flex:1, padding:"12px", borderRadius:RADIUS.sm, border:"none", background:C.accentStrong, color:"#fff", cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5, opacity: busy ? 0.7 : 1 }}>
+            {busy ? t("saving") : t("add")}
+          </button>
+        </div>
       </div>
     </div>
   )

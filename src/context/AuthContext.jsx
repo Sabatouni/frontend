@@ -97,6 +97,14 @@ export function AuthProvider({ children }) {
   // this is what makes the hint non-authoritative.
   const [permissionsLoaded, setPermissionsLoaded] = useState(false);
 
+  // True when the MOST RECENT permission check for the current user ended in
+  // a network/timeout failure rather than a real answer. This is what lets
+  // App.jsx tell "we don't know if you're allowed in" (show a recoverable
+  // "unable to verify access" screen) apart from "we checked, and you have
+  // no grant" (show Access Denied) -- see PermissionErrorPage in App.jsx.
+  // It is reset to false the moment any check for the current user succeeds.
+  const [permissionsError, setPermissionsError] = useState(false);
+
   // Read once, synchronously, at mount -- this is what lets the very first
   // render after a refresh already know "this browser was previously an
   // authenticated, permitted user" without waiting on anything async.
@@ -112,15 +120,63 @@ export function AuthProvider({ children }) {
   // shouldn't rely on that to stay safe on a shared device.
   const lastUserIdRef = useRef(null);
 
+  // Has the CURRENT user (lastUserIdRef.current) had at least one permission
+  // check actually succeed this session? loadPermissions() re-runs on every
+  // onAuthStateChange firing -- sign-in, sign-out, AND every silent token
+  // refresh (Supabase does this automatically, roughly hourly, for as long
+  // as the tab stays open). Before this flag existed, a single transient
+  // failure on one of those background re-checks (a flaky network blip
+  // while someone is mid-shift actively using the POS) would reset
+  // `permissions` to [] and yank an already-approved session out to Access
+  // Denied / the error screen for no real reason. Now: the FIRST check for a
+  // new user still fails closed (see below -- there is no known-good result
+  // to fall back on yet, so an error here must never grant access). Once
+  // that first check has succeeded at least once, a later failure just logs
+  // and leaves the last known-good `permissions` in place until the next
+  // check (usually seconds later, or the next token refresh) succeeds.
+  const verifiedRef = useRef(false);
+
+  // Monotonic generation counter, bumped once per loadPermissions() call.
+  // Guards against the classic async-identity race: user A's permission
+  // request is in flight, A signs out, B signs in (or A just clicks "Try
+  // Again" twice in a row) -- A's slow response must never be allowed to
+  // land after a newer call has already started and overwrite state that
+  // belongs to someone/something else. Every continuation below checks
+  // isStale() (via the closure created at call time) before touching any
+  // state, and simply discards the result if it's no longer current. This
+  // is what requirement #5 in the auth-hardening review calls a
+  // "request/user identity guard".
+  const requestIdRef = useRef(0);
+
   const loadPermissions = useCallback(async (currentUser) => {
+    if (!currentUser) {
+      // Nothing to check permissions FOR. Callers (the auth-state-change
+      // effect below, and refresh() further down) are expected to only
+      // invoke this with a real, signed-in user, but this guard makes that
+      // contract explicit rather than trusting every call site forever.
+      return;
+    }
+
+    const myRequestId = ++requestIdRef.current;
+    const myUserId = currentUser.id;
+    // Stale if a newer call has started (same user or not) OR the app has
+    // since moved on to a different signed-in user entirely.
+    const isStale = () => myRequestId !== requestIdRef.current || lastUserIdRef.current !== myUserId;
+
     let permSettled = false;
     const timeoutId = setTimeout(() => {
       if (permSettled) return;
       permSettled = true;
+      if (isStale()) return;
       console.error(
-        `[Auth] permission check did not resolve within ${PERMISSIONS_TIMEOUT_MS}ms -- failing closed until it does`
+        `[Auth] permission check did not resolve within ${PERMISSIONS_TIMEOUT_MS}ms`
       );
-      setPermissions([]);
+      setPermissionsError(true);
+      if (!verifiedRef.current) {
+        // No known-good result yet for this user -- fail closed rather than
+        // ever guessing access from an unverified state.
+        setPermissions([]);
+      }
       setPermissionsLoaded(true);
     }, PERMISSIONS_TIMEOUT_MS);
 
@@ -128,13 +184,16 @@ export function AuthProvider({ children }) {
       const perms = await fetchMyPermissions();
       clearTimeout(timeoutId);
       permSettled = true;
+      if (isStale()) return;
+      verifiedRef.current = true;
+      setPermissionsError(false);
       setPermissions(perms);
 
       // Refresh the cached hint from the REAL result -- keeps it accurate
       // for next time, and makes sure a revoked user's stale "had access"
       // hint can never outlive the check that revoked it.
       const grant = perms.find((p) => p.application_slug === APP_SLUG) || null;
-      if (currentUser && grant) {
+      if (grant) {
         const grantRole = grant.role_slug || null;
         const grantRoleLevel = grantRole ? (ROLE_LEVELS[grantRole] ?? grant.role_level) : null;
         writeAuthHint({
@@ -149,21 +208,38 @@ export function AuthProvider({ children }) {
         clearAuthHint();
       }
     } catch (err) {
-      // Transient/network failure -- this is the same fail-closed fallback
-      // that already existed before this change (permissions -> []); it's
-      // deliberately left as-is rather than redesigned. The important
-      // behavior change is only that it no longer blocks the entire app
-      // from rendering while it's in flight (see `ready` below).
+      // Network/RPC failure. Never treated as "grant access" -- see
+      // verifiedRef above for exactly what does and doesn't get reset.
       if (!permSettled) {
         clearTimeout(timeoutId);
         permSettled = true;
+        if (isStale()) return;
         console.error("[Auth] failed to load permissions:", err.message);
-        setPermissions([]);
+        setPermissionsError(true);
+        if (!verifiedRef.current) {
+          setPermissions([]);
+        }
       }
     } finally {
-      setPermissionsLoaded(true);
+      // A stale (superseded) call must not flip permissionsLoaded -- doing
+      // so could prematurely end the loading state for whatever newer
+      // request/user IS current, before that one has actually settled. The
+      // current request always settles on its own (it has its own timeout
+      // above), so this never leaves permissionsLoaded permanently false.
+      if (!isStale()) setPermissionsLoaded(true);
     }
   }, []);
+
+  // Public retry entry point for the UI (PermissionErrorPage's "Try
+  // Again"). Always re-checks the user CURRENTLY held in state -- never a
+  // caller-supplied value -- so a stale closure can't accidentally retry
+  // the wrong identity, and is a no-op if nobody is signed in (there is
+  // nothing to verify, and no UI in this app can reach it without a user,
+  // but the guard keeps that contract explicit rather than assumed).
+  const refresh = useCallback(() => {
+    if (!user) return;
+    return loadPermissions(user);
+  }, [user, loadPermissions]);
 
   useEffect(() => {
     let cancelled = false;
@@ -215,14 +291,18 @@ export function AuthProvider({ children }) {
             // permissions/hint-match state leak into this one while the
             // real check for THIS user is in flight.
             lastUserIdRef.current = u.id;
+            verifiedRef.current = false;
             setPermissions([]);
             setPermissionsLoaded(false);
+            setPermissionsError(false);
           }
           loadPermissions(u);
         } else {
           lastUserIdRef.current = null;
+          verifiedRef.current = false;
           setPermissions([]);
           setPermissionsLoaded(true);
+          setPermissionsError(false);
           // No session -- any cached "was authenticated" hint is now
           // stale. Clearing it here (in addition to logout() below) covers
           // sign-outs that don't go through our own logout button: an
@@ -241,6 +321,7 @@ export function AuthProvider({ children }) {
       setSession(null);
       setPermissions([]);
       setPermissionsLoaded(true);
+      setPermissionsError(false);
       setReady(true);
     }
 
@@ -259,6 +340,7 @@ export function AuthProvider({ children }) {
         setSession(null);
         setPermissions([]);
         setPermissionsLoaded(true);
+        setPermissionsError(false);
         setReady(true);
       }
     }, AUTH_INIT_TIMEOUT_MS);
@@ -283,11 +365,13 @@ export function AuthProvider({ children }) {
     // user's cached Owner/Admin UI, even for a moment.
     clearAuthHint();
     lastUserIdRef.current = null;
+    verifiedRef.current = false;
     await supabase.auth.signOut();
     setUser(null);
     setSession(null);
     setPermissions([]);
     setPermissionsLoaded(true);
+    setPermissionsError(false);
   }
 
   const grant = useMemo(
@@ -340,10 +424,11 @@ export function AuthProvider({ children }) {
       hasAccess,
       permissions,
       permissionsPending,
+      permissionsError,
       login,
       logout,
       ready,
-      refresh: loadPermissions,
+      refresh,
     }),
     [
       user,
@@ -356,8 +441,9 @@ export function AuthProvider({ children }) {
       hasAccess,
       permissions,
       permissionsPending,
+      permissionsError,
       ready,
-      loadPermissions,
+      refresh,
     ]
   );
 
