@@ -21,5 +21,10 @@ export const ROLE_LEVELS = { owner: 30, admin: 20, worker: 10 }
 export async function fetchMyPermissions() {
   const { data, error } = await supabase.rpc("my_permissions")
   if (error) throw error
-  return data || []
+  // Guard against a malformed/non-array RPC response (not just null/undefined)
+  // -- callers do permissions.find(...) on this, which throws on anything
+  // that isn't an array. An uncaught throw during AuthProvider's render would
+  // crash the whole React tree with no error boundary, so this normalizes at
+  // the source instead of trusting the shape of what the network returned.
+  return Array.isArray(data) ? data : []
 }
