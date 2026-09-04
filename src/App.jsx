@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import {
   Bar,
   BarChart,
@@ -24,6 +24,7 @@ import { ADMIN_API } from "./api"
 import { supabase } from "./api/supabaseClient"
 import { useAuth } from "./context/AuthContext"
 import { useLanguage } from "./i18n"
+import { downloadInvoicePdf, getInvoicePdfBlobUrl } from "./lib/invoicePdf"
 
 /* ── CONFIG ─────────────────────────────────────────────── */
 const LOGO        = "/logo.png"
@@ -255,6 +256,9 @@ export default function App() {
           )}
           {page === "inventory" && (
             <InventoryPage user={user} isOwner={isOwner} showToast={showToast} />
+          )}
+          {page === "invoices" && (
+            <InvoicesPage user={user} isOwner={isOwner} displayName={displayName} showToast={showToast} />
           )}
           {page === "reports" && isOwner && (
             <ReportsPage sales={sales} expenses={expenses} services={services} showToast={showToast} />
@@ -551,6 +555,7 @@ function Sidebar({ page, setPage, isOwner, displayName, onLogout, open, onClose 
     { id:"sales",      label:t("navSales"),      icon:"💰" },
     { id:"expenses",   label:t("navExpenses"),   icon:"🧾" },
     { id:"inventory",  label:t("navInventory"),  icon:"📦" },
+    { id:"invoices",   label:t("navInvoices"),   icon:"📑" },
     { id:"reports",    label:t("navReports"),    icon:"📈" },
     { id:"users",      label:t("navUsers"),      icon:"👥" },
   ]
@@ -559,6 +564,7 @@ function Sidebar({ page, setPage, isOwner, displayName, onLogout, open, onClose 
     { id:"sales",      label:t("navRecordSale"), icon:"💰" },
     { id:"expenses",   label:t("navExpenses"),   icon:"🧾" },
     { id:"inventory",  label:t("navInventory"),  icon:"📦" },
+    { id:"invoices",   label:t("navInvoices"),   icon:"📑" },
   ]
   const nav = isOwner ? ownerNav : workerNav
 
@@ -3463,6 +3469,629 @@ function UsersPage({ showToast }) {
         </table>
         </div>
       </div>
+    </div>
+  )
+}
+
+/* ── INVOICES ────────────────────────────────────────────────
+   Standalone invoice system -- not derived from a POS sale. Create/edit/
+   delete is gated to owner/admin via Supabase RLS (has_minimum_role, same
+   pattern as sales/expenses/inventory); any stv-pos user, workers
+   included, can view and download. Invoice numbers (STV-001, STV-002, ...)
+   are assigned by a Postgres trigger from a dedicated sequence -- never
+   computed client-side -- so two people saving at the same moment can
+   never collide or skip a number. grand_total/paid are stored as entered;
+   amount_left and each line's total are DB-generated columns, so they can
+   never drift from grand_total/paid/quantity/unit_price server-side. */
+
+function emptyInvoiceItem() {
+  return {
+    key: (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`),
+    description: "",
+    quantity: "1",
+    unit_price: "0",
+  }
+}
+
+function emptyInvoiceForm(preparedByDefault) {
+  return {
+    customer_name: "",
+    customer_company: "",
+    customer_contact_person: "",
+    customer_phone: "",
+    customer_email: "",
+    invoice_date: todayStr(),
+    valid_until: "",
+    prepared_by: preparedByDefault || "",
+    reference: "",
+    notes: "",
+    paid: "0",
+  }
+}
+
+async function fetchInvoiceItemsFor(invoiceId) {
+  const { data, error } = await supabase
+    .from("invoice_items")
+    .select("*")
+    .eq("invoice_id", invoiceId)
+    .order("sort_order", { ascending: true })
+  if (error) throw error
+  return data || []
+}
+
+function InvoicePreviewModal({ invoice, url, onClose, onPrint, onDownload }) {
+  const { t } = useLanguage()
+  const iframeRef = useRef(null)
+
+  return (
+    <div
+      onClick={onClose}
+      style={{ position:"fixed", inset:0, background:"rgba(20,20,30,0.6)", zIndex:1000, display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="invoice-preview-title"
+        style={{ background:C.surface, borderRadius:RADIUS.lg, padding:"clamp(16px,3vw,22px)", width:"min(96vw, 820px)", height:"min(94vh, 960px)", display:"flex", flexDirection:"column", boxShadow:SHADOW.modal }}
+      >
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:14 }}>
+          <h2 id="invoice-preview-title" style={{ margin:0, fontFamily:FONT, fontWeight:700, fontSize:16, color:C.text }}>
+            {t("previewPdfTitle")} — {invoice.invoice_number}
+          </h2>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label={t("closePreviewBtn")}
+            style={{ background:"none", border:"none", fontSize:20, cursor:"pointer", color:C.textSub, lineHeight:1, padding:4 }}
+          >
+            ✕
+          </button>
+        </div>
+
+        <div style={{ flex:1, minHeight:0, border:`1px solid ${C.border}`, borderRadius:RADIUS.sm, overflow:"hidden", background:C.bg }}>
+          <iframe ref={iframeRef} src={url} title={t("previewPdfTitle")} style={{ width:"100%", height:"100%", border:"none" }} />
+        </div>
+
+        <div style={{ display:"flex", gap:10, marginTop:16 }}>
+          <button
+            type="button"
+            onClick={onClose}
+            className="stv-btn stv-btn-secondary"
+            style={{ flex:1, padding:"12px", borderRadius:RADIUS.sm, border:`1px solid ${C.border}`, background:C.surface, color:C.text, cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5 }}
+          >
+            {t("closePreviewBtn")}
+          </button>
+          <button
+            type="button"
+            onClick={() => onPrint(iframeRef)}
+            className="stv-btn stv-btn-secondary"
+            style={{ flex:1, padding:"12px", borderRadius:RADIUS.sm, border:`1px solid ${C.border}`, background:C.surface, color:C.text, cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5 }}
+          >
+            {t("printInvoiceBtn")}
+          </button>
+          <button
+            type="button"
+            onClick={onDownload}
+            className="stv-btn stv-btn-primary"
+            style={{ flex:1, padding:"12px", borderRadius:RADIUS.sm, border:"none", background:C.accentStrong, color:"#fff", cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5 }}
+          >
+            {t("downloadPdfBtn")}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function InvoicesPage({ user, isOwner, displayName, showToast }) {
+  const { t } = useLanguage()
+  const [view, setView] = useState("list") // "list" | "form"
+  const [invoices, setInvoices] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [loadErr, setLoadErr] = useState("")
+  const [search, setSearch] = useState("")
+
+  const [editingId, setEditingId] = useState(null)
+  const [form, setForm] = useState(() => emptyInvoiceForm(displayName))
+  const [items, setItems] = useState(() => [emptyInvoiceItem()])
+  const [saving, setSaving] = useState(false)
+
+  const [rowBusyId, setRowBusyId] = useState(null) // invoice id currently loading items for view/download/edit
+  const [preview, setPreview] = useState(null) // { invoice, url }
+
+  async function loadInvoices() {
+    setLoading(true)
+    try {
+      const { data, error } = await supabase.from("invoices").select("*").order("created_at", { ascending: false })
+      if (error) throw error
+      setInvoices(data || [])
+      setLoadErr("")
+    } catch (e) {
+      setLoadErr(e.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { loadInvoices() }, [])
+
+  const filtered = invoices.filter(inv => {
+    const q = search.trim().toLowerCase()
+    if (!q) return true
+    return (inv.customer_name || "").toLowerCase().includes(q) || (inv.invoice_number || "").toLowerCase().includes(q)
+  })
+
+  function startNew() {
+    setEditingId(null)
+    setForm(emptyInvoiceForm(displayName))
+    setItems([emptyInvoiceItem()])
+    setView("form")
+  }
+
+  async function startEdit(inv) {
+    setRowBusyId(inv.id)
+    try {
+      const rows = await fetchInvoiceItemsFor(inv.id)
+      setEditingId(inv.id)
+      setForm({
+        customer_name: inv.customer_name || "",
+        customer_company: inv.customer_company || "",
+        customer_contact_person: inv.customer_contact_person || "",
+        customer_phone: inv.customer_phone || "",
+        customer_email: inv.customer_email || "",
+        invoice_date: inv.invoice_date || todayStr(),
+        valid_until: inv.valid_until || "",
+        prepared_by: inv.prepared_by || "",
+        reference: inv.reference || "",
+        notes: inv.notes || "",
+        paid: String(inv.paid ?? 0),
+      })
+      setItems(rows.length
+        ? rows.map(r => ({ key: r.id, description: r.description, quantity: String(r.quantity), unit_price: String(r.unit_price) }))
+        : [emptyInvoiceItem()])
+      setView("form")
+    } catch (e) {
+      showToast(t("invoiceLoadError", { error: e.message }), "error")
+    } finally {
+      setRowBusyId(null)
+    }
+  }
+
+  async function handleDelete(inv) {
+    if (!confirm(t("confirmDeleteInvoice"))) return
+    setRowBusyId(inv.id)
+    try {
+      const { error } = await supabase.from("invoices").delete().eq("id", inv.id)
+      if (error) throw error
+      setInvoices(prev => prev.filter(i => i.id !== inv.id))
+      showToast(t("invoiceDeletedToast"))
+    } catch (e) {
+      showToast(t("invoiceDeleteError", { error: e.message }), "error")
+    } finally {
+      setRowBusyId(null)
+    }
+  }
+
+  async function openPreview(inv) {
+    setRowBusyId(inv.id)
+    try {
+      const rows = await fetchInvoiceItemsFor(inv.id)
+      const { url } = await getInvoicePdfBlobUrl(inv, rows)
+      setPreview({ invoice: inv, url })
+    } catch (e) {
+      showToast(t("invoiceLoadError", { error: e.message }), "error")
+    } finally {
+      setRowBusyId(null)
+    }
+  }
+
+  async function handleDownload(inv) {
+    setRowBusyId(inv.id)
+    try {
+      const rows = await fetchInvoiceItemsFor(inv.id)
+      await downloadInvoicePdf(inv, rows)
+    } catch (e) {
+      showToast(t("invoiceLoadError", { error: e.message }), "error")
+    } finally {
+      setRowBusyId(null)
+    }
+  }
+
+  function handlePrint(iframeRef) {
+    try {
+      const win = iframeRef.current?.contentWindow
+      if (win) {
+        win.focus()
+        win.print()
+        return
+      }
+    } catch (err) {
+      console.error("[Invoices] iframe print failed:", err.message)
+    }
+    if (preview?.url) window.open(preview.url, "_blank")
+  }
+
+  function updateItem(key, field, value) {
+    setItems(prev => prev.map(it => it.key === key ? { ...it, [field]: value } : it))
+  }
+  function removeItem(key) {
+    setItems(prev => prev.length > 1 ? prev.filter(it => it.key !== key) : prev)
+  }
+  function addItem() {
+    setItems(prev => [...prev, emptyInvoiceItem()])
+  }
+
+  const grandTotal = items.reduce((sum, it) => sum + (Number(it.quantity) || 0) * (Number(it.unit_price) || 0), 0)
+  const paidNum = Number(form.paid) || 0
+  const amountLeft = grandTotal - paidNum
+
+  async function handleSave() {
+    if (!isOwner) return
+    if (!form.customer_name.trim()) { showToast(t("customerNameRequiredError"), "error"); return }
+    const validItems = items.filter(it => it.description.trim())
+    if (validItems.length === 0) { showToast(t("atLeastOneItemRequired"), "error"); return }
+
+    setSaving(true)
+    const payload = {
+      customer_name: form.customer_name.trim(),
+      customer_company: form.customer_company.trim() || null,
+      customer_contact_person: form.customer_contact_person.trim() || null,
+      customer_phone: form.customer_phone.trim() || null,
+      customer_email: form.customer_email.trim() || null,
+      invoice_date: form.invoice_date || todayStr(),
+      valid_until: form.valid_until || null,
+      prepared_by: form.prepared_by.trim() || null,
+      reference: form.reference.trim() || null,
+      notes: form.notes.trim() || null,
+      grand_total: grandTotal,
+      paid: paidNum,
+    }
+
+    try {
+      let savedNumber
+      if (editingId) {
+        const { error: updErr } = await supabase.from("invoices").update(payload).eq("id", editingId)
+        if (updErr) throw updErr
+        const { error: delErr } = await supabase.from("invoice_items").delete().eq("invoice_id", editingId)
+        if (delErr) throw delErr
+        const itemsPayload = validItems.map((it, i) => ({
+          invoice_id: editingId,
+          description: it.description.trim(),
+          quantity: Number(it.quantity) || 0,
+          unit_price: Number(it.unit_price) || 0,
+          sort_order: i,
+        }))
+        const { error: insErr } = await supabase.from("invoice_items").insert(itemsPayload)
+        if (insErr) throw insErr
+        savedNumber = invoices.find(i => i.id === editingId)?.invoice_number
+      } else {
+        const { data, error: insErr } = await supabase
+          .from("invoices")
+          .insert([{ ...payload, created_by: user.id, created_by_name: displayName }])
+          .select()
+          .single()
+        if (insErr) throw insErr
+        const itemsPayload = validItems.map((it, i) => ({
+          invoice_id: data.id,
+          description: it.description.trim(),
+          quantity: Number(it.quantity) || 0,
+          unit_price: Number(it.unit_price) || 0,
+          sort_order: i,
+        }))
+        const { error: itemsErr } = await supabase.from("invoice_items").insert(itemsPayload)
+        if (itemsErr) {
+          // Don't leave a zero-item invoice header behind -- undo the
+          // header insert so a failed save doesn't burn an invoice number
+          // silently or show up as an empty invoice in the list.
+          await supabase.from("invoices").delete().eq("id", data.id)
+          throw itemsErr
+        }
+        savedNumber = data.invoice_number
+      }
+
+      await loadInvoices()
+      setView("list")
+      showToast(t(editingId ? "invoiceUpdatedToast" : "invoiceCreatedToast", { number: savedNumber }))
+    } catch (e) {
+      showToast(t("invoiceSaveError", { error: e.message }), "error")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (loading) return <p style={{ color:C.textFaint, fontSize:13 }}>{t("loadingLabel")}</p>
+
+  if (view === "form") {
+    return (
+      <div>
+        <button
+          type="button"
+          onClick={() => setView("list")}
+          className="stv-btn stv-btn-ghost"
+          style={{ background:"none", border:"none", color:C.textSub, fontSize:12.5, fontWeight:600, cursor:"pointer", padding:0, marginBottom:16, fontFamily:FONT }}
+        >
+          {t("backToInvoicesBtn")}
+        </button>
+
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(320px, 1fr))", gap:16, marginBottom:16 }}>
+          <div style={panelS}>
+            <h2 style={fTi}>{t("customerDetailsSection")}</h2>
+            <div style={{ display:"grid", gap:14 }}>
+              <div>
+                <label style={lS} htmlFor="inv-customer-name">{t("invCustomerNameLabel")} *</label>
+                <input id="inv-customer-name" placeholder={t("invCustomerNamePlaceholder")} value={form.customer_name} onChange={e => setForm(f => ({ ...f, customer_name:e.target.value }))} style={iS} />
+              </div>
+              <div>
+                <label style={lS} htmlFor="inv-customer-company">{t("invCustomerCompanyLabel")}</label>
+                <input id="inv-customer-company" placeholder={t("invCustomerCompanyPlaceholder")} value={form.customer_company} onChange={e => setForm(f => ({ ...f, customer_company:e.target.value }))} style={iS} />
+              </div>
+              <div>
+                <label style={lS} htmlFor="inv-contact-person">{t("invContactPersonLabel")}</label>
+                <input id="inv-contact-person" placeholder={t("invContactPersonPlaceholder")} value={form.customer_contact_person} onChange={e => setForm(f => ({ ...f, customer_contact_person:e.target.value }))} style={iS} />
+              </div>
+              <div>
+                <label style={lS} htmlFor="inv-customer-phone">{t("invCustomerPhoneLabel")}</label>
+                <input id="inv-customer-phone" type="tel" placeholder={t("invCustomerPhonePlaceholder")} value={form.customer_phone} onChange={e => setForm(f => ({ ...f, customer_phone:e.target.value }))} style={iS} />
+              </div>
+              <div>
+                <label style={lS} htmlFor="inv-customer-email">{t("invCustomerEmailLabel")}</label>
+                <input id="inv-customer-email" type="email" placeholder={t("invCustomerEmailPlaceholder")} value={form.customer_email} onChange={e => setForm(f => ({ ...f, customer_email:e.target.value }))} style={iS} />
+              </div>
+            </div>
+          </div>
+
+          <div style={panelS}>
+            <h2 style={fTi}>{t("invoiceDetailsSection")}</h2>
+            <div style={{ display:"grid", gap:14 }}>
+              <div>
+                <label style={lS}>{t("invoiceNumberLabel")}</label>
+                <div style={{ ...iS, background:C.bg, color:C.textFaint, display:"flex", alignItems:"center" }}>
+                  {editingId ? (invoices.find(i => i.id === editingId)?.invoice_number || "—") : t("invoiceNumberAutoHint")}
+                </div>
+              </div>
+              <div>
+                <label style={lS} htmlFor="inv-date">{t("invoiceDateLabel")}</label>
+                <input id="inv-date" type="date" value={form.invoice_date} onChange={e => setForm(f => ({ ...f, invoice_date:e.target.value }))} style={iS} />
+              </div>
+              <div>
+                <label style={lS} htmlFor="inv-valid-until">{t("validUntilLabel")}</label>
+                <input id="inv-valid-until" type="date" value={form.valid_until} onChange={e => setForm(f => ({ ...f, valid_until:e.target.value }))} style={iS} />
+              </div>
+              <div>
+                <label style={lS} htmlFor="inv-prepared-by">{t("preparedByLabel")}</label>
+                <input id="inv-prepared-by" value={form.prepared_by} onChange={e => setForm(f => ({ ...f, prepared_by:e.target.value }))} style={iS} />
+              </div>
+              <div>
+                <label style={lS} htmlFor="inv-reference">{t("referenceLabel")}</label>
+                <input id="inv-reference" placeholder={t("referencePlaceholder")} value={form.reference} onChange={e => setForm(f => ({ ...f, reference:e.target.value }))} style={iS} />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div style={{ ...panelS, marginBottom:16 }}>
+          <h2 style={fTi}>{t("itemsSectionTitle")}</h2>
+          <div style={{ overflowX:"auto", WebkitOverflowScrolling:"touch" }}>
+            <table style={{ width:"100%", minWidth:640, borderCollapse:"collapse" }}>
+              <thead>
+                <tr style={{ borderBottom:`1.5px solid ${C.border}` }}>
+                  {[t("itemDescriptionLabel"), t("itemQuantityLabel"), t("itemUnitPriceLabel"), t("itemTotalLabel"), ""].map((h, i) => (
+                    <th key={i} scope="col" style={{ textAlign: i===0 ? "left" : "right", padding:"0 8px 10px 0", fontSize:10.5, color:C.textFaint, fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {items.map(it => {
+                  const lineTotal = (Number(it.quantity) || 0) * (Number(it.unit_price) || 0)
+                  return (
+                    <tr key={it.key} style={{ borderBottom:`1px solid ${C.bg}` }}>
+                      <td style={{ ...tS, paddingRight:8 }}>
+                        <input placeholder={t("itemDescriptionPlaceholder")} value={it.description} onChange={e => updateItem(it.key, "description", e.target.value)} style={iS} />
+                      </td>
+                      <td style={{ ...tS, paddingRight:8, width:100 }}>
+                        <input type="number" min="0" step="1" value={it.quantity} onChange={e => updateItem(it.key, "quantity", e.target.value)} style={{ ...iS, textAlign:"right" }} />
+                      </td>
+                      <td style={{ ...tS, paddingRight:8, width:150 }}>
+                        <input type="number" min="0" step="1" value={it.unit_price} onChange={e => updateItem(it.key, "unit_price", e.target.value)} style={{ ...iS, textAlign:"right" }} />
+                      </td>
+                      <td style={{ ...tS, textAlign:"right", fontWeight:700, width:140 }}>{TZS(lineTotal)}</td>
+                      <td style={{ ...tS, width:36 }}>
+                        <button
+                          type="button"
+                          onClick={() => removeItem(it.key)}
+                          aria-label={t("removeItemLabel")}
+                          disabled={items.length <= 1}
+                          style={{ background:"none", border:"none", cursor: items.length > 1 ? "pointer" : "default", opacity: items.length > 1 ? 1 : 0.35, fontSize:16, color:C.warnStrong, padding:4 }}
+                        >
+                          🗑
+                        </button>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+          <button
+            type="button"
+            onClick={addItem}
+            className="stv-btn stv-btn-secondary"
+            style={{ marginTop:14, padding:"9px 16px", borderRadius:RADIUS.sm, border:`1.5px solid ${C.border}`, background:C.surface, color:C.text, cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13 }}
+          >
+            {t("addItemBtn")}
+          </button>
+        </div>
+
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(320px, 1fr))", gap:16, marginBottom:16 }}>
+          <div style={panelS}>
+            <h2 style={fTi}>{t("notesLabel")}</h2>
+            <textarea
+              rows={5}
+              placeholder={t("notesPlaceholder")}
+              value={form.notes}
+              onChange={e => setForm(f => ({ ...f, notes:e.target.value }))}
+              style={{ ...iS, resize:"vertical", fontFamily:FONT }}
+            />
+          </div>
+
+          <div style={panelS}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", padding:"6px 0" }}>
+              <span style={{ fontSize:13, color:C.textSub, fontWeight:600 }}>{t("grandTotalLabel")}</span>
+              <span style={{ fontSize:17, fontWeight:800, color:C.text }}>{TZS(grandTotal)}</span>
+            </div>
+            <div style={{ borderTop:`1px dashed ${C.borderStrong}`, margin:"8px 0" }} />
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"6px 0", gap:12 }}>
+              <label htmlFor="inv-paid" style={{ fontSize:13, color:C.textSub, fontWeight:600 }}>{t("paidLabel")}</label>
+              <input id="inv-paid" type="number" min="0" step="1" value={form.paid} onChange={e => setForm(f => ({ ...f, paid:e.target.value }))} style={{ ...iS, width:160, textAlign:"right" }} />
+            </div>
+            <div style={{ borderTop:`1px dashed ${C.borderStrong}`, margin:"8px 0" }} />
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", padding:"6px 0" }}>
+              <span style={{ fontSize:13.5, color:C.text, fontWeight:700 }}>{t("amountLeftLabel")}</span>
+              <span style={{ fontSize:19, fontWeight:800, color: amountLeft > 0 ? C.warnStrong : C.accentStrong }}>{TZS(amountLeft)}</span>
+            </div>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          onClick={handleSave}
+          disabled={saving}
+          className="stv-btn stv-btn-primary"
+          style={{ ...sB, width:"auto", padding:"13px 30px", opacity: saving ? 0.7 : 1 }}
+        >
+          {saving ? t("savingInvoiceBtn") : t("saveInvoiceBtn")}
+        </button>
+
+        {preview && (
+          <InvoicePreviewModal
+            invoice={preview.invoice}
+            url={preview.url}
+            onClose={() => setPreview(null)}
+            onPrint={handlePrint}
+            onDownload={() => handleDownload(preview.invoice)}
+          />
+        )}
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:SPACE.xl, flexWrap:"wrap", gap:12 }}>
+        <div>
+          <h1 style={{ ...pT, marginBottom:4 }}>{t("invoicesTitle")}</h1>
+          <p style={{ margin:0, color:C.textFaint, fontSize:13 }}>{t("invoicesSubtitle")}</p>
+        </div>
+        {isOwner && (
+          <button
+            type="button"
+            onClick={startNew}
+            className="stv-btn stv-btn-primary"
+            style={{ ...sB, width:"auto", padding:"10px 18px", fontSize:13 }}
+          >
+            {t("newInvoiceBtn")}
+          </button>
+        )}
+      </div>
+
+      <div style={{ marginBottom:16, maxWidth:360 }}>
+        <input
+          placeholder={t("searchInvoicesPlaceholder")}
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          style={iS}
+          aria-label={t("searchInvoicesPlaceholder")}
+        />
+      </div>
+
+      <div style={panelS}>
+        <div style={{ overflowX:"auto", WebkitOverflowScrolling:"touch" }}>
+          <table className="stv-table" style={{ width:"100%", minWidth:720, borderCollapse:"collapse" }}>
+            <thead>
+              <tr style={{ borderBottom:`1.5px solid ${C.border}` }}>
+                {[t("colInvoiceNumber"), t("colCustomer"), t("colDate"), t("colGrandTotal"), t("colPaid"), t("colAmountLeft"), t("colActions")].map((h, i) => (
+                  <th key={i} scope="col" style={{ textAlign: i>=3 ? "right" : "left", padding:"0 12px 10px 0", fontSize:10.5, color:C.textFaint, fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map(inv => {
+                const busy = rowBusyId === inv.id
+                return (
+                  <tr key={inv.id} style={{ borderBottom:`1px solid ${C.bg}` }}>
+                    <td style={{ ...tS, fontWeight:700 }}>{inv.invoice_number}</td>
+                    <td style={tS}>{inv.customer_name}</td>
+                    <td style={tS}>{formatDMY(inv.invoice_date)}</td>
+                    <td style={{ ...tS, textAlign:"right", fontWeight:600 }}>{TZS(inv.grand_total)}</td>
+                    <td style={{ ...tS, textAlign:"right" }}>{TZS(inv.paid)}</td>
+                    <td style={{ ...tS, textAlign:"right", fontWeight:700, color: Number(inv.amount_left) > 0 ? C.warnStrong : C.accentStrong }}>{TZS(inv.amount_left)}</td>
+                    <td style={{ ...tS, textAlign:"right", whiteSpace:"nowrap" }}>
+                      <button
+                        type="button"
+                        onClick={() => openPreview(inv)}
+                        disabled={busy}
+                        title={t("viewPdfBtn")}
+                        style={{ background:"none", border:"none", cursor:"pointer", color:C.accentStrong, fontWeight:600, fontSize:12.5, padding:"4px 6px", opacity: busy ? 0.5 : 1 }}
+                      >
+                        {t("viewPdfBtn")}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDownload(inv)}
+                        disabled={busy}
+                        title={t("downloadPdfBtn")}
+                        style={{ background:"none", border:"none", cursor:"pointer", color:C.accentStrong, fontWeight:600, fontSize:12.5, padding:"4px 6px", opacity: busy ? 0.5 : 1 }}
+                      >
+                        ⭳
+                      </button>
+                      {isOwner && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => startEdit(inv)}
+                            disabled={busy}
+                            title={t("editInvoiceBtn")}
+                            style={{ background:"none", border:"none", cursor:"pointer", color:C.textSub, fontWeight:600, fontSize:12.5, padding:"4px 6px", opacity: busy ? 0.5 : 1 }}
+                          >
+                            {t("editInvoiceBtn")}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDelete(inv)}
+                            disabled={busy}
+                            title={t("deleteInvoiceBtn")}
+                            style={{ background:"none", border:"none", cursor:"pointer", color:C.warnStrong, fontWeight:600, fontSize:12.5, padding:"4px 6px", opacity: busy ? 0.5 : 1 }}
+                          >
+                            {t("deleteInvoiceBtn")}
+                          </button>
+                        </>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
+              {filtered.length === 0 && (
+                <tr>
+                  <td colSpan={7} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>
+                    {loadErr ? t("invoiceLoadError", { error: loadErr }) : t("noInvoicesFound")}
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {preview && (
+        <InvoicePreviewModal
+          invoice={preview.invoice}
+          url={preview.url}
+          onClose={() => setPreview(null)}
+          onPrint={handlePrint}
+          onDownload={() => handleDownload(preview.invoice)}
+        />
+      )}
     </div>
   )
 }
