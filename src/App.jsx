@@ -1532,6 +1532,7 @@ const CAT_KEYS = {
 function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner }) {
   const { t } = useLanguage()
   const [form, setForm] = useState({ category:EXPENSE_CATS[0], item:"", cost:"", date:todayStr(), time:nowTimeStr() })
+  const [filter, setFilter] = useState({ category:"All", from:"", to:"" })
   const [busy, setBusy] = useState(false)
 
   const submit = async () => {
@@ -1580,8 +1581,20 @@ function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner }) {
     showToast(t("expenseDeleted"))
   }
 
-  const sorted = [...expenses].sort((a, b) => b.date?.localeCompare(a.date))
-  const total  = expenses.reduce((a, b) => a + Number(b.cost || 0), 0)
+  // Same date-range convention as SalesPage's `filtered` above: expenses.date
+  // is a full ISO timestamp string ("YYYY-MM-DDTHH:MM:SS.sssZ"), while the
+  // <input type="date"> filter values are plain "YYYY-MM-DD". Comparing them
+  // as strings works because ISO timestamps sort lexicographically, and
+  // appending "T99" to `to` makes it compare greater than any actual time of
+  // day on that date (a real hour is at most "T23"), so the To-date's own
+  // expenses are included (inclusive) without shifting anything through a
+  // Date object / timezone.
+  const filtered = expenses
+    .filter(e => filter.category === "All" || e.category === filter.category)
+    .filter(e => !filter.from || e.date >= filter.from)
+    .filter(e => !filter.to   || e.date <= filter.to + "T99")
+    .sort((a, b) => b.date?.localeCompare(a.date))
+  const total = filtered.reduce((a, b) => a + Number(b.cost || 0), 0)
 
   return (
     <div>
@@ -1623,6 +1636,17 @@ function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner }) {
         {isOwner && (
           <div style={{ flex:2, minWidth:0 }}>
             <div style={panelS}>
+              {/* Filters */}
+              <div style={{ display:"flex", gap:SPACE.sm, marginBottom:SPACE.md, flexWrap:"wrap", alignItems:"center" }}>
+                <select aria-label={t("filterByCategory")} value={filter.category} onChange={e => setFilter(f => ({ ...f, category:e.target.value }))} style={seS}>
+                  <option value="All">{t("allCategories")}</option>
+                  {EXPENSE_CATS.map(c => <option key={c} value={c}>{t(CAT_KEYS[c] || c)}</option>)}
+                </select>
+                <input aria-label={t("fromDate")} type="date" value={filter.from} onChange={e => setFilter(f => ({ ...f, from:e.target.value }))} style={seS} />
+                <input aria-label={t("toDate")} type="date" value={filter.to}   onChange={e => setFilter(f => ({ ...f, to:e.target.value }))}   style={seS} />
+                <button type="button" onClick={() => setFilter({ category:"All", from:"", to:"" })} className="stv-btn stv-btn-ghost" aria-label={t("reset")} style={{ ...seS, background:C.bg, border:"none", cursor:"pointer" }}>{t("reset")}</button>
+              </div>
+
               <div style={{ fontWeight:700, color:C.text, marginBottom:SPACE.md, fontSize:13 }}>
                 {t("total")}: {TZS(total)}
               </div>
@@ -1636,7 +1660,7 @@ function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {sorted.slice(0, 50).map(e => (
+                  {filtered.slice(0, 50).map(e => (
                     <tr key={e.id} style={{ borderBottom:`1px solid ${C.bg}` }}>
                       <td style={tS}>{e.date?.slice(0, 10)}</td>
                       <td style={tS}>{/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(e.date || "") ? e.date.slice(11, 16) : "—"}</td>
@@ -1655,7 +1679,7 @@ function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner }) {
                       </td>
                     </tr>
                   ))}
-                  {sorted.length === 0 && (
+                  {filtered.length === 0 && (
                     <tr><td colSpan={6} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>{t("noExpensesYet")}</td></tr>
                   )}
                 </tbody>
