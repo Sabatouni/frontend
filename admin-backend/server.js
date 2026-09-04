@@ -117,10 +117,26 @@ app.post("/admin/users", requireAdmin, async (req, res) => {
   });
 
   if (grantErr) {
-    // Don't hide this: the account exists but has no access yet.
-    return res.status(207).json({
-      warning: `User created, but the role grant failed (${grantErr.message}). Assign a role manually from the Users page.`,
-      user: data.user,
+    // Creation + initial grant must be atomic from the caller's point of
+    // view: a Supabase Auth account with no stv-pos grant is a user who can
+    // sign in and land on "you don't have access", with no record on the
+    // Users page explaining why (their stv_pos_role just reads null, same
+    // as anyone who was deliberately revoked). Rather than returning a
+    // partial-success response and hoping whoever reads it notices the
+    // warning field (fetch() treats any 2xx, including 207, as ok -- a
+    // frontend checking only res.ok would silently report this as a plain
+    // "user created" success), we compensate by deleting the auth account
+    // we just created and failing the whole request clearly.
+    const { error: rollbackErr } = await supabase.auth.admin.deleteUser(data.user.id);
+    if (rollbackErr) {
+      // Couldn't even undo it -- this IS now a genuinely orphaned account.
+      // Say so loudly rather than hiding it behind a 2xx status.
+      return res.status(500).json({
+        error: `Created ${email}, but granting ${roleSlug} access failed (${grantErr.message}) and automatic cleanup also failed (${rollbackErr.message}). This account needs manual review in Supabase.`,
+      });
+    }
+    return res.status(400).json({
+      error: `Could not grant ${roleSlug} access (${grantErr.message}), so the account was not created. Please try again.`,
     });
   }
 
