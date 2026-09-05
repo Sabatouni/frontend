@@ -416,6 +416,23 @@ export const translations = {
     saveInvoiceBtn: "Save Invoice",
     savingInvoiceBtn: "Saving…",
     invoicePreparedByFallback: "Staff",
+
+    // Swahili Tent Itinerary
+    navItinerary: "Itinerary",
+    itinSaving: "Saving…",
+    itinUnsavedChanges: "Unsaved changes",
+    itinSaved: "Saved",
+    confirmDeleteItinerary: "Delete this itinerary? This cannot be undone.",
+    itinGuestTypeCouple: "Couple",
+    itinGuestTypeFamily: "Family",
+    itinGuestTypeFriends: "Friends",
+    itinGuestTypeSolo: "Solo",
+    itinGuestTypeCorporate: "Corporate",
+    itinGuestTypeBirthday: "Birthday",
+    itinGuestTypeAnniversary: "Anniversary",
+    itinGuestTypeHoneymoon: "Honeymoon",
+    itinGuestTypeWedding: "Wedding",
+    itinGuestTypeCustom: "Custom",
   },
 
   sw: {
@@ -809,6 +826,23 @@ export const translations = {
     saveInvoiceBtn: "Hifadhi Ankara",
     savingInvoiceBtn: "Inahifadhi…",
     invoicePreparedByFallback: "Mfanyakazi",
+
+    // Swahili Tent Itinerary
+    navItinerary: "Ratiba",
+    itinSaving: "Inahifadhi…",
+    itinUnsavedChanges: "Mabadiliko hayajahifadhiwa",
+    itinSaved: "Imehifadhiwa",
+    confirmDeleteItinerary: "Ungependa kufuta ratiba hii? Haiwezi kurudishwa.",
+    itinGuestTypeCouple: "Wanandoa",
+    itinGuestTypeFamily: "Familia",
+    itinGuestTypeFriends: "Marafiki",
+    itinGuestTypeSolo: "Peke Yake",
+    itinGuestTypeCorporate: "Kampuni",
+    itinGuestTypeBirthday: "Siku ya Kuzaliwa",
+    itinGuestTypeAnniversary: "Miaka ya Ndoa",
+    itinGuestTypeHoneymoon: "Fungate",
+    itinGuestTypeWedding: "Harusi",
+    itinGuestTypeCustom: "Nyingine",
   },
 };
 

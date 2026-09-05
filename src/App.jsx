@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { Component, useEffect, useMemo, useRef, useState } from "react"
 import {
   Bar,
   BarChart,
@@ -25,6 +25,20 @@ import { supabase } from "./api/supabaseClient"
 import { useAuth } from "./context/AuthContext"
 import { useLanguage } from "./i18n"
 import { downloadInvoicePdf, getInvoicePdfBlobUrl } from "./lib/invoicePdf"
+import { downloadItineraryPdf, getItineraryPdfBlobUrl, getItineraryPdfBlob } from "./lib/itineraryPdf"
+import {
+  GUEST_TYPES as ITIN_GUEST_TYPES,
+  emptyItineraryContent,
+  nightsBetween as itinNightsBetween,
+  addDays as itinAddDays,
+  buildWelcomeText as buildItinWelcomeText,
+  generateDraftDays,
+  suggestMediaForQuery,
+  suggestSpecialTouches,
+  libraryItemToActivity,
+  stripInternalFields,
+  debounce as itinDebounce,
+} from "./lib/itineraryContent"
 
 /* ── CONFIG ─────────────────────────────────────────────── */
 const LOGO        = "/logo.png"
@@ -259,6 +273,16 @@ export default function App() {
           )}
           {page === "invoices" && (
             <InvoicesPage user={user} isOwner={isOwner} displayName={displayName} showToast={showToast} />
+          )}
+          {/* Swahili Tent Itinerary -- Owner/Admin only. This is layer 2 of
+              this module's defense-in-depth access control (see Sidebar's
+              ownerNav for layer 1, ItinerariesPage's own isOwner check for
+              layer 3, and the stv_itinerary_* RLS policies for layer 4) --
+              a Worker's `page` state can never render this block even if
+              set directly, since `isOwner` here is the same real, RLS-
+              backed value from AuthContext, not a client-trusted flag. */}
+          {page === "itinerary" && isOwner && (
+            <ItinerariesPage user={user} isOwner={isOwner} displayName={displayName} showToast={showToast} />
           )}
           {page === "reports" && isOwner && (
             <ReportsPage sales={sales} expenses={expenses} services={services} showToast={showToast} />
@@ -556,6 +580,7 @@ function Sidebar({ page, setPage, isOwner, displayName, onLogout, open, onClose 
     { id:"expenses",   label:t("navExpenses"),   icon:"🧾" },
     { id:"inventory",  label:t("navInventory"),  icon:"📦" },
     { id:"invoices",   label:t("navInvoices"),   icon:"📑" },
+    { id:"itinerary",  label:t("navItinerary"),  icon:"🧳" },
     { id:"reports",    label:t("navReports"),    icon:"📈" },
     { id:"users",      label:t("navUsers"),      icon:"👥" },
   ]
@@ -4130,3 +4155,2243 @@ const sB    = { width:"100%", padding:"13px", background:C.accentStrong, color:"
 const tS    = { padding:"12px 0", paddingRight:12, fontSize:13, color:C.text, verticalAlign:"middle" }
 const pT    = { margin:"0 0 6px", fontFamily:FONT, fontWeight:700, fontSize:"clamp(19px, 3.4vw, 24px)", color:C.text, letterSpacing:"-0.01em" }
 const panelS = { background:C.surface, borderRadius:RADIUS.md, padding:SPACE.xl, border:`1px solid ${C.border}`, boxShadow:SHADOW.card }
+
+
+/* ══════════════════════════════════════════════════════════════════════
+   SWAHILI TENT ITINERARY -- guest-facing Experience Proposal / Itinerary
+   generator. Owner/Admin only (enforced by App()'s route gate above AND
+   the RLS policies on every stv_itinerary_* table -- see the isOwner check
+   at the top of ItinerariesPage below for a third, redundant layer).
+
+   Entirely new, additive code. Does not read from or write to
+   invoices/invoice_items, does not import anything from InvoicesPage, and
+   does not modify any existing table. The only cross-module reuse is the
+   existing design tokens/style constants already declared in this file
+   (C, RADIUS, SPACE, FONT, panelS, seS, iS, lS, fC, fTi, sB, tS, pT, TZS,
+   todayStr) and the existing modal/table visual conventions already used
+   by InventoryPage/InvoicesPage, so this module looks native to the POS.
+   ══════════════════════════════════════════════════════════════════════ */
+
+const ITIN_BUCKET = "stv-itinerary"
+
+const ITIN_GUEST_TYPE_KEYS = {
+  couple: "itinGuestTypeCouple", family: "itinGuestTypeFamily", friends: "itinGuestTypeFriends",
+  solo: "itinGuestTypeSolo", corporate: "itinGuestTypeCorporate", birthday: "itinGuestTypeBirthday",
+  anniversary: "itinGuestTypeAnniversary", honeymoon: "itinGuestTypeHoneymoon",
+  wedding: "itinGuestTypeWedding", custom: "itinGuestTypeCustom",
+}
+
+const ITIN_MEDIA_CATEGORIES = [
+  "Tents","Samawati","Ulimwengu","Accommodation","Pool","Restaurant","Food","Go-Kart",
+  "Paintball","Quad Bike","Park","Events","Couples","Families","Excursions","Zanzibar",
+  "Beaches","Staff","Other",
+]
+
+function reorderList(list, from, to) {
+  const copy = list.slice()
+  const [moved] = copy.splice(from, 1)
+  copy.splice(to, 0, moved)
+  return copy
+}
+
+async function getItinSignedUrl(path) {
+  if (!path) return null
+  const { data, error } = await supabase.storage.from(ITIN_BUCKET).createSignedUrl(path, 3600)
+  if (error) { console.error("[Itinerary] signed URL error:", error.message); return null }
+  return data?.signedUrl || null
+}
+
+function randomFileSuffix() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+}
+
+// Builds the guest-safe version of an itinerary's content: internal/staff
+// fields stripped (via stripInternalFields, the single choke point -- see
+// itineraryContent.js), and every imageId reference resolved to a real,
+// short-lived signed URL. Shared by ItineraryEditorPage (live editing
+// session, already has mediaList in memory) and ItinerariesPage (row-level
+// Preview/Download actions from the list, before a full editor is open) so
+// this resolution logic exists in exactly one place.
+async function resolveGuestContent(rawContent, mediaList) {
+  const guestSafe = stripInternalFields(rawContent)
+  const mediaById = Object.fromEntries(mediaList.map(m => [m.id, m]))
+  async function resolveImg(node) {
+    if (node && typeof node === "object" && node.imageId) {
+      const m = mediaById[node.imageId]
+      if (m) node.imageUrl = await getItinSignedUrl(m.storage_path)
+    }
+    return node
+  }
+  for (const day of guestSafe.days || []) {
+    for (const act of day.activities || []) await resolveImg(act)
+    if (Array.isArray(day.photoIds) && day.photoIds.length) {
+      const urls = await Promise.all(day.photoIds.map(async id => {
+        const m = mediaById[id]
+        return m ? await getItinSignedUrl(m.storage_path) : null
+      }))
+      day.photoUrls = urls.filter(Boolean)
+    }
+  }
+  for (const exp of guestSafe.experiences || []) await resolveImg(exp)
+  for (const item of guestSafe.stvExperience?.items || []) await resolveImg(item)
+  if (guestSafe.stay?.heroImageId) {
+    const m = mediaById[guestSafe.stay.heroImageId]
+    if (m) guestSafe.stay.heroImageUrl = await getItinSignedUrl(m.storage_path)
+  }
+  return guestSafe
+}
+
+// Generates a new PDF version for an itinerary: uploads it to the private
+// stv-itinerary bucket, records a stv_itinerary_versions snapshot, marks the
+// itinerary "final" at the new version, and triggers the browser download.
+// Shared by ItineraryEditorPage's "Generate & Download" action and
+// ItinerariesPage's row-level Download action so both go through one path.
+// Returns the {version, status, pdf_storage_path} patch to merge into local
+// state -- callers own their own state, this function does not set any.
+async function generateItineraryPdf(itinerary, mediaList, user) {
+  const guestSafe = await resolveGuestContent(itinerary.content || {}, mediaList)
+  const nextVersion = (itinerary.version || 1) + 1
+  const path = `documents/${itinerary.id}/v${nextVersion}.pdf`
+  const blob = await getItineraryPdfBlob(itinerary, guestSafe)
+  const { error: upErr } = await supabase.storage.from(ITIN_BUCKET).upload(path, blob, { upsert: true, contentType: "application/pdf" })
+  if (upErr) throw upErr
+  await supabase.from("stv_itinerary_versions").insert([{
+    itinerary_id: itinerary.id, version: nextVersion, content: itinerary.content, pdf_storage_path: path, created_by: user?.id || null,
+  }])
+  const pdf_generated_at = new Date().toISOString()
+  const { error: updErr } = await supabase.from("stv_itineraries").update({
+    version: nextVersion, status: "final", pdf_storage_path: path, pdf_generated_at, updated_by: user?.id || null,
+  }).eq("id", itinerary.id)
+  if (updErr) throw updErr
+  await downloadItineraryPdf(itinerary, guestSafe)
+  return { version: nextVersion, status: "final", pdf_storage_path: path, pdf_generated_at }
+}
+
+/* ── SMALL SHARED PIECES ─────────────────────────────────── */
+
+function ItinSavePill({ state }) {
+  const { t } = useLanguage()
+  const label = state === "saving" ? t("itinSaving")
+    : state === "unsaved" ? t("itinUnsavedChanges")
+    : state === "saved" ? t("itinSaved")
+    : ""
+  if (!label) return null
+  return (
+    <span style={{
+      fontSize:11.5, fontWeight:600, padding:"4px 10px", borderRadius:RADIUS.pill,
+      background: state === "unsaved" ? C.warnSoft : C.accentSoft,
+      color: state === "unsaved" ? C.warnStrong : C.accentStrong,
+    }}>
+      {label}
+    </span>
+  )
+}
+
+function BulletListEditor({ items, onChange, placeholder }) {
+  return (
+    <div>
+      {items.map((val, i) => (
+        <div key={i} style={{ display:"flex", gap:8, marginBottom:8, alignItems:"center" }}>
+          <input
+            value={val}
+            placeholder={placeholder}
+            onChange={e => onChange(items.map((v, idx) => idx === i ? e.target.value : v))}
+            style={{ ...iS }}
+          />
+          <button type="button" onClick={() => onChange(items.filter((_, idx) => idx !== i))}
+            className="stv-btn stv-btn-danger" style={{ background:C.warnSoft, color:C.warnStrong, border:"none", padding:"9px 11px", borderRadius:RADIUS.sm, fontSize:12, cursor:"pointer", fontWeight:600, flexShrink:0 }}>
+            ✕
+          </button>
+        </div>
+      ))}
+      <button type="button" onClick={() => onChange([...items, ""])} className="stv-btn stv-btn-ghost"
+        style={{ background:"none", border:`1.5px dashed ${C.borderStrong}`, color:C.textSub, borderRadius:RADIUS.sm, padding:"7px 12px", fontSize:12, fontWeight:500, cursor:"pointer" }}>
+        ＋ Add
+      </button>
+    </div>
+  )
+}
+
+// Ordered list of real, admin-entered destination names that becomes the
+// PDF's generated route/flow diagram (see itineraryPdf.js's drawRouteMap).
+// Unlike BulletListEditor this list is drag-reorderable -- order is the
+// whole point of a route -- and carries its own enable/disable toggle so
+// the admin can turn the section off entirely without losing the list.
+// No coordinates, no map API: this only ever handles the destination names
+// the admin actually types in.
+function RouteStopsEditor({ stops, enabled, onChangeStops, onChangeEnabled }) {
+  const dragFrom = useRef(null)
+
+  function update(idx, val) {
+    onChangeStops(stops.map((s, i) => i === idx ? val : s))
+  }
+  function remove(idx) {
+    onChangeStops(stops.filter((_, i) => i !== idx))
+  }
+  function add() {
+    onChangeStops([...stops, ""])
+  }
+  function dragProps(idx) {
+    return {
+      onDragStart: () => { dragFrom.current = idx },
+      onDragOver: e => e.preventDefault(),
+      onDrop: e => {
+        e.preventDefault()
+        if (dragFrom.current === null || dragFrom.current === idx) return
+        onChangeStops(reorderList(stops, dragFrom.current, idx))
+        dragFrom.current = null
+      },
+    }
+  }
+
+  return (
+    <div>
+      <label style={{ display:"flex", alignItems:"center", gap:8, fontSize:12.5, color:C.textSub, cursor:"pointer", marginBottom:12, fontWeight:600 }}>
+        <input type="checkbox" checked={enabled !== false} onChange={e => onChangeEnabled(e.target.checked)} />
+        Show a route map section in the PDF
+      </label>
+      {enabled !== false && (
+        <>
+          {stops.map((val, i) => (
+            <div key={i} draggable onDragStart={dragProps(i).onDragStart} onDragOver={dragProps(i).onDragOver} onDrop={dragProps(i).onDrop}
+              style={{ display:"flex", gap:8, marginBottom:8, alignItems:"center", cursor:"grab" }}>
+              <span style={{ color:C.textFaint, fontSize:13, flexShrink:0, width:16, textAlign:"center" }}>⠿</span>
+              <input value={val} placeholder="e.g. Stone Town" onChange={e => update(i, e.target.value)} style={iS} />
+              <button type="button" onClick={() => remove(i)} className="stv-btn stv-btn-danger"
+                style={{ background:C.warnSoft, color:C.warnStrong, border:"none", padding:"9px 11px", borderRadius:RADIUS.sm, fontSize:12, cursor:"pointer", fontWeight:600, flexShrink:0 }}>
+                ✕
+              </button>
+            </div>
+          ))}
+          <button type="button" onClick={add} className="stv-btn stv-btn-ghost"
+            style={{ background:"none", border:`1.5px dashed ${C.borderStrong}`, color:C.textSub, borderRadius:RADIUS.sm, padding:"7px 12px", fontSize:12, fontWeight:500, cursor:"pointer" }}>
+            ＋ Add Stop
+          </button>
+          <p style={{ fontSize:11, color:C.textFaint, marginTop:8 }}>Drag ⠿ to reorder. This becomes a simple generated flow diagram in the PDF — not a live map — so it never depends on an external map service.</p>
+        </>
+      )}
+    </div>
+  )
+}
+
+// One media photo slot -- shows the current image (resolved via a signed
+// URL) or a placeholder, with buttons to pick from the library or remove.
+// A missing/failed image never blocks the rest of the editor.
+function MediaSlot({ imageId, mediaById, onPick, onRemove, label }) {
+  const [url, setUrl] = useState(null)
+  const item = imageId ? mediaById[imageId] : null
+
+  useEffect(() => {
+    let cancelled = false
+    if (item?.storage_path) {
+      getItinSignedUrl(item.storage_path).then(u => { if (!cancelled) setUrl(u) })
+    } else {
+      setUrl(null)
+    }
+    return () => { cancelled = true }
+  }, [item?.storage_path])
+
+  return (
+    <div style={{ display:"flex", alignItems:"center", gap:10, marginTop:6, marginBottom:6 }}>
+      <div style={{ width:56, height:42, borderRadius:RADIUS.sm, overflow:"hidden", background:C.bg, border:`1px solid ${C.border}`, flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center" }}>
+        {url ? <img src={url} alt="" style={{ width:"100%", height:"100%", objectFit:"cover" }} /> : <span style={{ fontSize:16, opacity:0.4 }}>🖼️</span>}
+      </div>
+      <button type="button" onClick={onPick} className="stv-btn stv-btn-secondary"
+        style={{ background:C.surface, color:C.textSub, border:`1px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"6px 10px", fontSize:11.5, cursor:"pointer", fontWeight:600 }}>
+        {label || "Choose Photo"}
+      </button>
+      {imageId && (
+        <button type="button" onClick={onRemove} className="stv-btn stv-btn-ghost"
+          style={{ background:"none", border:"none", color:C.textFaint, fontSize:11.5, cursor:"pointer", fontWeight:600 }}>
+          Remove
+        </button>
+      )}
+    </div>
+  )
+}
+
+/* ── LIBRARY ITEM PICKER MODAL ───────────────────────────────
+   Lets the admin add a day item either from the approved Content Library
+   (Excursion / Transport / Meal / Special Touch) or as a blank custom item
+   of that same type -- "AI/admin cannot fabricate business offerings" is
+   enforced structurally here: the library list is the only source of
+   pre-written guest-facing copy, and "Create Custom" starts from nothing
+   rather than any invented default text. */
+function LibraryPickerModal({ kind, kindLabel, libraryItems, onSelect, onCreateCustom, onClose }) {
+  const [query, setQuery] = useState("")
+  const options = (libraryItems || []).filter(li => li.kind === kind && li.is_active !== false)
+  const filtered = query.trim()
+    ? options.filter(li => `${li.title} ${li.short_description || ""} ${li.location || ""}`.toLowerCase().includes(query.trim().toLowerCase()))
+    : options
+
+  return (
+    <div onClick={onClose} style={{ position:"fixed", inset:0, background:"rgba(20,20,30,0.5)", zIndex:1100, display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}>
+      <div onClick={e => e.stopPropagation()} role="dialog" aria-modal="true"
+        style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:RADIUS.lg, padding:"clamp(20px,4vw,28px)", width:"min(94vw, 560px)", maxHeight:"88vh", overflowY:"auto", boxShadow:SHADOW.modal }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14 }}>
+          <h2 style={{ margin:0, fontFamily:FONT, fontWeight:700, fontSize:16, color:C.text }}>Add {kindLabel}</h2>
+          <button type="button" onClick={onClose} className="stv-btn stv-btn-ghost" style={{ background:"none", border:"none", fontSize:18, cursor:"pointer", color:C.textFaint }}>✕</button>
+        </div>
+        <button type="button" onClick={onCreateCustom} className="stv-btn stv-btn-secondary"
+          style={{ width:"100%", textAlign:"left", background:C.bg, border:`1.5px dashed ${C.borderStrong}`, color:C.textSub, borderRadius:RADIUS.sm, padding:"10px 12px", fontSize:12.5, fontWeight:600, cursor:"pointer", marginBottom:12 }}>
+          ＋ Create Custom {kindLabel}
+        </button>
+        {options.length > 0 && (
+          <input value={query} onChange={e => setQuery(e.target.value)} placeholder={`Search ${kindLabel.toLowerCase()} library…`} style={{ ...iS, marginBottom:12 }} />
+        )}
+        {options.length === 0 && (
+          <p style={{ color:C.textFaint, fontSize:12.5 }}>No {kindLabel.toLowerCase()} items in the Content Library yet -- add one there, or create a custom item above.</p>
+        )}
+        <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+          {filtered.map(li => (
+            <button key={li.id} type="button" onClick={() => onSelect(li)} className="stv-card stv-card-hover"
+              style={{ textAlign:"left", border:`1px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"10px 12px", cursor:"pointer", background:C.surface }}>
+              <div style={{ fontSize:13, fontWeight:600, color:C.text }}>{li.title}</div>
+              {(li.short_description || li.location) && (
+                <div style={{ fontSize:11.5, color:C.textFaint, marginTop:2 }}>{li.short_description || li.location}</div>
+              )}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/* ── MEDIA PICKER MODAL ──────────────────────────────────── */
+function MediaPickerModal({ mediaList, initialQuery, onSelect, onClose }) {
+  const [query, setQuery] = useState(initialQuery || "")
+  const [urls, setUrls] = useState({})
+  const ranked = suggestMediaForQuery(query, mediaList.filter(m => m.is_active))
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      const entries = await Promise.all(ranked.slice(0, 40).map(async m => [m.id, await getItinSignedUrl(m.storage_path)]))
+      if (!cancelled) setUrls(Object.fromEntries(entries))
+    })()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query, mediaList.length])
+
+  return (
+    <div onClick={onClose} style={{ position:"fixed", inset:0, background:"rgba(20,20,30,0.5)", zIndex:1100, display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}>
+      <div onClick={e => e.stopPropagation()} role="dialog" aria-modal="true"
+        style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:RADIUS.lg, padding:"clamp(20px,4vw,28px)", width:"min(94vw, 720px)", maxHeight:"88vh", overflowY:"auto", boxShadow:SHADOW.modal }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14 }}>
+          <h2 style={{ margin:0, fontFamily:FONT, fontWeight:700, fontSize:16, color:C.text }}>Choose a Photo</h2>
+          <button type="button" onClick={onClose} className="stv-btn stv-btn-ghost" style={{ background:"none", border:"none", fontSize:18, cursor:"pointer", color:C.textFaint }}>✕</button>
+        </div>
+        <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search by name, category or tag…" style={{ ...iS, marginBottom:14 }} />
+        {ranked.length === 0 && <p style={{ color:C.textFaint, fontSize:13 }}>No media yet -- add photos from the Media Library first.</p>}
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(120px, 1fr))", gap:10 }}>
+          {ranked.slice(0, 40).map(m => (
+            <button key={m.id} type="button" onClick={() => onSelect(m)}
+              className="stv-card stv-card-hover"
+              style={{ border:`1px solid ${C.border}`, borderRadius:RADIUS.sm, padding:6, cursor:"pointer", background:C.surface, textAlign:"left" }}>
+              <div style={{ width:"100%", aspectRatio:"4/3", borderRadius:RADIUS.sm, overflow:"hidden", background:C.bg, marginBottom:6, display:"flex", alignItems:"center", justifyContent:"center" }}>
+                {urls[m.id] ? <img src={urls[m.id]} alt="" style={{ width:"100%", height:"100%", objectFit:"cover" }} /> : <span style={{ fontSize:20, opacity:0.35 }}>🖼️</span>}
+              </div>
+              <div style={{ fontSize:11, fontWeight:600, color:C.text, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{m.title || m.category}</div>
+              <div style={{ fontSize:10, color:C.textFaint }}>{m.category}</div>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// Small badge label per day-item type -- old rows with no `type` at all
+// render as "Activity" (matches how they've always behaved).
+const ACTIVITY_TYPE_LABELS = { activity:"Activity", excursion:"Excursion", transport:"Transport", meal:"Meal", special_touch:"Special Touch", accommodation_event:"Accommodation", custom:"Custom" }
+
+/* ── ONE ACTIVITY ROW (inside a day) ─────────────────────── */
+function ActivityEditor({ activity, onChange, onRemove, onDuplicate, dayOptions, currentDayIndex, onMoveToDay, mediaById, mediaList, dragHandleProps, showStaffNotes = true }) {
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const [staffOpen, setStaffOpen] = useState(!!activity.internalNote)
+  const otherDays = (dayOptions || []).filter(d => d.index !== currentDayIndex)
+  const type = activity.type || "activity"
+
+  return (
+    <div
+      draggable
+      onDragStart={dragHandleProps.onDragStart}
+      onDragOver={dragHandleProps.onDragOver}
+      onDrop={dragHandleProps.onDrop}
+      style={{ border:`1px solid ${C.border}`, borderRadius:RADIUS.sm, padding:12, marginBottom:10, background:C.surface, cursor:"grab" }}
+    >
+      <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:6 }}>
+        <span style={{ fontSize:9.5, fontWeight:700, textTransform:"uppercase", letterSpacing:0.4, color:C.accentStrong, background:C.bg, border:`1px solid ${C.border}`, borderRadius:4, padding:"2px 6px" }}>
+          {ACTIVITY_TYPE_LABELS[type] || type}
+        </span>
+        {activity.included && <span style={{ fontSize:9.5, fontWeight:700, textTransform:"uppercase", letterSpacing:0.4, color:"#166534", background:"#dcfce7", borderRadius:4, padding:"2px 6px" }}>Included</span>}
+      </div>
+      <div style={{ display:"flex", gap:8, marginBottom:8 }}>
+        <input value={activity.time || ""} onChange={e => onChange({ ...activity, time:e.target.value })} placeholder="Time" style={{ ...seS, width:70, flexShrink:0 }} />
+        <input value={activity.duration || ""} onChange={e => onChange({ ...activity, duration:e.target.value })} placeholder="Duration" style={{ ...seS, width:90, flexShrink:0 }} />
+        <input value={activity.title || ""} onChange={e => onChange({ ...activity, title:e.target.value })} placeholder="Activity title" style={{ ...iS, fontWeight:600 }} />
+        {onDuplicate && (
+          <button type="button" onClick={onDuplicate} title="Duplicate" className="stv-btn stv-btn-secondary"
+            style={{ background:C.surface, color:C.textSub, border:`1px solid ${C.border}`, padding:"9px 11px", borderRadius:RADIUS.sm, fontSize:12, cursor:"pointer", fontWeight:600, flexShrink:0 }}>⧉</button>
+        )}
+        <button type="button" onClick={onRemove} className="stv-btn stv-btn-danger"
+          style={{ background:C.warnSoft, color:C.warnStrong, border:"none", padding:"9px 11px", borderRadius:RADIUS.sm, fontSize:12, cursor:"pointer", fontWeight:600, flexShrink:0 }}>✕</button>
+      </div>
+      <textarea value={activity.description || ""} onChange={e => onChange({ ...activity, description:e.target.value })} placeholder="Description guests will see…" rows={2}
+        style={{ ...iS, marginBottom:6, resize:"vertical", fontFamily:FONT }} />
+      {(type === "excursion" || type === "transport") && (
+        <input value={activity.locationText || ""} onChange={e => onChange({ ...activity, locationText:e.target.value })}
+          placeholder={type === "transport" ? "Pickup / meeting point" : "Location / meeting point"} style={{ ...iS, marginBottom:6 }} />
+      )}
+      {type === "transport" && (
+        <input value={activity.transportInfo || ""} onChange={e => onChange({ ...activity, transportInfo:e.target.value })}
+          placeholder="Transport details (e.g. Private 4x4, driver name)" style={{ ...iS, marginBottom:6 }} />
+      )}
+      {(type === "meal" || type === "excursion") && (
+        <input value={activity.mealNote || ""} onChange={e => onChange({ ...activity, mealNote:e.target.value })}
+          placeholder="Meals included (e.g. Lunch & soft drinks included)" style={{ ...iS, marginBottom:6 }} />
+      )}
+      {type === "meal" && (
+        <input value={activity.dietaryNote || ""} onChange={e => onChange({ ...activity, dietaryNote:e.target.value })}
+          placeholder="Dietary note (e.g. Vegetarian option available)" style={{ ...iS, marginBottom:6 }} />
+      )}
+      {(type === "excursion" || type === "transport" || type === "meal") && (
+        <label style={{ display:"flex", alignItems:"center", gap:6, fontSize:11.5, color:C.textSub, marginBottom:6 }}>
+          <input type="checkbox" checked={!!activity.included} onChange={e => onChange({ ...activity, included:e.target.checked })} />
+          Included in the package (no extra charge to the guest)
+        </label>
+      )}
+      {type === "special_touch" && (
+        <label style={{ display:"flex", alignItems:"center", gap:6, fontSize:11.5, color:C.textSub, marginBottom:6 }}>
+          <input type="checkbox" checked={activity.complimentary !== false}
+            onChange={e => onChange({ ...activity, complimentary:e.target.checked, included:e.target.checked })} />
+          Complimentary (uncheck if this is a paid add-on)
+        </label>
+      )}
+      <MediaSlot imageId={activity.imageId} mediaById={mediaById} onPick={() => setPickerOpen(true)} onRemove={() => onChange({ ...activity, imageId:null })} />
+      {onMoveToDay && otherDays.length > 0 && (
+        <div style={{ display:"flex", alignItems:"center", gap:8, marginTop:4, marginBottom:2 }}>
+          <label style={{ fontSize:11, color:C.textFaint, fontWeight:600 }}>Move to:</label>
+          <select value="" onChange={e => { if (e.target.value !== "") onMoveToDay(Number(e.target.value)) }} style={{ ...seS, fontSize:11, padding:"5px 8px" }}>
+            <option value="">Choose a day…</option>
+            {otherDays.map(d => <option key={d.index} value={d.index}>{d.label}</option>)}
+          </select>
+        </div>
+      )}
+      {showStaffNotes && (
+        <>
+          <button type="button" onClick={() => setStaffOpen(v => !v)} className="stv-btn stv-btn-ghost"
+            style={{ background:"none", border:"none", color:C.textFaint, fontSize:11, fontWeight:600, cursor:"pointer", padding:0, marginTop:4 }}>
+            {staffOpen ? "▾" : "▸"} Staff-only note (never shown to guest)
+          </button>
+          {staffOpen && (
+            <textarea value={activity.internalNote || ""} onChange={e => onChange({ ...activity, internalNote:e.target.value })}
+              placeholder="Driver/kitchen/logistics notes -- staff only" rows={2}
+              style={{ ...iS, marginTop:6, background:C.warnSoft, borderColor:C.warnStrong, resize:"vertical", fontFamily:FONT }} />
+          )}
+        </>
+      )}
+      {!showStaffNotes && activity.internalNote && (
+        <p style={{ fontSize:10.5, color:C.textFaint, marginTop:4, fontStyle:"italic" }}>Has a staff-only note (hidden in guest-view mode)</p>
+      )}
+      {pickerOpen && (
+        <MediaPickerModal mediaList={mediaList} initialQuery={activity.title}
+          onSelect={m => { onChange({ ...activity, imageId:m.id }); setPickerOpen(false) }}
+          onClose={() => setPickerOpen(false)} />
+      )}
+    </div>
+  )
+}
+
+// A day-level photo gallery (separate from each activity's own single
+// photo) -- an ordered list of media-library ids, drag-reorderable, with
+// add/remove. Rendered in the PDF as a small strip under the day heading
+// (see itineraryPdf.js's day rendering).
+function GalleryThumb({ imageId, mediaById, onRemove, dragHandleProps }) {
+  const [url, setUrl] = useState(null)
+  const item = mediaById[imageId]
+  useEffect(() => {
+    let cancelled = false
+    if (item?.storage_path) getItinSignedUrl(item.storage_path).then(u => { if (!cancelled) setUrl(u) })
+    else setUrl(null)
+    return () => { cancelled = true }
+  }, [item?.storage_path])
+  return (
+    <div draggable onDragStart={dragHandleProps.onDragStart} onDragOver={dragHandleProps.onDragOver} onDrop={dragHandleProps.onDrop}
+      style={{ position:"relative", width:72, height:54, borderRadius:RADIUS.sm, overflow:"hidden", background:C.bg, border:`1px solid ${C.border}`, flexShrink:0, cursor:"grab" }}>
+      {url
+        ? <img src={url} alt="" style={{ width:"100%", height:"100%", objectFit:"cover" }} />
+        : <span style={{ fontSize:16, opacity:0.4, display:"flex", alignItems:"center", justifyContent:"center", height:"100%" }}>🖼️</span>}
+      <button type="button" onClick={onRemove} title="Remove"
+        style={{ position:"absolute", top:2, right:2, background:"rgba(20,20,30,0.55)", color:"#fff", border:"none", borderRadius:"50%", width:16, height:16, fontSize:10, lineHeight:"16px", cursor:"pointer", padding:0 }}>
+        ✕
+      </button>
+    </div>
+  )
+}
+function DayGalleryEditor({ photoIds, mediaById, mediaList, onChange }) {
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const dragFrom = useRef(null)
+  const ids = photoIds || []
+  function dragProps(idx) {
+    return {
+      onDragStart: () => { dragFrom.current = idx },
+      onDragOver: e => e.preventDefault(),
+      onDrop: e => {
+        e.preventDefault()
+        if (dragFrom.current === null || dragFrom.current === idx) return
+        onChange(reorderList(ids, dragFrom.current, idx))
+        dragFrom.current = null
+      },
+    }
+  }
+  return (
+    <div>
+      <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:6 }}>
+        {ids.map((id, i) => (
+          <GalleryThumb key={`${id}-${i}`} imageId={id} mediaById={mediaById} dragHandleProps={dragProps(i)}
+            onRemove={() => onChange(ids.filter((_, idx) => idx !== i))} />
+        ))}
+        <button type="button" onClick={() => setPickerOpen(true)} className="stv-btn stv-btn-ghost"
+          style={{ width:72, height:54, background:"none", border:`1.5px dashed ${C.borderStrong}`, color:C.textFaint, borderRadius:RADIUS.sm, fontSize:20, cursor:"pointer", flexShrink:0 }}>
+          ＋
+        </button>
+      </div>
+      {ids.length > 1 && <p style={{ fontSize:10.5, color:C.textFaint, margin:"0 0 4px" }}>Drag a photo to reorder.</p>}
+      {pickerOpen && (
+        <MediaPickerModal mediaList={mediaList}
+          onSelect={m => { if (!ids.includes(m.id)) onChange([...ids, m.id]); setPickerOpen(false) }}
+          onClose={() => setPickerOpen(false)} />
+      )}
+    </div>
+  )
+}
+
+// The "Add to Day" row -- one button per day-item type. Excursion/Transport/
+// Meal/Special Touch open the Content Library picker (approved offerings
+// only, per "AI/admin cannot fabricate business offerings"); Activity/
+// Accommodation Event/Custom add a blank item of that type directly, since
+// there's no reusable catalog for those.
+const ADD_TO_DAY_TYPES = [
+  { type:"activity", label:"Activity", libraryKind:null },
+  { type:"excursion", label:"Excursion", libraryKind:"excursion" },
+  { type:"transport", label:"Transport", libraryKind:"transport" },
+  { type:"meal", label:"Meal", libraryKind:"meal" },
+  { type:"special_touch", label:"Special Touch", libraryKind:"special_touch" },
+  { type:"accommodation_event", label:"Accommodation Event", libraryKind:null },
+  { type:"custom", label:"Custom", libraryKind:"generic" },
+]
+
+/* ── ONE DAY (list of activities) ────────────────────────── */
+function DayEditor({ day, dayIndex, dayOptions, onMoveActivityToDay, onChange, onRemove, mediaById, mediaList, libraryItems = [], guestType, occasion, showStaffNotes = true }) {
+  const dragFrom = useRef(null)
+  const [pickerKind, setPickerKind] = useState(null) // one of ADD_TO_DAY_TYPES[].type, or null
+
+  function updateActivity(idx, next) {
+    const activities = day.activities.slice()
+    activities[idx] = next
+    onChange({ ...day, activities })
+  }
+  function removeActivity(idx) {
+    onChange({ ...day, activities: day.activities.filter((_, i) => i !== idx) })
+  }
+  function appendActivity(activity) {
+    onChange({ ...day, activities: [...day.activities, activity] })
+  }
+  function addBlank(type) {
+    appendActivity({ id:`a-${Date.now()}`, type, time:"", duration:"", title:"", description:"" })
+  }
+  function addFromLibrary(item) {
+    appendActivity({ ...libraryItemToActivity(item), id:`a-${Date.now()}` })
+    setPickerKind(null)
+  }
+  const suggestedTouches = suggestSpecialTouches({ guestType, occasion }, libraryItems).slice(0, 4)
+  function duplicateActivity(idx) {
+    const src = day.activities[idx]
+    const copy = { ...src, id:`a-${Date.now()}`, title: src.title ? `${src.title} (copy)` : src.title }
+    const activities = day.activities.slice()
+    activities.splice(idx + 1, 0, copy)
+    onChange({ ...day, activities })
+  }
+  function dragProps(idx) {
+    return {
+      onDragStart: () => { dragFrom.current = idx },
+      onDragOver: e => e.preventDefault(),
+      onDrop: e => {
+        e.preventDefault()
+        if (dragFrom.current === null || dragFrom.current === idx) return
+        onChange({ ...day, activities: reorderList(day.activities, dragFrom.current, idx) })
+        dragFrom.current = null
+      },
+    }
+  }
+
+  return (
+    <div style={{ ...panelS, marginBottom:16 }}>
+      <div style={{ display:"flex", gap:10, marginBottom:12, alignItems:"center" }}>
+        <input value={day.label || ""} onChange={e => onChange({ ...day, label:e.target.value })} placeholder="Day label (e.g. Mnemba Island)" style={{ ...iS, fontWeight:700, flex:1 }} />
+        <input type="date" value={day.date || ""} onChange={e => onChange({ ...day, date:e.target.value })} style={seS} />
+        <button type="button" onClick={onRemove} className="stv-btn stv-btn-danger"
+          style={{ background:C.warnSoft, color:C.warnStrong, border:"none", padding:"8px 12px", borderRadius:RADIUS.sm, fontSize:11.5, cursor:"pointer", fontWeight:600, flexShrink:0 }}>
+          Remove Day
+        </button>
+      </div>
+      <label style={lS}>Day Description (guest-facing, optional)</label>
+      <textarea value={day.description || ""} onChange={e => onChange({ ...day, description:e.target.value })} placeholder="A short guest-facing note about this day as a whole…" rows={2}
+        style={{ ...iS, marginBottom:12, resize:"vertical", fontFamily:FONT }} />
+      <label style={lS}>Day Photo Gallery (optional)</label>
+      <div style={{ marginBottom:14 }}>
+        <DayGalleryEditor photoIds={day.photoIds} mediaById={mediaById} mediaList={mediaList} onChange={v => onChange({ ...day, photoIds:v })} />
+      </div>
+      {day.activities.map((act, i) => (
+        <ActivityEditor key={act.id || i} activity={act} onChange={next => updateActivity(i, next)} onRemove={() => removeActivity(i)}
+          onDuplicate={() => duplicateActivity(i)}
+          dayOptions={dayOptions} currentDayIndex={dayIndex}
+          onMoveToDay={toDayIdx => onMoveActivityToDay(i, toDayIdx)}
+          mediaById={mediaById} mediaList={mediaList} dragHandleProps={dragProps(i)} showStaffNotes={showStaffNotes} />
+      ))}
+      <label style={{ ...lS, marginTop:2 }}>Add to Day</label>
+      <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:suggestedTouches.length ? 12 : 0 }}>
+        {ADD_TO_DAY_TYPES.map(({ type, label, libraryKind }) => (
+          <button key={type} type="button"
+            onClick={() => libraryKind ? setPickerKind(type) : addBlank(type)}
+            className="stv-btn stv-btn-ghost"
+            style={{ background:"none", border:`1.5px dashed ${C.borderStrong}`, color:C.textSub, borderRadius:RADIUS.sm, padding:"8px 12px", fontSize:12, fontWeight:500, cursor:"pointer" }}>
+            ＋ {label}
+          </button>
+        ))}
+      </div>
+      {suggestedTouches.length > 0 && (
+        <div style={{ border:`1px dashed ${C.borderStrong}`, borderRadius:RADIUS.sm, padding:"10px 12px", background:C.bg }}>
+          <p style={{ fontSize:11, fontWeight:600, color:C.textFaint, textTransform:"uppercase", margin:"0 0 8px" }}>Suggested Special Touches for this guest</p>
+          <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+            {suggestedTouches.map(li => (
+              <div key={li.id} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:10 }}>
+                <div style={{ fontSize:12.5, color:C.text }}>{li.title}</div>
+                <button type="button" onClick={() => addFromLibrary(li)} className="stv-btn stv-btn-secondary"
+                  style={{ background:C.surface, color:C.textSub, border:`1px solid ${C.border}`, padding:"4px 10px", borderRadius:RADIUS.sm, fontSize:11, cursor:"pointer", fontWeight:600, flexShrink:0 }}>Add</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {pickerKind && (
+        <LibraryPickerModal
+          kind={ADD_TO_DAY_TYPES.find(t => t.type === pickerKind)?.libraryKind}
+          kindLabel={ADD_TO_DAY_TYPES.find(t => t.type === pickerKind)?.label}
+          libraryItems={libraryItems}
+          onSelect={addFromLibrary}
+          onCreateCustom={() => { addBlank(pickerKind); setPickerKind(null) }}
+          onClose={() => setPickerKind(null)}
+        />
+      )}
+    </div>
+  )
+}
+
+/* ── EXPERIENCE / STV-EXPERIENCE CARD LIST ──────────────────
+   Shared editor for both `experiences` (major excursion detail pages) and
+   `stvExperience.items` (restaurant/pool/park etc.) -- same card shape,
+   `full` toggles the extra fields (duration/included/whatToBring/notes)
+   that only make sense for a full experience page. */
+function CardListEditor({ items, onChange, mediaById, mediaList, full, showStaffNotes = true }) {
+  const [pickerFor, setPickerFor] = useState(null)
+
+  function update(idx, patch) {
+    onChange(items.map((it, i) => i === idx ? { ...it, ...patch } : it))
+  }
+  function remove(idx) {
+    onChange(items.filter((_, i) => i !== idx))
+  }
+  function add() {
+    onChange([...items, { id:`c-${Date.now()}`, title:"", description:"" }])
+  }
+
+  return (
+    <div>
+      {items.map((item, i) => (
+        <div key={item.id || i} style={{ border:`1px solid ${C.border}`, borderRadius:RADIUS.sm, padding:12, marginBottom:10 }}>
+          <div style={{ display:"flex", gap:8, marginBottom:8 }}>
+            <input value={item.title || ""} onChange={e => update(i, { title:e.target.value })} placeholder="Title" style={{ ...iS, fontWeight:600 }} />
+            <button type="button" onClick={() => remove(i)} className="stv-btn stv-btn-danger"
+              style={{ background:C.warnSoft, color:C.warnStrong, border:"none", padding:"9px 11px", borderRadius:RADIUS.sm, fontSize:12, cursor:"pointer", fontWeight:600, flexShrink:0 }}>✕</button>
+          </div>
+          <textarea value={item.description || ""} onChange={e => update(i, { description:e.target.value })} placeholder="Guest-facing description" rows={2} style={{ ...iS, marginBottom:6, resize:"vertical", fontFamily:FONT }} />
+          <MediaSlot imageId={item.imageId} mediaById={mediaById} onPick={() => setPickerFor(i)} onRemove={() => update(i, { imageId:null })} />
+          {full && (
+            <>
+              <div style={{ display:"flex", gap:8, marginTop:8 }}>
+                <input value={item.duration || ""} onChange={e => update(i, { duration:e.target.value })} placeholder="Duration (e.g. Half day)" style={seS} />
+              </div>
+              <input value={item.included || ""} onChange={e => update(i, { included:e.target.value })} placeholder="What's included" style={{ ...iS, marginTop:6 }} />
+              <input value={item.whatToBring || ""} onChange={e => update(i, { whatToBring:e.target.value })} placeholder="What to bring" style={{ ...iS, marginTop:6 }} />
+              <textarea value={item.notes || ""} onChange={e => update(i, { notes:e.target.value })} placeholder="Important notes (guest-facing)" rows={2} style={{ ...iS, marginTop:6, resize:"vertical", fontFamily:FONT }} />
+              {showStaffNotes ? (
+                <textarea value={item.internalNote || ""} onChange={e => update(i, { internalNote:e.target.value })} placeholder="Staff-only note" rows={2}
+                  style={{ ...iS, marginTop:6, background:C.warnSoft, borderColor:C.warnStrong, resize:"vertical", fontFamily:FONT }} />
+              ) : item.internalNote ? (
+                <p style={{ fontSize:10.5, color:C.textFaint, marginTop:4, fontStyle:"italic" }}>Has a staff-only note (hidden in guest-view mode)</p>
+              ) : null}
+            </>
+          )}
+          {pickerFor === i && (
+            <MediaPickerModal mediaList={mediaList} initialQuery={item.title}
+              onSelect={m => { update(i, { imageId:m.id }); setPickerFor(null) }}
+              onClose={() => setPickerFor(null)} />
+          )}
+        </div>
+      ))}
+      <button type="button" onClick={add} className="stv-btn stv-btn-ghost"
+        style={{ background:"none", border:`1.5px dashed ${C.borderStrong}`, color:C.textSub, borderRadius:RADIUS.sm, padding:"8px 12px", fontSize:12, fontWeight:500, cursor:"pointer" }}>
+        ＋ Add
+      </button>
+    </div>
+  )
+}
+
+/* ── PREVIEW MODAL (mirrors InvoicePreviewModal's pattern) ──── */
+function ItineraryPreviewModal({ url, onClose, onDownload }) {
+  const iframeRef = useRef(null)
+  return (
+    <div onClick={onClose} style={{ position:"fixed", inset:0, background:"rgba(20,20,30,0.6)", zIndex:1200, display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}>
+      <div onClick={e => e.stopPropagation()} role="dialog" aria-modal="true"
+        style={{ background:C.surface, borderRadius:RADIUS.lg, width:"min(96vw, 780px)", height:"92vh", display:"flex", flexDirection:"column", boxShadow:SHADOW.modal, overflow:"hidden" }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"14px 18px", borderBottom:`1px solid ${C.border}` }}>
+          <span style={{ fontWeight:700, fontSize:14, color:C.text }}>Guest Preview</span>
+          <div style={{ display:"flex", gap:8 }}>
+            <button type="button" onClick={onDownload} className="stv-btn stv-btn-primary" style={{ background:C.accentStrong, color:"#fff", border:"none", borderRadius:RADIUS.sm, padding:"7px 13px", fontSize:12.5, fontWeight:600, cursor:"pointer" }}>Download PDF</button>
+            <button type="button" onClick={onClose} className="stv-btn stv-btn-secondary" style={{ background:C.surface, color:C.text, border:`1px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"7px 13px", fontSize:12.5, fontWeight:600, cursor:"pointer" }}>Close</button>
+          </div>
+        </div>
+        <iframe ref={iframeRef} title="Itinerary preview" src={url} style={{ flex:1, border:"none", width:"100%" }} />
+      </div>
+    </div>
+  )
+}
+
+/* ── CONTENT LIBRARY ─────────────────────────────────────── */
+const LIBRARY_KINDS = ["excursion", "transport", "meal", "special_touch", "generic"]
+const LIBRARY_KIND_LABELS = { excursion:"Excursion", transport:"Transport", meal:"Meal", special_touch:"Special Touch", generic:"Generic" }
+
+function LibraryItemModal({ item, onClose, onSaved, user, showToast, mediaList = [] }) {
+  const [form, setForm] = useState(() => item || {
+    kind: "excursion", title: "", short_description: "", long_description: "",
+    guest_facing_description: "", internal_notes: "", default_duration_minutes: "",
+    default_time: "", location: "", is_active: true,
+    pickup_time: "", meeting_point: "", transport_info: "",
+    meals_included: "", activities_included: "", what_to_bring: "",
+    whats_included: "", whats_excluded: "",
+    selling_price: "", internal_cost: "", currency: "TZS",
+    image_ids: [], complimentary: true, guest_type_tags: [],
+  })
+  const [tagsText, setTagsText] = useState((item?.guest_type_tags || []).join(", "))
+  const [busy, setBusy] = useState(false)
+  const mediaById = useMemo(() => Object.fromEntries(mediaList.map(m => [m.id, m])), [mediaList])
+
+  const kind = form.kind
+  const showTransportFields = kind === "transport" || kind === "excursion"
+  const showExcursionFields = kind === "excursion"
+  const showMealFields = kind === "meal" || kind === "excursion"
+  const showPricingFields = kind === "excursion" || kind === "transport" || kind === "special_touch"
+  const showTouchFields = kind === "special_touch"
+
+  async function submit() {
+    if (!form.title.trim()) { showToast("Title is required", "error"); return }
+    setBusy(true)
+    const payload = {
+      kind: form.kind,
+      title: form.title.trim(),
+      short_description: form.short_description || "",
+      long_description: form.long_description || "",
+      guest_facing_description: form.guest_facing_description || "",
+      internal_notes: form.internal_notes || "",
+      default_duration_minutes: form.default_duration_minutes === "" ? null : Number(form.default_duration_minutes),
+      default_time: form.default_time || null,
+      location: form.location || null,
+      is_active: !!form.is_active,
+      pickup_time: form.pickup_time || null,
+      meeting_point: form.meeting_point || null,
+      transport_info: form.transport_info || "",
+      meals_included: form.meals_included || "",
+      activities_included: form.activities_included || "",
+      what_to_bring: form.what_to_bring || "",
+      whats_included: form.whats_included || "",
+      whats_excluded: form.whats_excluded || "",
+      selling_price: form.selling_price === "" ? null : Number(form.selling_price),
+      internal_cost: form.internal_cost === "" ? null : Number(form.internal_cost),
+      currency: form.currency || "TZS",
+      image_ids: form.image_ids || [],
+      complimentary: !!form.complimentary,
+      guest_type_tags: tagsText.split(",").map(s => s.trim().toLowerCase()).filter(Boolean),
+    }
+    let error
+    if (item?.id) {
+      ;({ error } = await supabase.from("stv_itinerary_library").update(payload).eq("id", item.id))
+    } else {
+      ;({ error } = await supabase.from("stv_itinerary_library").insert([{ ...payload, created_by: user?.id || null }]))
+    }
+    setBusy(false)
+    if (error) { showToast(error.message, "error"); return }
+    showToast("Saved")
+    onSaved()
+  }
+
+  return (
+    <div onClick={onClose} style={{ position:"fixed", inset:0, background:"rgba(20,20,30,0.5)", zIndex:1000, display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}>
+      <div onClick={e => e.stopPropagation()} role="dialog" aria-modal="true"
+        style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:RADIUS.lg, padding:"clamp(20px,4vw,28px)", width:"min(92vw, 560px)", maxHeight:"90vh", overflowY:"auto", boxShadow:SHADOW.modal }}>
+        <h2 style={{ margin:"0 0 16px", fontFamily:FONT, fontWeight:700, fontSize:16, color:C.text }}>{item ? "Edit Library Item" : "Add Library Item"}</h2>
+        <label style={lS}>Kind</label>
+        <select value={form.kind} onChange={e => setForm(f => ({ ...f, kind:e.target.value }))} style={{ ...iS, marginBottom:12 }}>
+          {LIBRARY_KINDS.map(k => <option key={k} value={k}>{LIBRARY_KIND_LABELS[k]}</option>)}
+        </select>
+        <label style={lS}>Title</label>
+        <input value={form.title} onChange={e => setForm(f => ({ ...f, title:e.target.value }))} style={{ ...iS, marginBottom:12 }} />
+        <label style={lS}>Short Description</label>
+        <input value={form.short_description} onChange={e => setForm(f => ({ ...f, short_description:e.target.value }))} style={{ ...iS, marginBottom:12 }} />
+        <label style={lS}>Guest-Facing Description</label>
+        <textarea value={form.guest_facing_description} onChange={e => setForm(f => ({ ...f, guest_facing_description:e.target.value }))} rows={3} style={{ ...iS, marginBottom:12, resize:"vertical", fontFamily:FONT }} />
+        <div style={{ display:"flex", gap:10, marginBottom:12 }}>
+          <div style={{ flex:1 }}>
+            <label style={lS}>Default Time</label>
+            <input type="time" value={form.default_time || ""} onChange={e => setForm(f => ({ ...f, default_time:e.target.value }))} style={iS} />
+          </div>
+          <div style={{ flex:1 }}>
+            <label style={lS}>Default Duration (min)</label>
+            <input type="number" min="0" value={form.default_duration_minutes ?? ""} onChange={e => setForm(f => ({ ...f, default_duration_minutes:e.target.value }))} style={iS} />
+          </div>
+        </div>
+        <label style={lS}>Location{showTransportFields ? " / Meeting Point" : ""}</label>
+        <input value={form.location || ""} onChange={e => setForm(f => ({ ...f, location:e.target.value }))} style={{ ...iS, marginBottom:12 }} />
+
+        {showTransportFields && (
+          <>
+            <div style={{ display:"flex", gap:10, marginBottom:12 }}>
+              <div style={{ flex:1 }}>
+                <label style={lS}>Pickup Time</label>
+                <input type="time" value={form.pickup_time || ""} onChange={e => setForm(f => ({ ...f, pickup_time:e.target.value }))} style={iS} />
+              </div>
+              <div style={{ flex:1 }}>
+                <label style={lS}>Meeting Point</label>
+                <input value={form.meeting_point || ""} onChange={e => setForm(f => ({ ...f, meeting_point:e.target.value }))} style={iS} />
+              </div>
+            </div>
+            <label style={lS}>Transport Information</label>
+            <textarea value={form.transport_info || ""} onChange={e => setForm(f => ({ ...f, transport_info:e.target.value }))} rows={2}
+              placeholder="e.g. Private air-conditioned vehicle with driver" style={{ ...iS, marginBottom:12, resize:"vertical", fontFamily:FONT }} />
+          </>
+        )}
+        {showMealFields && (
+          <>
+            <label style={lS}>Meals Included</label>
+            <input value={form.meals_included || ""} onChange={e => setForm(f => ({ ...f, meals_included:e.target.value }))}
+              placeholder="e.g. Lunch, soft drinks" style={{ ...iS, marginBottom:12 }} />
+          </>
+        )}
+        {showExcursionFields && (
+          <>
+            <label style={lS}>Activities Included</label>
+            <input value={form.activities_included || ""} onChange={e => setForm(f => ({ ...f, activities_included:e.target.value }))} style={{ ...iS, marginBottom:12 }} />
+            <label style={lS}>What to Bring</label>
+            <input value={form.what_to_bring || ""} onChange={e => setForm(f => ({ ...f, what_to_bring:e.target.value }))} style={{ ...iS, marginBottom:12 }} />
+            <div style={{ display:"flex", gap:10, marginBottom:12 }}>
+              <div style={{ flex:1 }}>
+                <label style={lS}>What's Included</label>
+                <input value={form.whats_included || ""} onChange={e => setForm(f => ({ ...f, whats_included:e.target.value }))} style={iS} />
+              </div>
+              <div style={{ flex:1 }}>
+                <label style={lS}>What's Excluded</label>
+                <input value={form.whats_excluded || ""} onChange={e => setForm(f => ({ ...f, whats_excluded:e.target.value }))} style={iS} />
+              </div>
+            </div>
+          </>
+        )}
+        {showPricingFields && (
+          <div style={{ display:"flex", gap:10, marginBottom:12 }}>
+            <div style={{ flex:1 }}>
+              <label style={lS}>Selling Price</label>
+              <input type="number" min="0" value={form.selling_price ?? ""} onChange={e => setForm(f => ({ ...f, selling_price:e.target.value }))} style={iS} />
+            </div>
+            <div style={{ flex:1 }}>
+              <label style={lS}>Internal Cost <span style={{ color:C.warnStrong, fontWeight:600 }}>(staff-only)</span></label>
+              <input type="number" min="0" value={form.internal_cost ?? ""} onChange={e => setForm(f => ({ ...f, internal_cost:e.target.value }))}
+                style={{ ...iS, background:C.warnSoft, borderColor:C.warnStrong }} />
+            </div>
+            <div style={{ width:80 }}>
+              <label style={lS}>Currency</label>
+              <input value={form.currency || "TZS"} onChange={e => setForm(f => ({ ...f, currency:e.target.value }))} style={iS} />
+            </div>
+          </div>
+        )}
+        {showTouchFields && (
+          <>
+            <label style={{ display:"flex", alignItems:"center", gap:8, marginBottom:12, fontSize:13, color:C.textSub }}>
+              <input type="checkbox" checked={!!form.complimentary} onChange={e => setForm(f => ({ ...f, complimentary:e.target.checked }))} />
+              Complimentary (uncheck if this is a paid add-on)
+            </label>
+            <label style={lS}>Applies to Guest Types</label>
+            <input value={tagsText} onChange={e => setTagsText(e.target.value)}
+              placeholder="e.g. honeymoon, anniversary" style={{ ...iS, marginBottom:4 }} />
+            <p style={{ fontSize:10.5, color:C.textFaint, margin:"0 0 12px" }}>Comma-separated. Drives the "Suggested Special Touches" strip in the day editor -- only ever a suggestion, never auto-added.</p>
+          </>
+        )}
+
+        <label style={lS}>Photos</label>
+        <div style={{ marginBottom:12 }}>
+          <DayGalleryEditor photoIds={form.image_ids} mediaById={mediaById} mediaList={mediaList} onChange={v => setForm(f => ({ ...f, image_ids:v }))} />
+        </div>
+
+        <label style={lS}>Staff-Only Notes</label>
+        <textarea value={form.internal_notes} onChange={e => setForm(f => ({ ...f, internal_notes:e.target.value }))} rows={2} style={{ ...iS, marginBottom:12, background:C.warnSoft, borderColor:C.warnStrong, resize:"vertical", fontFamily:FONT }} />
+        <label style={{ display:"flex", alignItems:"center", gap:8, marginBottom:18, fontSize:13, color:C.textSub }}>
+          <input type="checkbox" checked={form.is_active} onChange={e => setForm(f => ({ ...f, is_active:e.target.checked }))} />
+          Active (selectable when building a new itinerary)
+        </label>
+        <div style={{ display:"flex", gap:10 }}>
+          <button type="button" onClick={onClose} className="stv-btn stv-btn-secondary" style={{ flex:1, background:C.surface, color:C.text, border:`1.5px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"11px", fontSize:13.5, fontWeight:600, cursor:"pointer" }}>Cancel</button>
+          <button type="button" onClick={submit} disabled={busy} className="stv-btn stv-btn-primary" style={{ flex:1, background:C.accentStrong, color:"#fff", border:"none", borderRadius:RADIUS.sm, padding:"11px", fontSize:13.5, fontWeight:600, cursor:"pointer", opacity: busy ? 0.7 : 1 }}>{busy ? "Saving…" : "Save"}</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ContentLibraryPage({ user, showToast, onBack }) {
+  const [items, setItems] = useState([])
+  const [mediaList, setMediaList] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [editing, setEditing] = useState(null)
+  const [showModal, setShowModal] = useState(false)
+  const [filterKind, setFilterKind] = useState("All")
+
+  async function load() {
+    setLoading(true)
+    // Load the library items and the photo library together -- the item
+    // modal's new "Photos" field (image_ids) needs the full media list to
+    // pick from, same media source ItinerariesPage already loads.
+    const [libRes, mediaRes] = await Promise.all([
+      supabase.from("stv_itinerary_library").select("*").order("kind").order("sort_order"),
+      supabase.from("stv_itinerary_media").select("*").order("sort_order").order("created_at", { ascending:false }),
+    ])
+    if (libRes.error) showToast(libRes.error.message, "error")
+    setItems(libRes.data || [])
+    setMediaList(mediaRes.error ? [] : (mediaRes.data || []))
+    setLoading(false)
+  }
+  useEffect(() => { load() }, [])
+
+  async function remove(id) {
+    if (!confirm("Delete this library item?")) return
+    const { error } = await supabase.from("stv_itinerary_library").delete().eq("id", id)
+    if (error) { showToast(error.message, "error"); return }
+    load()
+  }
+
+  const filtered = filterKind === "All" ? items : items.filter(i => i.kind === filterKind)
+
+  return (
+    <div>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16, flexWrap:"wrap", gap:10 }}>
+        <div>
+          <button type="button" onClick={onBack} className="stv-btn stv-btn-ghost" style={{ background:"none", border:"none", color:C.textFaint, fontSize:12.5, cursor:"pointer", marginBottom:4 }}>← Back to Itineraries</button>
+          <h1 style={pT}>Content Library</h1>
+        </div>
+        <button type="button" onClick={() => { setEditing(null); setShowModal(true) }} className="stv-btn stv-btn-primary" style={{ background:C.accentStrong, color:"#fff", border:"none", borderRadius:RADIUS.sm, padding:"10px 16px", fontSize:13, fontWeight:600, cursor:"pointer" }}>＋ Add Item</button>
+      </div>
+      <select value={filterKind} onChange={e => setFilterKind(e.target.value)} style={{ ...seS, marginBottom:14 }}>
+        <option value="All">All Kinds</option>
+        {LIBRARY_KINDS.map(k => <option key={k} value={k}>{LIBRARY_KIND_LABELS[k]}</option>)}
+      </select>
+      {loading ? <p style={{ color:C.textFaint, fontSize:13 }}>Loading…</p> : (
+        <div style={panelS}>
+          <table className="stv-table" style={{ width:"100%", borderCollapse:"collapse" }}>
+            <thead>
+              <tr style={{ borderBottom:`1.5px solid ${C.border}` }}>
+                {["Kind","Title","Location","Default Time","Active",""].map(h => <th key={h} style={{ textAlign:"left", padding:"0 0 10px", fontSize:10.5, color:C.textFaint, fontWeight:600, textTransform:"uppercase" }}>{h}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map(i => (
+                <tr key={i.id} style={{ borderBottom:`1px solid ${C.bg}` }}>
+                  <td style={tS}>{LIBRARY_KIND_LABELS[i.kind] || i.kind}</td>
+                  <td style={tS}>{i.title}</td>
+                  <td style={tS}>{i.location || "—"}</td>
+                  <td style={tS}>{i.default_time || "—"}</td>
+                  <td style={tS}>{i.is_active ? "Yes" : "No"}</td>
+                  <td style={tS}>
+                    <div style={{ display:"flex", gap:6 }}>
+                      <button type="button" onClick={() => { setEditing(i); setShowModal(true) }} className="stv-btn stv-btn-secondary" style={{ background:C.surface, color:C.textSub, border:`1px solid ${C.border}`, padding:"5px 10px", borderRadius:RADIUS.sm, fontSize:11.5, cursor:"pointer" }}>Edit</button>
+                      <button type="button" onClick={() => remove(i.id)} className="stv-btn stv-btn-danger" style={{ background:C.warnSoft, color:C.warnStrong, border:"none", padding:"5px 10px", borderRadius:RADIUS.sm, fontSize:11.5, cursor:"pointer", fontWeight:600 }}>Delete</button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+              {filtered.length === 0 && <tr><td colSpan={6} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>No items yet.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {showModal && <LibraryItemModal item={editing} user={user} showToast={showToast} mediaList={mediaList} onClose={() => setShowModal(false)} onSaved={() => { setShowModal(false); load() }} />}
+    </div>
+  )
+}
+
+/* ── MEDIA LIBRARY ───────────────────────────────────────── */
+function MediaCard({ item, onChanged, showToast, dragHandleProps }) {
+  const [url, setUrl] = useState(null)
+  const [editing, setEditing] = useState(false)
+  const [title, setTitle] = useState(item.title || "")
+  const [category, setCategory] = useState(item.category || "Other")
+  const [tags, setTags] = useState((item.tags || []).join(", "))
+  const [source, setSource] = useState(item.source || "")
+  const [sourceUrl, setSourceUrl] = useState(item.source_url || "")
+  const [rightsStatus, setRightsStatus] = useState(item.rights_status || "stv_owned")
+  const [replacing, setReplacing] = useState(false)
+  const replaceInputRef = useRef(null)
+
+  useEffect(() => { getItinSignedUrl(item.storage_path).then(setUrl) }, [item.storage_path])
+
+  async function save() {
+    const { error } = await supabase.from("stv_itinerary_media").update({
+      title: title.trim(), category, tags: tags.split(",").map(s => s.trim()).filter(Boolean),
+      source: source.trim(), source_url: sourceUrl.trim(), rights_status: rightsStatus,
+    }).eq("id", item.id)
+    if (error) { showToast(error.message, "error"); return }
+    setEditing(false)
+    onChanged()
+  }
+  async function toggle(field) {
+    const { error } = await supabase.from("stv_itinerary_media").update({ [field]: !item[field] }).eq("id", item.id)
+    if (error) { showToast(error.message, "error"); return }
+    onChanged()
+  }
+  async function remove() {
+    if (!confirm("Delete this photo? This cannot be undone.")) return
+    await supabase.storage.from(ITIN_BUCKET).remove([item.storage_path])
+    const { error } = await supabase.from("stv_itinerary_media").delete().eq("id", item.id)
+    if (error) { showToast(error.message, "error"); return }
+    onChanged()
+  }
+  // Replaces the underlying image file while keeping this exact record (id,
+  // title, category, tags, hero/active flags all stay put) -- any activity
+  // or day that already points at this media id via imageId picks up the
+  // new photo automatically, next time it's opened. The old file is removed
+  // only after the new one uploads successfully.
+  async function replacePhoto(e) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setReplacing(true)
+    try {
+      const ext = (file.name.split(".").pop() || "jpg").toLowerCase()
+      const newPath = `media/${randomFileSuffix()}.${ext}`
+      const { error: upErr } = await supabase.storage.from(ITIN_BUCKET).upload(newPath, file)
+      if (upErr) throw upErr
+      const { error: updErr } = await supabase.from("stv_itinerary_media").update({ storage_path: newPath }).eq("id", item.id)
+      if (updErr) throw updErr
+      await supabase.storage.from(ITIN_BUCKET).remove([item.storage_path])
+      showToast("Photo replaced")
+      onChanged()
+    } catch (err) {
+      showToast(`Could not replace photo: ${err.message}`, "error")
+    } finally {
+      setReplacing(false)
+      if (replaceInputRef.current) replaceInputRef.current.value = ""
+    }
+  }
+
+  return (
+    <div draggable={!editing && !!dragHandleProps} onDragStart={dragHandleProps?.onDragStart} onDragOver={dragHandleProps?.onDragOver} onDrop={dragHandleProps?.onDrop}
+      style={{ border:`1px solid ${C.border}`, borderRadius:RADIUS.sm, padding:8, background:C.surface, opacity: item.is_active ? 1 : 0.55, cursor: (!editing && dragHandleProps) ? "grab" : "default" }}>
+      <div style={{ width:"100%", aspectRatio:"4/3", borderRadius:RADIUS.sm, overflow:"hidden", background:C.bg, marginBottom:8, position:"relative" }}>
+        {url ? <img src={url} alt={item.alt_text || ""} style={{ width:"100%", height:"100%", objectFit:"cover" }} /> : <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:"100%", opacity:0.35, fontSize:22 }}>🖼️</div>}
+        {item.is_hero && <span style={{ position:"absolute", top:6, left:6, background:C.accentStrong, color:"#fff", fontSize:9.5, fontWeight:700, padding:"2px 7px", borderRadius:RADIUS.pill }}>HERO</span>}
+      </div>
+      {editing ? (
+        <>
+          <input value={title} onChange={e => setTitle(e.target.value)} placeholder="Title" style={{ ...seS, width:"100%", marginBottom:6 }} />
+          <select value={category} onChange={e => setCategory(e.target.value)} style={{ ...seS, width:"100%", marginBottom:6 }}>
+            {ITIN_MEDIA_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+          <input value={tags} onChange={e => setTags(e.target.value)} placeholder="tags, comma, separated" style={{ ...seS, width:"100%", marginBottom:6 }} />
+          <input value={source} onChange={e => setSource(e.target.value)} placeholder="Source (e.g. STV, photographer name)" style={{ ...seS, width:"100%", marginBottom:6 }} />
+          <input value={sourceUrl} onChange={e => setSourceUrl(e.target.value)} placeholder="Source URL (optional)" style={{ ...seS, width:"100%", marginBottom:6 }} />
+          <select value={rightsStatus} onChange={e => setRightsStatus(e.target.value)} style={{ ...seS, width:"100%", marginBottom:6 }}>
+            <option value="stv_owned">STV-owned</option>
+            <option value="licensed">Licensed</option>
+            <option value="guest_submitted">Guest-submitted (permission on file)</option>
+            <option value="stock">Stock photo</option>
+          </select>
+          <label className="stv-btn stv-btn-secondary" style={{ display:"block", textAlign:"center", background:C.surface, color:C.textSub, border:`1px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"6px", fontSize:11, cursor:"pointer", marginBottom:6 }}>
+            {replacing ? "Replacing…" : "Replace Photo File"}
+            <input ref={replaceInputRef} type="file" accept="image/*" onChange={replacePhoto} disabled={replacing} style={{ display:"none" }} />
+          </label>
+          <div style={{ display:"flex", gap:6 }}>
+            <button type="button" onClick={save} className="stv-btn stv-btn-primary" style={{ flex:1, background:C.accentStrong, color:"#fff", border:"none", borderRadius:RADIUS.sm, padding:"6px", fontSize:11.5, fontWeight:600, cursor:"pointer" }}>Save</button>
+            <button type="button" onClick={() => setEditing(false)} className="stv-btn stv-btn-ghost" style={{ flex:1, background:"none", border:`1px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"6px", fontSize:11.5, cursor:"pointer" }}>Cancel</button>
+          </div>
+        </>
+      ) : (
+        <>
+          <div style={{ fontSize:12, fontWeight:600, color:C.text, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{item.title || "(untitled)"}</div>
+          <div style={{ fontSize:10.5, color:C.textFaint, marginBottom:8 }}>{item.category}{item.tags?.length ? ` · ${item.tags.join(", ")}` : ""}</div>
+          <div style={{ display:"flex", gap:5, flexWrap:"wrap" }}>
+            <button type="button" onClick={() => setEditing(true)} className="stv-btn stv-btn-secondary" style={{ background:C.surface, color:C.textSub, border:`1px solid ${C.border}`, padding:"4px 8px", borderRadius:RADIUS.sm, fontSize:10.5, cursor:"pointer" }}>Edit</button>
+            <button type="button" onClick={() => toggle("is_hero")} className="stv-btn stv-btn-secondary" style={{ background:C.surface, color:C.textSub, border:`1px solid ${C.border}`, padding:"4px 8px", borderRadius:RADIUS.sm, fontSize:10.5, cursor:"pointer" }}>{item.is_hero ? "Unset Hero" : "Set Hero"}</button>
+            <button type="button" onClick={() => toggle("is_active")} className="stv-btn stv-btn-secondary" style={{ background:C.surface, color:C.textSub, border:`1px solid ${C.border}`, padding:"4px 8px", borderRadius:RADIUS.sm, fontSize:10.5, cursor:"pointer" }}>{item.is_active ? "Deactivate" : "Activate"}</button>
+            <button type="button" onClick={remove} className="stv-btn stv-btn-danger" style={{ background:C.warnSoft, color:C.warnStrong, border:"none", padding:"4px 8px", borderRadius:RADIUS.sm, fontSize:10.5, cursor:"pointer", fontWeight:600 }}>Delete</button>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+function MediaLibraryPage({ user, showToast, onBack }) {
+  const [items, setItems] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [category, setCategory] = useState("All")
+  const [search, setSearch] = useState("")
+  const [uploading, setUploading] = useState(false)
+  const [reordering, setReordering] = useState(false)
+  const fileInputRef = useRef(null)
+  const dragFrom = useRef(null)
+
+  async function load() {
+    setLoading(true)
+    const { data, error } = await supabase.from("stv_itinerary_media").select("*").order("sort_order").order("created_at", { ascending:false })
+    if (error) showToast(error.message, "error")
+    setItems(data || [])
+    setLoading(false)
+  }
+  useEffect(() => { load() }, [])
+
+  async function handleUpload(e) {
+    const files = Array.from(e.target.files || [])
+    if (!files.length) return
+    setUploading(true)
+    for (const file of files) {
+      const ext = (file.name.split(".").pop() || "jpg").toLowerCase()
+      const path = `media/${randomFileSuffix()}.${ext}`
+      const { error: upErr } = await supabase.storage.from(ITIN_BUCKET).upload(path, file)
+      if (upErr) { showToast(upErr.message, "error"); continue }
+      const { error: insErr } = await supabase.from("stv_itinerary_media").insert([{
+        storage_path: path, title: file.name.replace(/\.[^.]+$/, ""), category: "Other",
+        source: "stv", rights_status: "stv_owned", created_by: user?.id || null,
+      }])
+      if (insErr) showToast(insErr.message, "error")
+    }
+    setUploading(false)
+    if (fileInputRef.current) fileInputRef.current.value = ""
+    load()
+    showToast("Photos uploaded")
+  }
+
+  const ranked = suggestMediaForQuery(search, items).filter(i => category === "All" || i.category === category)
+  // Drag-reordering only makes unambiguous sense against the full,
+  // unfiltered list -- persisting a reorder of a filtered/searched subset
+  // would leave sort_order inconsistent with whatever is hidden right now.
+  const canReorder = category === "All" && !search.trim()
+
+  async function persistReorder(fromIdx, toIdx) {
+    if (fromIdx === toIdx) return
+    const next = reorderList(ranked, fromIdx, toIdx)
+    setReordering(true)
+    try {
+      await Promise.all(next.map((it, i) =>
+        it.sort_order === i ? null : supabase.from("stv_itinerary_media").update({ sort_order: i }).eq("id", it.id)
+      ))
+      await load()
+    } catch (e) {
+      showToast(`Could not save new order: ${e.message}`, "error")
+    } finally {
+      setReordering(false)
+    }
+  }
+  function dragProps(idx) {
+    return {
+      onDragStart: () => { dragFrom.current = idx },
+      onDragOver: e => e.preventDefault(),
+      onDrop: e => {
+        e.preventDefault()
+        if (dragFrom.current === null || dragFrom.current === idx) return
+        persistReorder(dragFrom.current, idx)
+        dragFrom.current = null
+      },
+    }
+  }
+
+  return (
+    <div>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16, flexWrap:"wrap", gap:10 }}>
+        <div>
+          <button type="button" onClick={onBack} className="stv-btn stv-btn-ghost" style={{ background:"none", border:"none", color:C.textFaint, fontSize:12.5, cursor:"pointer", marginBottom:4 }}>← Back to Itineraries</button>
+          <h1 style={pT}>Media Library</h1>
+        </div>
+        <label className="stv-btn stv-btn-primary" style={{ background:C.accentStrong, color:"#fff", border:"none", borderRadius:RADIUS.sm, padding:"10px 16px", fontSize:13, fontWeight:600, cursor:"pointer" }}>
+          {uploading ? "Uploading…" : "＋ Upload Photos"}
+          <input ref={fileInputRef} type="file" accept="image/*" multiple onChange={handleUpload} disabled={uploading} style={{ display:"none" }} />
+        </label>
+      </div>
+      <div style={{ display:"flex", gap:10, marginBottom:16, flexWrap:"wrap" }}>
+        <select value={category} onChange={e => setCategory(e.target.value)} style={seS}>
+          <option value="All">All Categories</option>
+          {ITIN_MEDIA_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+        </select>
+        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search title, category, tags…" style={{ ...seS, flex:1, minWidth:200 }} />
+      </div>
+      {canReorder && ranked.length > 1 && (
+        <p style={{ fontSize:11.5, color:C.textFaint, marginTop:-8, marginBottom:12 }}>{reordering ? "Saving new order…" : "Drag a photo to reorder the library."}</p>
+      )}
+      {!canReorder && (
+        <p style={{ fontSize:11.5, color:C.textFaint, marginTop:-8, marginBottom:12 }}>Clear the search and set category to "All Categories" to drag-reorder the library.</p>
+      )}
+      {loading ? <p style={{ color:C.textFaint, fontSize:13 }}>Loading…</p> : (
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(160px, 1fr))", gap:14 }}>
+          {ranked.map((item, i) => (
+            <MediaCard key={item.id} item={item} onChanged={load} showToast={showToast}
+              dragHandleProps={canReorder ? dragProps(i) : undefined} />
+          ))}
+          {ranked.length === 0 && <p style={{ color:C.textFaint, fontSize:13, gridColumn:"1/-1" }}>No photos yet -- upload STV's own photography to get started.</p>}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ── ITINERARY EDITOR (three-pane builder) ──────────────────
+   Days list | main section editor | Properties panel -- matches the
+   product spec's layout using this app's existing design tokens. Autosaves
+   the `content` jsonb (and the top-level guest/trip fields) on a short
+   debounce so nothing is lost if the browser is refreshed mid-edit. */
+function ItineraryEditorPage({ itineraryId, tents, libraryItems, mediaList, reloadMedia, user, displayName, showToast, onBack }) {
+  const { t } = useLanguage()
+  const { accessToken } = useAuth()
+  const [itinerary, setItinerary] = useState(null)
+  const [content, setContent] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState("")
+  const [loadNonce, setLoadNonce] = useState(0)
+  const [saveState, setSaveState] = useState("saved") // saved | unsaved | saving
+  const [activeSection, setActiveSection] = useState("welcome")
+  const [showStaffNotes, setShowStaffNotes] = useState(true)
+  const [previewUrl, setPreviewUrl] = useState(null)
+  const [busyAction, setBusyAction] = useState(false)
+  const [aiBusy, setAiBusy] = useState(false)
+
+  const mediaById = useMemo(() => Object.fromEntries(mediaList.map(m => [m.id, m])), [mediaList])
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setLoadError("")
+    supabase.from("stv_itineraries").select("*").eq("id", itineraryId).single().then(({ data, error }) => {
+      if (cancelled) return
+      if (error) {
+        // Distinct from the "still loading" state below -- without this,
+        // any fetch failure (stale id, RLS edge case, transient network
+        // blip) left `itinerary`/`content` null forever while `loading`
+        // flipped false, and the render gate below showed a permanent
+        // "Loading..." with no visible error and no way to recover short of
+        // navigating away. showToast() alone isn't enough: it auto-
+        // dismisses, so a user who glances away sees nothing but a stuck
+        // page.
+        showToast(error.message, "error")
+        setLoadError(error.message || "Could not load this itinerary.")
+        setLoading(false)
+        return
+      }
+      setItinerary(data)
+      setContent({ ...emptyItineraryContent(), ...(data.content || {}) })
+      setLoading(false)
+    })
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [itineraryId, loadNonce])
+
+  const saveNow = useRef(null)
+  useEffect(() => {
+    saveNow.current = itinDebounce(async (nextItinerary, nextContent) => {
+      setSaveState("saving")
+      const { error } = await supabase.from("stv_itineraries").update({
+        guest_name: nextItinerary.guest_name, guest_email: nextItinerary.guest_email, guest_phone: nextItinerary.guest_phone,
+        guest_type: nextItinerary.guest_type, occasion: nextItinerary.occasion,
+        check_in: nextItinerary.check_in || null, check_out: nextItinerary.check_out || null,
+        adults: nextItinerary.adults, children: nextItinerary.children,
+        accommodation_tent_id: nextItinerary.accommodation_tent_id || null,
+        title: nextItinerary.title, subtitle: nextItinerary.subtitle, status: nextItinerary.status,
+        content: nextContent, updated_by: user?.id || null,
+      }).eq("id", nextItinerary.id)
+      if (error) { showToast(error.message, "error"); setSaveState("unsaved"); return }
+      setSaveState("saved")
+    }, 1500)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  function updateItinerary(patch) {
+    setItinerary(prev => {
+      const next = { ...prev, ...patch }
+      setSaveState("unsaved")
+      saveNow.current(next, content)
+      return next
+    })
+  }
+  function updateContent(patch) {
+    setContent(prev => {
+      const next = { ...prev, ...patch }
+      setSaveState("unsaved")
+      saveNow.current(itinerary, next)
+      return next
+    })
+  }
+
+  // Warn on unload if a save is still pending -- never silently lose work.
+  useEffect(() => {
+    function onBeforeUnload(e) {
+      if (saveState === "unsaved" || saveState === "saving") { e.preventDefault(); e.returnValue = "" }
+    }
+    window.addEventListener("beforeunload", onBeforeUnload)
+    return () => window.removeEventListener("beforeunload", onBeforeUnload)
+  }, [saveState])
+
+  function regenerateWelcome() {
+    const tent = tents.find(t => t.id === itinerary.accommodation_tent_id)
+    const text = buildItinWelcomeText({
+      guestName: itinerary.guest_name, guestType: itinerary.guest_type, occasion: itinerary.occasion,
+      tentName: tent?.name || content.stay?.tentName, checkIn: itinerary.check_in, checkOut: itinerary.check_out,
+      keyExperiences: content.atAGlance?.keyExperiences || [], preferences: content.preferences,
+    })
+    updateContent({ welcomeText: text })
+  }
+
+  // "Personalize with AI" -- sends only the same structured, already-verified
+  // fields regenerateWelcome() above uses (nothing more) to the admin-backend
+  // /admin/itinerary/personalize route, which forwards them to whichever AI
+  // provider is configured server-side (see server.js -- no key ever lives in
+  // this frontend). The system prompt on that route forbids inventing any
+  // fact not present in the payload. If AI isn't configured there, or the
+  // call fails for any reason (network, rate limit, provider outage), this
+  // silently falls back to the same deterministic phrase-bank text
+  // regenerateWelcome() produces -- the admin always gets *some* usable
+  // draft, never a hard failure.
+  async function personalizeWithAI() {
+    const tent = tents.find(t => t.id === itinerary.accommodation_tent_id)
+    setAiBusy(true)
+    try {
+      const { text } = await adminFetch("/itinerary/personalize", accessToken, {
+        method: "POST",
+        body: JSON.stringify({
+          guestName: itinerary.guest_name, guestType: itinerary.guest_type, occasion: itinerary.occasion,
+          tentName: tent?.name || content.stay?.tentName, checkIn: itinerary.check_in, checkOut: itinerary.check_out,
+          adults: itinerary.adults, children: itinerary.children, preferences: content.preferences,
+          experiences: content.atAGlance?.keyExperiences || [],
+        }),
+      })
+      updateContent({ welcomeText: text })
+      showToast("Welcome message personalized with AI")
+    } catch (e) {
+      regenerateWelcome()
+      showToast(`AI personalization unavailable (${e.message}) — used the built-in personalization instead`)
+    } finally {
+      setAiBusy(false)
+    }
+  }
+
+  // Builds the guest-safe content object (internal notes/staff-only items
+  // stripped) and resolves every media reference to a real, short-lived
+  // signed URL, ready for the PDF renderer or the guest preview.
+  async function buildGuestContent() {
+    return resolveGuestContent(content, mediaList)
+  }
+
+  async function handlePreview() {
+    setBusyAction(true)
+    try {
+      const guestSafe = await buildGuestContent()
+      const { url } = await getItineraryPdfBlobUrl(itinerary, guestSafe)
+      setPreviewUrl(url)
+    } catch (e) {
+      showToast(`Could not build preview: ${e.message}`, "error")
+    } finally {
+      setBusyAction(false)
+    }
+  }
+
+  async function handleGenerate() {
+    setBusyAction(true)
+    try {
+      const patch = await generateItineraryPdf({ ...itinerary, content }, mediaList, user)
+      setItinerary(prev => ({ ...prev, ...patch }))
+      showToast("Itinerary PDF generated and downloaded")
+    } catch (e) {
+      showToast(`Could not generate PDF: ${e.message}`, "error")
+    } finally {
+      setBusyAction(false)
+    }
+  }
+
+  // Three distinct states, never conflated: still loading, failed to load
+  // (or the row is simply gone -- e.g. deleted from another tab), and ready.
+  // A stuck "Loading..." forever (the previous bug) is indistinguishable
+  // from a blank page to the person using it.
+  if (loadError) {
+    return (
+      <div style={{ ...panelS, maxWidth:480, margin:"40px auto", textAlign:"center" }}>
+        <p style={{ fontSize:14, color:C.warnStrong, fontWeight:600, marginBottom:6 }}>Could not load this itinerary</p>
+        <p style={{ fontSize:12.5, color:C.textFaint, marginBottom:18 }}>{loadError}</p>
+        <div style={{ display:"flex", gap:10, justifyContent:"center" }}>
+          <button type="button" onClick={onBack} className="stv-btn stv-btn-secondary"
+            style={{ background:C.surface, color:C.text, border:`1.5px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"9px 16px", fontSize:13, fontWeight:600, cursor:"pointer" }}>
+            ← Back to Itineraries
+          </button>
+          <button type="button" onClick={() => setLoadNonce(n => n + 1)} className="stv-btn stv-btn-primary"
+            style={{ background:C.accentStrong, color:"#fff", border:"none", borderRadius:RADIUS.sm, padding:"9px 16px", fontSize:13, fontWeight:600, cursor:"pointer" }}>
+            Retry
+          </button>
+        </div>
+      </div>
+    )
+  }
+  if (loading || !itinerary || !content) return <p style={{ color:C.textFaint, fontSize:13 }}>Loading…</p>
+
+  const days = content.days || []
+
+  const navItems = [
+    { key:"welcome", label:"Welcome" },
+    { key:"glance", label:"At a Glance" },
+    { key:"stay", label:"Your Stay" },
+    ...days.map((d, i) => ({ key:`day:${i}`, label:`Day ${i + 1}${d.label ? " — " + d.label : ""}` })),
+    { key:"experiences", label:"Experiences" },
+    { key:"stv", label:"Life at Swahili Tent Village" },
+    { key:"included", label:"Included / Bring" },
+    { key:"pricing", label:content.pricing?.label || "Package Investment" },
+    { key:"terms", label:"Terms" },
+    { key:"closing", label:"Closing" },
+  ]
+
+  function addDay() {
+    updateContent({ days: [...days, { id:`d-${Date.now()}`, label:"", date:"", activities:[] }] })
+    setActiveSection(`day:${days.length}`)
+  }
+  function updateDay(idx, next) {
+    updateContent({ days: days.map((d, i) => i === idx ? next : d) })
+  }
+  function removeDay(idx) {
+    updateContent({ days: days.filter((_, i) => i !== idx) })
+    setActiveSection("welcome")
+  }
+  // Cross-day activity move. The editor shows one day at a time (see the
+  // left nav above), so a real two-column mouse drag between two
+  // simultaneously-visible days isn't possible here -- this "Move to Day"
+  // action on each activity (see ActivityEditor) is the practical
+  // equivalent: it moves the activity object itself, verbatim, from one
+  // day's `activities` array to another's, in one atomic content update.
+  function moveActivityToDay(fromDayIdx, activityIdx, toDayIdx) {
+    if (fromDayIdx === toDayIdx) return
+    const fromDay = days[fromDayIdx]
+    const toDay = days[toDayIdx]
+    if (!fromDay || !toDay) return
+    const activity = fromDay.activities[activityIdx]
+    if (!activity) return
+    const nextDays = days.map((d, i) => {
+      if (i === fromDayIdx) return { ...d, activities: d.activities.filter((_, ai) => ai !== activityIdx) }
+      if (i === toDayIdx) return { ...d, activities: [...d.activities, activity] }
+      return d
+    })
+    updateContent({ days: nextDays })
+  }
+
+  return (
+    <div>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14, flexWrap:"wrap", gap:10 }}>
+        <div>
+          <button type="button" onClick={onBack} className="stv-btn stv-btn-ghost" style={{ background:"none", border:"none", color:C.textFaint, fontSize:12.5, cursor:"pointer", marginBottom:4 }}>← Back to Itineraries</button>
+          <h1 style={pT}>{itinerary.guest_name || "Untitled Itinerary"}</h1>
+        </div>
+        <div style={{ display:"flex", gap:10, alignItems:"center" }}>
+          <ItinSavePill state={saveState} />
+          <button type="button" onClick={handlePreview} disabled={busyAction} className="stv-btn stv-btn-secondary" style={{ background:C.surface, color:C.text, border:`1.5px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"9px 15px", fontSize:13, fontWeight:600, cursor:"pointer" }}>Preview</button>
+          <button type="button" onClick={handleGenerate} disabled={busyAction} className="stv-btn stv-btn-primary" style={{ background:C.accentStrong, color:"#fff", border:"none", borderRadius:RADIUS.sm, padding:"9px 15px", fontSize:13, fontWeight:600, cursor:"pointer", opacity: busyAction ? 0.7 : 1 }}>{busyAction ? "Working…" : "Generate & Download PDF"}</button>
+        </div>
+      </div>
+
+      <div style={{ display:"grid", gridTemplateColumns:"200px 1fr 260px", gap:16, alignItems:"start" }}>
+        {/* LEFT: structure nav */}
+        <div style={{ ...panelS, padding:10, position:"sticky", top:10 }}>
+          {navItems.map(n => (
+            <button key={n.key} type="button" onClick={() => setActiveSection(n.key)}
+              style={{
+                display:"block", width:"100%", textAlign:"left", padding:"8px 10px", borderRadius:RADIUS.sm, border:"none",
+                background: activeSection === n.key ? C.accentSoft : "transparent",
+                color: activeSection === n.key ? C.accentStrong : C.textSub,
+                fontWeight: activeSection === n.key ? 700 : 500, fontSize:12.5, cursor:"pointer", marginBottom:2, fontFamily:FONT,
+              }}>
+              {n.label}
+            </button>
+          ))}
+          <button type="button" onClick={addDay} className="stv-btn stv-btn-ghost"
+            style={{ display:"block", width:"100%", textAlign:"left", background:"none", border:`1.5px dashed ${C.borderStrong}`, color:C.textSub, borderRadius:RADIUS.sm, padding:"8px 10px", fontSize:12, fontWeight:500, cursor:"pointer", marginTop:6 }}>
+            ＋ Add Day
+          </button>
+        </div>
+
+        {/* CENTER: active section editor */}
+        <div style={{ minWidth:0 }}>
+          {activeSection === "welcome" && (
+            <div style={panelS}>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10, flexWrap:"wrap", gap:8 }}>
+                <h2 style={fTi}>Welcome Message</h2>
+                <div style={{ display:"flex", gap:8 }}>
+                  <button type="button" onClick={personalizeWithAI} disabled={aiBusy} className="stv-btn stv-btn-secondary"
+                    style={{ background:C.accentSoft, color:C.accentStrong, border:`1px solid ${C.accentSoft}`, borderRadius:RADIUS.sm, padding:"6px 11px", fontSize:11.5, cursor:"pointer", fontWeight:600, opacity: aiBusy ? 0.7 : 1 }}>
+                    {aiBusy ? "Personalizing…" : "✨ Personalize with AI"}
+                  </button>
+                  <button type="button" onClick={regenerateWelcome} className="stv-btn stv-btn-secondary" style={{ background:C.surface, color:C.textSub, border:`1px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"6px 11px", fontSize:11.5, cursor:"pointer", fontWeight:600 }}>↻ Regenerate</button>
+                </div>
+              </div>
+              <textarea value={content.welcomeText || ""} onChange={e => updateContent({ welcomeText:e.target.value })} rows={8} style={{ ...iS, resize:"vertical", fontFamily:FONT }} />
+              <p style={{ fontSize:11, color:C.textFaint, marginTop:8 }}>
+                "Personalize with AI" rewrites this from the guest details on the right using an AI provider configured on the server, and never invents facts. If no provider is configured, it falls back to the built-in personalization automatically.
+              </p>
+            </div>
+          )}
+
+          {activeSection === "glance" && (
+            <div style={panelS}>
+              <h2 style={fTi}>Key Experiences</h2>
+              <BulletListEditor items={content.atAGlance?.keyExperiences || []} onChange={v => updateContent({ atAGlance:{ ...content.atAGlance, keyExperiences:v } })} placeholder="e.g. Mnemba Island snorkeling" />
+              <h2 style={{ ...fTi, marginTop:20 }}>Route</h2>
+              <RouteStopsEditor
+                stops={content.routeStops || []}
+                enabled={content.routeEnabled}
+                onChangeStops={v => updateContent({ routeStops:v })}
+                onChangeEnabled={v => updateContent({ routeEnabled:v })}
+              />
+            </div>
+          )}
+
+          {activeSection === "stay" && (
+            <div style={panelS}>
+              <h2 style={fTi}>Your Stay</h2>
+              <label style={lS}>Accommodation</label>
+              <select value={itinerary.accommodation_tent_id || ""} onChange={e => {
+                const tent = tents.find(t => t.id === e.target.value)
+                updateItinerary({ accommodation_tent_id: e.target.value || null })
+                updateContent({ stay: { ...content.stay, tentId: e.target.value || null, tentName: tent?.name || "", description: tent?.description || content.stay?.description || "", amenities: tent?.amenities || content.stay?.amenities || [], heroImageUrl: tent?.images?.[0] || content.stay?.heroImageUrl || "" } })
+              }} style={{ ...iS, marginBottom:12 }}>
+                <option value="">— Select —</option>
+                {tents.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+              </select>
+              <label style={lS}>Description (guest-facing)</label>
+              <textarea value={content.stay?.description || ""} onChange={e => updateContent({ stay:{ ...content.stay, description:e.target.value } })} rows={3} style={{ ...iS, marginBottom:12, resize:"vertical", fontFamily:FONT }} />
+              <label style={lS}>Amenities</label>
+              <BulletListEditor items={content.stay?.amenities || []} onChange={v => updateContent({ stay:{ ...content.stay, amenities:v } })} placeholder="e.g. Private veranda" />
+              <label style={{ ...lS, marginTop:12 }}>Hero Photo</label>
+              {content.stay?.heroImageUrl && !content.stay?.heroImageId && (
+                <img src={content.stay.heroImageUrl} alt="" style={{ width:120, height:80, objectFit:"cover", borderRadius:RADIUS.sm, border:`1px solid ${C.border}`, marginBottom:8, display:"block" }} />
+              )}
+              <MediaSlot imageId={content.stay?.heroImageId} mediaById={mediaById}
+                onPick={() => setActiveSection("stay:picker")}
+                onRemove={() => updateContent({ stay:{ ...content.stay, heroImageId:null } })}
+                label="Replace with Media Library Photo" />
+              {activeSection === "stay:picker" && (
+                <MediaPickerModal mediaList={mediaList} initialQuery={content.stay?.tentName}
+                  onSelect={m => { updateContent({ stay:{ ...content.stay, heroImageId:m.id } }); setActiveSection("stay") }}
+                  onClose={() => setActiveSection("stay")} />
+              )}
+            </div>
+          )}
+
+          {activeSection.startsWith("day:") && days[Number(activeSection.split(":")[1])] && (
+            <DayEditor
+              day={days[Number(activeSection.split(":")[1])]}
+              dayIndex={Number(activeSection.split(":")[1])}
+              dayOptions={days.map((d, i) => ({ index:i, label:`Day ${i + 1}${d.label ? " — " + d.label : ""}` }))}
+              onMoveActivityToDay={(activityIdx, toDayIdx) => moveActivityToDay(Number(activeSection.split(":")[1]), activityIdx, toDayIdx)}
+              onChange={next => updateDay(Number(activeSection.split(":")[1]), next)}
+              onRemove={() => removeDay(Number(activeSection.split(":")[1]))}
+              mediaById={mediaById} mediaList={mediaList} showStaffNotes={showStaffNotes}
+              libraryItems={libraryItems} guestType={itinerary.guest_type} occasion={itinerary.occasion}
+            />
+          )}
+
+          {activeSection === "experiences" && (
+            <div style={panelS}>
+              <h2 style={fTi}>Experience Pages</h2>
+              <p style={{ fontSize:12, color:C.textFaint, marginTop:-10, marginBottom:14 }}>A full page is generated for each experience below -- use this for major excursions worth a dedicated spread.</p>
+              <CardListEditor items={content.experiences || []} onChange={v => updateContent({ experiences:v })} mediaById={mediaById} mediaList={mediaList} full showStaffNotes={showStaffNotes} />
+            </div>
+          )}
+
+          {activeSection === "stv" && (
+            <div style={panelS}>
+              <h2 style={fTi}>Life at Swahili Tent Village</h2>
+              <p style={{ fontSize:12, color:C.textFaint, marginTop:-10, marginBottom:14 }}>Restaurant, pool, park and other on-site facilities relevant to this guest.</p>
+              <CardListEditor items={content.stvExperience?.items || []} onChange={v => updateContent({ stvExperience:{ items:v } })} mediaById={mediaById} mediaList={mediaList} showStaffNotes={showStaffNotes} />
+            </div>
+          )}
+
+          {activeSection === "included" && (
+            <div style={panelS}>
+              <h2 style={fTi}>What's Included</h2>
+              <BulletListEditor items={content.included || []} onChange={v => updateContent({ included:v })} placeholder="e.g. Daily breakfast" />
+              <h2 style={{ ...fTi, marginTop:20 }}>What to Bring</h2>
+              <BulletListEditor items={content.whatToBring || []} onChange={v => updateContent({ whatToBring:v })} placeholder="e.g. Reef-safe sunscreen" />
+            </div>
+          )}
+
+          {activeSection === "pricing" && (
+            <div style={panelS}>
+              <h2 style={fTi}>Package Investment</h2>
+              <label style={lS}>Section Label</label>
+              <input value={content.pricing?.label || ""} onChange={e => updateContent({ pricing:{ ...content.pricing, label:e.target.value } })} style={{ ...iS, marginBottom:12 }} />
+              <div style={{ display:"flex", gap:10, marginBottom:12 }}>
+                <div style={{ flex:1 }}>
+                  <label style={lS}>Reference Price (optional)</label>
+                  <input type="number" value={content.pricing?.referencePrice ?? ""} onChange={e => updateContent({ pricing:{ ...content.pricing, referencePrice: e.target.value === "" ? null : Number(e.target.value) } })} style={iS} />
+                </div>
+                <div style={{ flex:1 }}>
+                  <label style={lS}>Current Price</label>
+                  <input type="number" value={content.pricing?.currentPrice ?? ""} onChange={e => updateContent({ pricing:{ ...content.pricing, currentPrice: e.target.value === "" ? null : Number(e.target.value) } })} style={iS} />
+                </div>
+                <div style={{ width:90 }}>
+                  <label style={lS}>Currency</label>
+                  <input value={content.pricing?.currency || "TZS"} onChange={e => updateContent({ pricing:{ ...content.pricing, currency:e.target.value } })} style={iS} />
+                </div>
+              </div>
+              <label style={lS}>Note (optional)</label>
+              <textarea value={content.pricing?.note || ""} onChange={e => updateContent({ pricing:{ ...content.pricing, note:e.target.value } })} rows={2} style={{ ...iS, resize:"vertical", fontFamily:FONT }} />
+            </div>
+          )}
+
+          {activeSection === "terms" && (
+            <div style={panelS}>
+              <h2 style={fTi}>Important Information / Terms</h2>
+              <textarea value={content.terms || ""} onChange={e => updateContent({ terms:e.target.value })} rows={8} style={{ ...iS, resize:"vertical", fontFamily:FONT }} />
+            </div>
+          )}
+
+          {activeSection === "closing" && (
+            <div style={panelS}>
+              <h2 style={fTi}>Closing Page</h2>
+              <label style={lS}>Headline</label>
+              <input value={content.closing?.headline || ""} onChange={e => updateContent({ closing:{ ...content.closing, headline:e.target.value } })} style={{ ...iS, marginBottom:12 }} />
+              <label style={lS}>Message</label>
+              <textarea value={content.closing?.message || ""} onChange={e => updateContent({ closing:{ ...content.closing, message:e.target.value } })} rows={4} style={{ ...iS, resize:"vertical", fontFamily:FONT }} />
+            </div>
+          )}
+        </div>
+
+        {/* RIGHT: properties */}
+        <div style={{ ...panelS, padding:16, position:"sticky", top:10 }}>
+          <h2 style={{ ...fTi, fontSize:13 }}>Properties</h2>
+          <label style={lS}>Guest Name</label>
+          <input value={itinerary.guest_name || ""} onChange={e => updateItinerary({ guest_name:e.target.value })} style={{ ...iS, marginBottom:10 }} />
+          <label style={lS}>Guest Email</label>
+          <input value={itinerary.guest_email || ""} onChange={e => updateItinerary({ guest_email:e.target.value })} style={{ ...iS, marginBottom:10 }} />
+          <label style={lS}>Guest Phone</label>
+          <input value={itinerary.guest_phone || ""} onChange={e => updateItinerary({ guest_phone:e.target.value })} style={{ ...iS, marginBottom:10 }} />
+          <label style={lS}>Guest Type</label>
+          <select value={itinerary.guest_type} onChange={e => updateItinerary({ guest_type:e.target.value })} style={{ ...iS, marginBottom:10 }}>
+            {ITIN_GUEST_TYPES.map(g => <option key={g} value={g}>{t(ITIN_GUEST_TYPE_KEYS[g]) || t_capitalize(g)}</option>)}
+          </select>
+          <label style={lS}>Occasion</label>
+          <input value={itinerary.occasion || ""} onChange={e => updateItinerary({ occasion:e.target.value })} placeholder="e.g. Anniversary" style={{ ...iS, marginBottom:10 }} />
+          <label style={lS}>Preferences</label>
+          <input value={content.preferences || ""} onChange={e => updateContent({ preferences:e.target.value })} placeholder="e.g. Private, romantic, quiet evenings" style={{ ...iS, marginBottom:10 }} />
+          <div style={{ display:"flex", gap:8, marginBottom:10 }}>
+            <div style={{ flex:1 }}>
+              <label style={lS}>Check-in</label>
+              <input type="date" value={itinerary.check_in || ""} onChange={e => updateItinerary({ check_in:e.target.value })} style={iS} />
+            </div>
+            <div style={{ flex:1 }}>
+              <label style={lS}>Check-out</label>
+              <input type="date" value={itinerary.check_out || ""} onChange={e => updateItinerary({ check_out:e.target.value })} style={iS} />
+            </div>
+          </div>
+          <div style={{ display:"flex", gap:8, marginBottom:10 }}>
+            <div style={{ flex:1 }}>
+              <label style={lS}>Adults</label>
+              <input type="number" min="0" value={itinerary.adults ?? 1} onChange={e => updateItinerary({ adults:Number(e.target.value) })} style={iS} />
+            </div>
+            <div style={{ flex:1 }}>
+              <label style={lS}>Children</label>
+              <input type="number" min="0" value={itinerary.children ?? 0} onChange={e => updateItinerary({ children:Number(e.target.value) })} style={iS} />
+            </div>
+          </div>
+          <label style={lS}>Title</label>
+          <input value={itinerary.title || ""} onChange={e => updateItinerary({ title:e.target.value })} style={{ ...iS, marginBottom:10 }} />
+          <label style={lS}>Subtitle</label>
+          <input value={itinerary.subtitle || ""} onChange={e => updateItinerary({ subtitle:e.target.value })} style={{ ...iS, marginBottom:10 }} />
+          <label style={lS}>Status</label>
+          <select value={itinerary.status} onChange={e => updateItinerary({ status:e.target.value })} style={{ ...iS, marginBottom:14 }}>
+            <option value="draft">Draft</option>
+            <option value="final">Final</option>
+            <option value="archived">Archived</option>
+          </select>
+          <div style={{ borderTop:`1px solid ${C.border}`, paddingTop:12, marginBottom:12 }}>
+            <label style={lS}>Guest Requests</label>
+            <textarea value={content.guestRequests || ""} onChange={e => updateContent({ guestRequests:e.target.value })}
+              placeholder="e.g. Guest requested a quiet dinner table near the pool." rows={2}
+              style={{ ...iS, marginBottom:6, resize:"vertical", fontFamily:FONT }} />
+            <label style={{ display:"flex", alignItems:"center", gap:8, fontSize:11.5, color:C.textFaint, cursor:"pointer" }}>
+              <input type="checkbox" checked={!!content.guestRequestsVisible} onChange={e => updateContent({ guestRequestsVisible:e.target.checked })} />
+              Include in guest-facing PDF
+            </label>
+          </div>
+          <div style={{ borderTop:`1px solid ${C.border}`, paddingTop:12, marginBottom:12 }}>
+            <label style={lS}>Staff Notes <span style={{ color:C.warnStrong, fontWeight:600 }}>(internal only)</span></label>
+            <textarea value={content.staffNotes || ""} onChange={e => updateContent({ staffNotes:e.target.value })}
+              placeholder="e.g. Confirm room decoration with housekeeping one day before arrival." rows={2}
+              style={{ ...iS, background:C.warnSoft, borderColor:C.warnStrong, resize:"vertical", fontFamily:FONT }} />
+            <p style={{ fontSize:10.5, color:C.textFaint, margin:"4px 0 0" }}>Never appears in the guest PDF or preview.</p>
+          </div>
+          <div style={{ borderTop:`1px solid ${C.border}`, paddingTop:12 }}>
+            <label style={{ display:"flex", alignItems:"center", gap:8, fontSize:12, color:C.textSub, cursor:"pointer" }}>
+              <input type="checkbox" checked={showStaffNotes} onChange={e => setShowStaffNotes(e.target.checked)} />
+              Show staff-only notes in editor
+            </label>
+          </div>
+        </div>
+      </div>
+
+      {previewUrl && <ItineraryPreviewModal url={previewUrl} onClose={() => setPreviewUrl(null)} onDownload={handleGenerate} />}
+    </div>
+  )
+}
+
+function t_capitalize(s) { return s ? s[0].toUpperCase() + s.slice(1) : s }
+
+/* ── CREATE FLOW: From Booking / Standalone ──────────────────
+   Two creation modes per spec: prefill from an existing stv_bookings row,
+   or enter everything manually with no booking record at all. Either way
+   this only ever *reads* stv_bookings -- it never writes to it, and the
+   itinerary keeps its own guest_name/email/phone/dates snapshot from this
+   moment on (a later edit to the booking does not retroactively rewrite an
+   already-created proposal). */
+function NewItineraryForm({ mode, bookings, tents, libraryItems, user, displayName, showToast, onCreated, onCancel }) {
+  const [bookingId, setBookingId] = useState("")
+  const [guestName, setGuestName] = useState("")
+  const [guestEmail, setGuestEmail] = useState("")
+  const [guestPhone, setGuestPhone] = useState("")
+  const [tentId, setTentId] = useState("")
+  const [checkIn, setCheckIn] = useState("")
+  const [checkOut, setCheckOut] = useState("")
+  const [adults, setAdults] = useState(2)
+  const [children, setChildren] = useState(0)
+  const [guestType, setGuestType] = useState("couple")
+  const [occasion, setOccasion] = useState("")
+  const [preferences, setPreferences] = useState("")
+  const [selectedLibraryIds, setSelectedLibraryIds] = useState([])
+  const [bookingPricing, setBookingPricing] = useState(null) // { currentPrice, currency } -- only set from a real booking, never guessed
+  const [creating, setCreating] = useState(false)
+
+  function pickBooking(id) {
+    setBookingId(id)
+    const b = bookings.find(x => x.id === id)
+    if (!b) { setBookingPricing(null); return }
+    setGuestName(b.guest_name || "")
+    setGuestEmail(b.guest_email || "")
+    setGuestPhone(b.guest_phone || "")
+    setTentId(b.tent_id || "")
+    setCheckIn(b.check_in || "")
+    setCheckOut(b.check_out || "")
+    setAdults(b.adults ?? 2)
+    setChildren(b.children ?? 0)
+    setBookingPricing(b.total != null ? { currentPrice: b.total, currency: b.currency || "TZS" } : null)
+  }
+
+  function toggleLibrary(id) {
+    setSelectedLibraryIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])
+  }
+
+  async function submit() {
+    if (!guestName.trim()) { showToast("Guest name is required", "error"); return }
+    setCreating(true)
+    try {
+      const tent = tents.find(t => t.id === tentId)
+      const selectedItems = libraryItems.filter(li => selectedLibraryIds.includes(li.id))
+      const days = generateDraftDays({ checkIn, checkOut, libraryItems: selectedItems })
+      const keyExperiences = selectedItems.filter(li => li.kind === "excursion").map(li => li.title)
+      const welcomeText = buildItinWelcomeText({
+        guestName, guestType, occasion, tentName: tent?.name, checkIn, checkOut, keyExperiences, preferences,
+      })
+      const content = {
+        ...emptyItineraryContent(),
+        welcomeText,
+        preferences,
+        atAGlance: { keyExperiences },
+        stay: tent
+          ? { tentId: tent.id, tentName: tent.name, description: tent.description || "", amenities: tent.amenities || [], heroImageUrl: tent.images?.[0] || "" }
+          : {},
+        days,
+        pricing: bookingPricing
+          ? { label: "Package Investment", currentPrice: bookingPricing.currentPrice, currency: bookingPricing.currency, referencePrice: null, note: "" }
+          : { label: "Package Investment" },
+      }
+      const { data, error } = await supabase.from("stv_itineraries").insert([{
+        booking_id: mode === "booking" ? (bookingId || null) : null,
+        accommodation_tent_id: tentId || null,
+        guest_name: guestName, guest_email: guestEmail, guest_phone: guestPhone,
+        guest_type: guestType, occasion,
+        check_in: checkIn || null, check_out: checkOut || null,
+        adults, children,
+        title: `${guestName ? guestName + "'s " : ""}Swahili Tent Village Experience`,
+        subtitle: occasion || "",
+        content,
+        created_by: user?.id || null, created_by_name: displayName || "",
+      }]).select().single()
+      if (error) throw error
+      showToast("Draft itinerary created")
+      onCreated(data.id)
+    } catch (e) {
+      showToast(`Could not create itinerary: ${e.message}`, "error")
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  const groupedLibrary = LIBRARY_KINDS.map(kind => ({ kind, items: libraryItems.filter(li => li.kind === kind) }))
+    .filter(g => g.items.length > 0)
+
+  return (
+    <div>
+      <button type="button" onClick={onCancel} className="stv-btn stv-btn-ghost"
+        style={{ background:"none", border:"none", color:C.textFaint, fontSize:12.5, cursor:"pointer", marginBottom:14 }}>
+        ← Back to Itineraries
+      </button>
+      <h1 style={{ ...pT, marginBottom:4 }}>{mode === "booking" ? "New Itinerary — From Booking" : "New Itinerary — Standalone"}</h1>
+      <p style={{ margin:"0 0 20px", color:C.textFaint, fontSize:13 }}>
+        {mode === "booking"
+          ? "Pick a booking to prefill the guest and stay details below, then adjust anything before generating the first draft."
+          : "Enter the guest's details manually — no booking record is required."}
+      </p>
+
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(300px, 1fr))", gap:16, marginBottom:16 }}>
+        <div style={panelS}>
+          <h2 style={fTi}>Guest</h2>
+          {mode === "booking" && (
+            <>
+              <label style={lS}>Booking</label>
+              <select value={bookingId} onChange={e => pickBooking(e.target.value)} style={{ ...iS, marginBottom:14 }}>
+                <option value="">— Select a booking —</option>
+                {bookings.map(b => (
+                  <option key={b.id} value={b.id}>
+                    {(b.guest_name || "Guest")} — {b.reference || b.id.slice(0, 8)} ({b.check_in || "?"} → {b.check_out || "?"})
+                  </option>
+                ))}
+              </select>
+              {bookings.length === 0 && <p style={{ fontSize:12, color:C.textFaint, marginTop:-8, marginBottom:14 }}>No bookings found — use Standalone instead, or create the booking first.</p>}
+            </>
+          )}
+          <label style={lS}>Guest Name *</label>
+          <input value={guestName} onChange={e => setGuestName(e.target.value)} style={{ ...iS, marginBottom:12 }} />
+          <label style={lS}>Guest Email</label>
+          <input type="email" value={guestEmail} onChange={e => setGuestEmail(e.target.value)} style={{ ...iS, marginBottom:12 }} />
+          <label style={lS}>Guest Phone</label>
+          <input value={guestPhone} onChange={e => setGuestPhone(e.target.value)} style={iS} />
+        </div>
+
+        <div style={panelS}>
+          <h2 style={fTi}>Stay</h2>
+          <label style={lS}>Accommodation</label>
+          <select value={tentId} onChange={e => setTentId(e.target.value)} style={{ ...iS, marginBottom:12 }}>
+            <option value="">— Not set —</option>
+            {tents.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
+          <div style={{ display:"flex", gap:10, marginBottom:12 }}>
+            <div style={{ flex:1 }}>
+              <label style={lS}>Check-in</label>
+              <input type="date" value={checkIn} onChange={e => setCheckIn(e.target.value)} style={iS} />
+            </div>
+            <div style={{ flex:1 }}>
+              <label style={lS}>Check-out</label>
+              <input type="date" value={checkOut} onChange={e => setCheckOut(e.target.value)} style={iS} />
+            </div>
+          </div>
+          <div style={{ display:"flex", gap:10 }}>
+            <div style={{ flex:1 }}>
+              <label style={lS}>Adults</label>
+              <input type="number" min="0" value={adults} onChange={e => setAdults(Number(e.target.value))} style={iS} />
+            </div>
+            <div style={{ flex:1 }}>
+              <label style={lS}>Children</label>
+              <input type="number" min="0" value={children} onChange={e => setChildren(Number(e.target.value))} style={iS} />
+            </div>
+          </div>
+        </div>
+
+        <div style={panelS}>
+          <h2 style={fTi}>Personalization</h2>
+          <label style={lS}>Guest Type</label>
+          <select value={guestType} onChange={e => setGuestType(e.target.value)} style={{ ...iS, marginBottom:12 }}>
+            {ITIN_GUEST_TYPES.map(g => <option key={g} value={g}>{t_capitalize(g)}</option>)}
+          </select>
+          <label style={lS}>Occasion (optional)</label>
+          <input value={occasion} onChange={e => setOccasion(e.target.value)} placeholder="e.g. Anniversary" style={{ ...iS, marginBottom:12 }} />
+          <label style={lS}>Preferences (optional)</label>
+          <input value={preferences} onChange={e => setPreferences(e.target.value)} placeholder="e.g. Private, romantic, quiet evenings" style={iS} />
+          <p style={{ fontSize:11.5, color:C.textFaint, marginTop:10 }}>
+            The welcome message is drawn from these fields and only mentions details actually entered here — nothing about the guest is ever invented.
+          </p>
+        </div>
+      </div>
+
+      <div style={{ ...panelS, marginBottom:16 }}>
+        <h2 style={fTi}>Include in the Draft</h2>
+        <p style={{ margin:"-12px 0 14px", color:C.textFaint, fontSize:12.5 }}>
+          Selected items are woven into a day-by-day skeleton you can fully edit afterward — nothing here is final, and you can add or remove days and activities freely once the draft is created.
+        </p>
+        {groupedLibrary.map(({ kind, items }) => (
+          <div key={kind} style={{ marginBottom:14 }}>
+            <h3 style={{ margin:"0 0 8px", fontSize:11.5, fontWeight:700, color:C.textSub, textTransform:"uppercase", letterSpacing:.5 }}>{kind}s</h3>
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(220px, 1fr))", gap:8 }}>
+              {items.map(li => (
+                <label key={li.id} style={{ display:"flex", alignItems:"flex-start", gap:8, fontSize:12.5, color:C.text, border:`1px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"8px 10px", cursor:"pointer" }}>
+                  <input type="checkbox" checked={selectedLibraryIds.includes(li.id)} onChange={() => toggleLibrary(li.id)} style={{ marginTop:2 }} />
+                  <span>
+                    <strong>{li.title}</strong>
+                    {li.short_description && <span style={{ display:"block", color:C.textFaint, fontSize:11.5 }}>{li.short_description}</span>}
+                  </span>
+                </label>
+              ))}
+            </div>
+          </div>
+        ))}
+        {libraryItems.length === 0 && (
+          <p style={{ color:C.textFaint, fontSize:13 }}>No content library items yet — add excursions, transport and meals from the Content Library, or skip this and build the day-by-day plan manually in the editor.</p>
+        )}
+      </div>
+
+      <button type="button" onClick={submit} disabled={creating} className="stv-btn stv-btn-primary"
+        style={{ ...sB, width:"auto", padding:"13px 30px", opacity: creating ? 0.7 : 1 }}>
+        {creating ? "Generating Draft…" : "Generate Draft Itinerary"}
+      </button>
+    </div>
+  )
+}
+
+/* ── ITINERARY SECTION ERROR BOUNDARY ──────────────────────────────
+   There is no app-wide React error boundary, so an uncaught render-time
+   exception anywhere in the tree unmounts the whole app to a blank white
+   page with no recovery. That's the exact bug class that caused Edit /
+   Review / other itinerary actions to blank the entire POS (a missing
+   `useMemo` import made every render of the editor and library-item modal
+   throw). This boundary is scoped to the itinerary sub-views only -- it
+   does not touch the invoice maker, auth, or any other page -- and turns
+   any future render crash in this section into a real "Unable to load"
+   panel with Retry / Back, instead of a silent blank page. */
+class ItinerarySectionErrorBoundary extends Component {
+  constructor(props) {
+    super(props)
+    this.state = { error: null }
+  }
+  static getDerivedStateFromError(error) {
+    return { error }
+  }
+  componentDidCatch(error, info) {
+    console.error("Itinerary section failed to render:", error, info)
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding:"64px 24px", textAlign:"center" }}>
+          <p style={{ margin:"0 0 6px", fontWeight:700, fontSize:15, color:C.text }}>Unable to load this itinerary.</p>
+          <p style={{ margin:"0 0 22px", fontSize:13, color:C.textFaint }}>{this.state.error?.message || "An unexpected error occurred."}</p>
+          <div style={{ display:"flex", gap:10, justifyContent:"center" }}>
+            <button type="button" onClick={() => this.setState({ error: null })} className="stv-btn stv-btn-primary"
+              style={{ background:C.accentStrong, color:"#fff", border:"none", borderRadius:RADIUS.sm, padding:"9px 18px", fontSize:13, fontWeight:600, cursor:"pointer" }}>
+              Retry
+            </button>
+            <button type="button" onClick={() => { this.setState({ error: null }); this.props.onBack && this.props.onBack() }} className="stv-btn stv-btn-secondary"
+              style={{ background:C.surface, color:C.text, border:`1px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"9px 18px", fontSize:13, fontWeight:600, cursor:"pointer" }}>
+              Back to Itineraries
+            </button>
+          </div>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
+/* ── TOP-LEVEL PAGE: list / create / editor / media / library router ──
+   This is the component referenced by App()'s route gate
+   (`{page === "itinerary" && isOwner && <ItinerariesPage .../>}`). The
+   `isOwner` check below is a third, redundant layer on top of that route
+   gate and the Sidebar nav entry -- see the header comment at the top of
+   this file. Every table this page touches (stv_itineraries and friends)
+   also has its own RLS policy requiring has_minimum_role('stv-pos','admin'),
+   so a Worker who somehow reached this component still gets nothing back
+   from Supabase. */
+function ItinerariesPage({ user, isOwner, displayName, showToast }) {
+  const { t } = useLanguage()
+  const [view, setView] = useState("list") // list | newBooking | newStandalone | editor | media | library
+  const [itineraries, setItineraries] = useState([])
+  const [tents, setTents] = useState([])
+  const [bookings, setBookings] = useState([])
+  const [libraryItems, setLibraryItems] = useState([])
+  const [mediaList, setMediaList] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [loadErr, setLoadErr] = useState("")
+  const [search, setSearch] = useState("")
+  const [editingId, setEditingId] = useState(null)
+  const [rowBusyId, setRowBusyId] = useState(null)
+  const [preview, setPreview] = useState(null) // { itinerary, url }
+
+  async function loadAll() {
+    setLoading(true)
+    try {
+      const [itinRes, tentsRes, bookingsRes, libRes, mediaRes] = await Promise.all([
+        supabase.from("stv_itineraries").select("*").order("created_at", { ascending:false }),
+        supabase.from("stv_tents").select("id,name,description,images,amenities").order("name"),
+        supabase.from("stv_bookings").select("id,reference,guest_name,guest_email,guest_phone,tent_id,check_in,check_out,adults,children,status,total,currency").order("check_in", { ascending:false }).limit(300),
+        supabase.from("stv_itinerary_library").select("*").eq("is_active", true).order("kind").order("sort_order"),
+        supabase.from("stv_itinerary_media").select("*").order("sort_order").order("created_at", { ascending:false }),
+      ])
+      if (itinRes.error) throw itinRes.error
+      if (tentsRes.error) throw tentsRes.error
+      // Bookings/library are supporting data for the create flow -- if either
+      // fails (e.g. a booking column changes upstream) the itinerary list
+      // itself should still render rather than the whole page going blank.
+      setItineraries(itinRes.data || [])
+      setTents(tentsRes.data || [])
+      setBookings(bookingsRes.error ? [] : (bookingsRes.data || []))
+      setLibraryItems(libRes.error ? [] : (libRes.data || []))
+      setMediaList(mediaRes.error ? [] : (mediaRes.data || []))
+      setLoadErr("")
+    } catch (e) {
+      setLoadErr(e.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { loadAll() }, [])
+
+  // Third, redundant access-control layer (see header comment) -- placed
+  // after every hook above so this early return never changes the hook
+  // count/order between renders, satisfying the Rules of Hooks even in the
+  // hypothetical case where `isOwner` flips while this component is
+  // mounted. Layers 1 (nav) and 2 (route gate) already keep a non-owner
+  // from reaching this component at all.
+  if (!isOwner) return null
+
+  async function reloadMedia() {
+    const { data, error } = await supabase.from("stv_itinerary_media").select("*").order("sort_order").order("created_at", { ascending:false })
+    if (!error) setMediaList(data || [])
+  }
+  async function reloadLibrary() {
+    const { data, error } = await supabase.from("stv_itinerary_library").select("*").eq("is_active", true).order("kind").order("sort_order")
+    if (!error) setLibraryItems(data || [])
+  }
+
+  const filtered = itineraries.filter(it => {
+    const q = search.trim().toLowerCase()
+    if (!q) return true
+    return (it.guest_name || "").toLowerCase().includes(q) || (it.title || "").toLowerCase().includes(q)
+  })
+
+  function openEditor(id) { setEditingId(id); setView("editor") }
+  function backToList() {
+    setEditingId(null)
+    setView("list")
+    loadAll() // picks up whatever changed while in the editor/create flow/library
+  }
+
+  async function handleCreated(id) {
+    await loadAll()
+    openEditor(id)
+  }
+
+  async function handleRowPreview(itin) {
+    setRowBusyId(itin.id)
+    try {
+      const guestSafe = await resolveGuestContent(itin.content || {}, mediaList)
+      const { url } = await getItineraryPdfBlobUrl(itin, guestSafe)
+      setPreview({ itinerary: itin, url })
+    } catch (e) {
+      showToast(`Could not build preview: ${e.message}`, "error")
+    } finally {
+      setRowBusyId(null)
+    }
+  }
+
+  async function handleRowDownload(itin) {
+    setRowBusyId(itin.id)
+    try {
+      const patch = await generateItineraryPdf(itin, mediaList, user)
+      setItineraries(prev => prev.map(i => i.id === itin.id ? { ...i, ...patch } : i))
+      showToast("Itinerary PDF generated and downloaded")
+    } catch (e) {
+      showToast(`Could not generate PDF: ${e.message}`, "error")
+    } finally {
+      setRowBusyId(null)
+    }
+  }
+
+  async function handleDelete(itin) {
+    if (!confirm(t("confirmDeleteItinerary"))) return
+    setRowBusyId(itin.id)
+    try {
+      const { error } = await supabase.from("stv_itineraries").delete().eq("id", itin.id)
+      if (error) throw error
+      setItineraries(prev => prev.filter(i => i.id !== itin.id))
+      showToast("Itinerary deleted")
+    } catch (e) {
+      showToast(`Could not delete: ${e.message}`, "error")
+    } finally {
+      setRowBusyId(null)
+    }
+  }
+
+  if (view === "newBooking" || view === "newStandalone") {
+    return (
+      <ItinerarySectionErrorBoundary key={view} onBack={() => setView("list")}>
+        <NewItineraryForm
+          mode={view === "newBooking" ? "booking" : "standalone"}
+          bookings={bookings} tents={tents} libraryItems={libraryItems}
+          user={user} displayName={displayName} showToast={showToast}
+          onCreated={handleCreated} onCancel={() => setView("list")}
+        />
+      </ItinerarySectionErrorBoundary>
+    )
+  }
+
+  if (view === "editor" && editingId) {
+    return (
+      <ItinerarySectionErrorBoundary key={editingId} onBack={backToList}>
+        <ItineraryEditorPage
+          itineraryId={editingId} tents={tents} libraryItems={libraryItems}
+          mediaList={mediaList} reloadMedia={reloadMedia}
+          user={user} displayName={displayName} showToast={showToast}
+          onBack={backToList}
+        />
+      </ItinerarySectionErrorBoundary>
+    )
+  }
+
+  if (view === "media") {
+    return (
+      <ItinerarySectionErrorBoundary key="media" onBack={() => { reloadMedia(); setView("list") }}>
+        <MediaLibraryPage user={user} showToast={showToast} onBack={() => { reloadMedia(); setView("list") }} />
+      </ItinerarySectionErrorBoundary>
+    )
+  }
+
+  if (view === "library") {
+    return (
+      <ItinerarySectionErrorBoundary key="library" onBack={() => { reloadLibrary(); setView("list") }}>
+        <ContentLibraryPage user={user} showToast={showToast} onBack={() => { reloadLibrary(); setView("list") }} />
+      </ItinerarySectionErrorBoundary>
+    )
+  }
+
+  return (
+    <div>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:SPACE.xl, flexWrap:"wrap", gap:12 }}>
+        <div>
+          <h1 style={{ ...pT, marginBottom:4 }}>Swahili Tent Itinerary</h1>
+          <p style={{ margin:0, color:C.textFaint, fontSize:13 }}>Build a personalized, guest-facing experience proposal — separate from invoices, never sent automatically.</p>
+        </div>
+        <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
+          <button type="button" onClick={() => setView("library")} className="stv-btn stv-btn-secondary"
+            style={{ background:C.surface, color:C.text, border:`1.5px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"10px 16px", fontSize:13, fontWeight:600, cursor:"pointer" }}>
+            Content Library
+          </button>
+          <button type="button" onClick={() => setView("media")} className="stv-btn stv-btn-secondary"
+            style={{ background:C.surface, color:C.text, border:`1.5px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"10px 16px", fontSize:13, fontWeight:600, cursor:"pointer" }}>
+            Media Library
+          </button>
+          <button type="button" onClick={() => setView("newBooking")} className="stv-btn stv-btn-secondary"
+            style={{ background:C.surface, color:C.text, border:`1.5px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"10px 16px", fontSize:13, fontWeight:600, cursor:"pointer" }}>
+            + From Booking
+          </button>
+          <button type="button" onClick={() => setView("newStandalone")} className="stv-btn stv-btn-primary"
+            style={{ ...sB, width:"auto", padding:"10px 18px", fontSize:13 }}>
+            + Standalone
+          </button>
+        </div>
+      </div>
+
+      <div style={{ marginBottom:16, maxWidth:360 }}>
+        <input placeholder="Search by guest name or title…" value={search} onChange={e => setSearch(e.target.value)} style={iS} aria-label="Search itineraries" />
+      </div>
+
+      <div style={panelS}>
+        <div style={{ overflowX:"auto", WebkitOverflowScrolling:"touch" }}>
+          <table className="stv-table" style={{ width:"100%", minWidth:760, borderCollapse:"collapse" }}>
+            <thead>
+              <tr style={{ borderBottom:`1.5px solid ${C.border}` }}>
+                {["Guest", "Dates", "Type", "Status", "Version", "Updated", "Actions"].map((h, i) => (
+                  <th key={i} scope="col" style={{ textAlign: i===6 ? "right" : "left", padding:"0 12px 10px 0", fontSize:10.5, color:C.textFaint, fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map(it => {
+                const busy = rowBusyId === it.id
+                return (
+                  <tr key={it.id} style={{ borderBottom:`1px solid ${C.bg}` }}>
+                    <td style={{ ...tS, fontWeight:700 }}>{it.guest_name || "Untitled"}</td>
+                    <td style={tS}>{it.check_in ? `${formatDMY(it.check_in)} → ${formatDMY(it.check_out)}` : "—"}</td>
+                    <td style={tS}>{t_capitalize(it.guest_type)}</td>
+                    <td style={tS}>
+                      <span style={{
+                        display:"inline-block", padding:"3px 9px", borderRadius:RADIUS.pill, fontSize:11, fontWeight:700,
+                        background: it.status === "final" ? C.accentSoft : it.status === "archived" ? C.bg : C.warnSoft,
+                        color: it.status === "final" ? C.accentStrong : it.status === "archived" ? C.textFaint : C.warnStrong,
+                      }}>
+                        {t_capitalize(it.status)}
+                      </span>
+                    </td>
+                    <td style={tS}>v{it.version || 1}</td>
+                    <td style={{ ...tS, color:C.textFaint, fontSize:12 }}>{it.updated_at ? formatDMY(it.updated_at.slice(0, 10)) : "—"}</td>
+                    <td style={{ ...tS, textAlign:"right", whiteSpace:"nowrap" }}>
+                      <button type="button" onClick={() => openEditor(it.id)} disabled={busy} title="Edit"
+                        style={{ background:"none", border:"none", cursor:"pointer", color:C.textSub, fontWeight:600, fontSize:12.5, padding:"4px 6px", opacity: busy ? 0.5 : 1 }}>
+                        Edit
+                      </button>
+                      <button type="button" onClick={() => handleRowPreview(it)} disabled={busy} title="Preview"
+                        style={{ background:"none", border:"none", cursor:"pointer", color:C.accentStrong, fontWeight:600, fontSize:12.5, padding:"4px 6px", opacity: busy ? 0.5 : 1 }}>
+                        Preview
+                      </button>
+                      <button type="button" onClick={() => handleRowDownload(it)} disabled={busy} title="Generate & Download PDF"
+                        style={{ background:"none", border:"none", cursor:"pointer", color:C.accentStrong, fontWeight:600, fontSize:12.5, padding:"4px 6px", opacity: busy ? 0.5 : 1 }}>
+                        ⭳
+                      </button>
+                      <button type="button" onClick={() => handleDelete(it)} disabled={busy} title="Delete"
+                        style={{ background:"none", border:"none", cursor:"pointer", color:C.warnStrong, fontWeight:600, fontSize:12.5, padding:"4px 6px", opacity: busy ? 0.5 : 1 }}>
+                        Delete
+                      </button>
+                    </td>
+                  </tr>
+                )
+              })}
+              {!loading && filtered.length === 0 && (
+                <tr>
+                  <td colSpan={7} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>
+                    {loadErr ? `Could not load itineraries: ${loadErr}` : "No itineraries yet — create one from a booking or start standalone."}
+                  </td>
+                </tr>
+              )}
+              {loading && (
+                <tr><td colSpan={7} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>Loading…</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {preview && (
+        <ItinerarySectionErrorBoundary key={preview.itinerary?.id || "preview"} onBack={() => setPreview(null)}>
+          <ItineraryPreviewModal
+            url={preview.url}
+            onClose={() => setPreview(null)}
+            onDownload={() => handleRowDownload(preview.itinerary)}
+          />
+        </ItinerarySectionErrorBoundary>
+      )}
+    </div>
+  )
+}

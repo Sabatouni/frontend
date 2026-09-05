@@ -203,5 +203,131 @@ app.delete("/admin/users/:id", requireAdmin, async (req, res) => {
   res.json({ message: "User deleted" });
 });
 
+// ── AI PERSONALIZATION (itinerary welcome copy) ──────────────────
+// Rewrites/personalizes the guest-facing itinerary welcome paragraph from
+// *only* the structured, already-verified fields the admin entered in the
+// Swahili Tent Itinerary editor (guest name, guest type, occasion,
+// accommodation, stay dates, party size, selected experience titles, and
+// free-text preferences). The system prompt explicitly forbids inventing
+// any fact that isn't present in that payload -- a missing field is simply
+// left out of the paragraph, never guessed at. This route never touches
+// the database and never sees anything beyond what the request body
+// carries; it is gated by the same requireAdmin middleware (stv-pos
+// Owner/Admin only) as every other route in this file.
+//
+// Provider is selected from whichever key is configured in *this server's*
+// environment -- nothing is hardcoded here and no key is ever sent to the
+// frontend. If neither is configured, this returns 501 so the client can
+// fall back to the existing deterministic phrase-bank personalization
+// (src/lib/itineraryContent.js buildWelcomeText) instead of failing.
+//
+//   ANTHROPIC_API_KEY  -- preferred provider (default model claude-3-5-haiku-latest)
+//   OPENAI_API_KEY     -- fallback provider (default model gpt-4o-mini)
+//   ITINERARY_AI_MODEL -- optional model override for whichever provider is used
+const AI_SYSTEM_PROMPT = `You are a hospitality copywriter for Swahili Tent Village, a tented camp in Zanzibar, Tanzania. You write short, warm, natural guest-facing welcome paragraphs for personalized travel itineraries.
+
+STRICT RULES -- follow all of them:
+1. Use ONLY the facts given to you in the guest data below. Never invent a name, date, price, amenity, activity, or location that isn't present.
+2. If a field is missing or empty, simply don't mention it -- never guess a replacement or write a placeholder.
+3. Write 2-4 sentences of flowing prose (no headers, no bullet points, no markdown).
+4. Match the tone to the guest type and occasion given (e.g. a couple's anniversary reads differently from a corporate retreat or a family trip).
+5. Do not include a greeting line like "Dear X," -- that is added separately by the template.
+6. Do not mention pricing, payment, or terms.
+7. Always write out "Swahili Tent Village" in full. Never write "STV" -- that abbreviation is an internal-only code name and must never appear in guest-facing text.
+8. Never suggest, imply, or invent an amenity, service, or complimentary touch (e.g. room decoration, a gift, a specific dish) unless it is explicitly present in the guest data below. You may organize and phrase what's given -- you may not add to it.
+
+Return ONLY the paragraph text, nothing else.`;
+
+async function callAnthropic(facts) {
+  const model = process.env.ITINERARY_AI_MODEL || "claude-3-5-haiku-latest";
+  const resp = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": process.env.ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 400,
+      system: AI_SYSTEM_PROMPT,
+      messages: [{ role: "user", content: `Guest data (JSON):\n${JSON.stringify(facts, null, 2)}` }],
+    }),
+  });
+  const json = await resp.json();
+  if (!resp.ok) throw new Error(json?.error?.message || `Anthropic API error (${resp.status})`);
+  return json?.content?.[0]?.text || "";
+}
+
+async function callOpenAI(facts) {
+  const model = process.env.ITINERARY_AI_MODEL || "gpt-4o-mini";
+  const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 400,
+      messages: [
+        { role: "system", content: AI_SYSTEM_PROMPT },
+        { role: "user", content: `Guest data (JSON):\n${JSON.stringify(facts, null, 2)}` },
+      ],
+    }),
+  });
+  const json = await resp.json();
+  if (!resp.ok) throw new Error(json?.error?.message || `OpenAI API error (${resp.status})`);
+  return json?.choices?.[0]?.message?.content || "";
+}
+
+app.post("/admin/itinerary/personalize", requireAdmin, async (req, res) => {
+  const {
+    guestName, guestType, occasion, tentName, checkIn, checkOut,
+    adults, children, preferences, experiences,
+  } = req.body || {};
+
+  const provider = process.env.ANTHROPIC_API_KEY ? "anthropic"
+    : process.env.OPENAI_API_KEY ? "openai"
+    : null;
+
+  if (!provider) {
+    return res.status(501).json({ error: "AI personalization is not configured on this server (no ANTHROPIC_API_KEY or OPENAI_API_KEY set)." });
+  }
+
+  // Only ever forward fields that are actually set -- an unset field must
+  // not reach the model as `null`/`""`, which could read as "this guest has
+  // no children" instead of "children wasn't asked about here".
+  const facts = {
+    guestName: guestName || undefined,
+    guestType: guestType || undefined,
+    occasion: occasion || undefined,
+    accommodation: tentName || undefined,
+    checkIn: checkIn || undefined,
+    checkOut: checkOut || undefined,
+    adults: adults ?? undefined,
+    children: children ?? undefined,
+    preferences: preferences || undefined,
+    experiences: Array.isArray(experiences) && experiences.length ? experiences : undefined,
+  };
+  const cleanFacts = Object.fromEntries(Object.entries(facts).filter(([, v]) => v !== undefined));
+
+  if (Object.keys(cleanFacts).length === 0) {
+    return res.status(400).json({ error: "No guest data provided to personalize." });
+  }
+
+  try {
+    const text = provider === "anthropic" ? await callAnthropic(cleanFacts) : await callOpenAI(cleanFacts);
+    if (!text) throw new Error("Empty response from AI provider");
+    res.json({ text: text.trim(), provider });
+  } catch (err) {
+    // Any AI-provider failure (network, auth, rate limit, malformed
+    // response) is surfaced as a normal error response -- the frontend is
+    // expected to fall back to deterministic personalization rather than
+    // show the admin a hard failure.
+    res.status(502).json({ error: `AI personalization failed: ${err.message}` });
+  }
+});
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log(`🚀 Admin backend running on port ${PORT}`));
