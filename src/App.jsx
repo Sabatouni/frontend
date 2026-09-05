@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { Component, useEffect, useMemo, useRef, useState } from "react"
 import {
   Bar,
   BarChart,
@@ -6071,6 +6071,50 @@ function NewItineraryForm({ mode, bookings, tents, libraryItems, user, displayNa
   )
 }
 
+/* ── ITINERARY SECTION ERROR BOUNDARY ──────────────────────────────
+   There is no app-wide React error boundary, so an uncaught render-time
+   exception anywhere in the tree unmounts the whole app to a blank white
+   page with no recovery. That's the exact bug class that caused Edit /
+   Review / other itinerary actions to blank the entire POS (a missing
+   `useMemo` import made every render of the editor and library-item modal
+   throw). This boundary is scoped to the itinerary sub-views only -- it
+   does not touch the invoice maker, auth, or any other page -- and turns
+   any future render crash in this section into a real "Unable to load"
+   panel with Retry / Back, instead of a silent blank page. */
+class ItinerarySectionErrorBoundary extends Component {
+  constructor(props) {
+    super(props)
+    this.state = { error: null }
+  }
+  static getDerivedStateFromError(error) {
+    return { error }
+  }
+  componentDidCatch(error, info) {
+    console.error("Itinerary section failed to render:", error, info)
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding:"64px 24px", textAlign:"center" }}>
+          <p style={{ margin:"0 0 6px", fontWeight:700, fontSize:15, color:C.text }}>Unable to load this itinerary.</p>
+          <p style={{ margin:"0 0 22px", fontSize:13, color:C.textFaint }}>{this.state.error?.message || "An unexpected error occurred."}</p>
+          <div style={{ display:"flex", gap:10, justifyContent:"center" }}>
+            <button type="button" onClick={() => this.setState({ error: null })} className="stv-btn stv-btn-primary"
+              style={{ background:C.accentStrong, color:"#fff", border:"none", borderRadius:RADIUS.sm, padding:"9px 18px", fontSize:13, fontWeight:600, cursor:"pointer" }}>
+              Retry
+            </button>
+            <button type="button" onClick={() => { this.setState({ error: null }); this.props.onBack && this.props.onBack() }} className="stv-btn stv-btn-secondary"
+              style={{ background:C.surface, color:C.text, border:`1px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"9px 18px", fontSize:13, fontWeight:600, cursor:"pointer" }}>
+              Back to Itineraries
+            </button>
+          </div>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
 /* ── TOP-LEVEL PAGE: list / create / editor / media / library router ──
    This is the component referenced by App()'s route gate
    (`{page === "itinerary" && isOwner && <ItinerariesPage .../>}`). The
@@ -6203,32 +6247,44 @@ function ItinerariesPage({ user, isOwner, displayName, showToast }) {
 
   if (view === "newBooking" || view === "newStandalone") {
     return (
-      <NewItineraryForm
-        mode={view === "newBooking" ? "booking" : "standalone"}
-        bookings={bookings} tents={tents} libraryItems={libraryItems}
-        user={user} displayName={displayName} showToast={showToast}
-        onCreated={handleCreated} onCancel={() => setView("list")}
-      />
+      <ItinerarySectionErrorBoundary key={view} onBack={() => setView("list")}>
+        <NewItineraryForm
+          mode={view === "newBooking" ? "booking" : "standalone"}
+          bookings={bookings} tents={tents} libraryItems={libraryItems}
+          user={user} displayName={displayName} showToast={showToast}
+          onCreated={handleCreated} onCancel={() => setView("list")}
+        />
+      </ItinerarySectionErrorBoundary>
     )
   }
 
   if (view === "editor" && editingId) {
     return (
-      <ItineraryEditorPage
-        itineraryId={editingId} tents={tents} libraryItems={libraryItems}
-        mediaList={mediaList} reloadMedia={reloadMedia}
-        user={user} displayName={displayName} showToast={showToast}
-        onBack={backToList}
-      />
+      <ItinerarySectionErrorBoundary key={editingId} onBack={backToList}>
+        <ItineraryEditorPage
+          itineraryId={editingId} tents={tents} libraryItems={libraryItems}
+          mediaList={mediaList} reloadMedia={reloadMedia}
+          user={user} displayName={displayName} showToast={showToast}
+          onBack={backToList}
+        />
+      </ItinerarySectionErrorBoundary>
     )
   }
 
   if (view === "media") {
-    return <MediaLibraryPage user={user} showToast={showToast} onBack={() => { reloadMedia(); setView("list") }} />
+    return (
+      <ItinerarySectionErrorBoundary key="media" onBack={() => { reloadMedia(); setView("list") }}>
+        <MediaLibraryPage user={user} showToast={showToast} onBack={() => { reloadMedia(); setView("list") }} />
+      </ItinerarySectionErrorBoundary>
+    )
   }
 
   if (view === "library") {
-    return <ContentLibraryPage user={user} showToast={showToast} onBack={() => { reloadLibrary(); setView("list") }} />
+    return (
+      <ItinerarySectionErrorBoundary key="library" onBack={() => { reloadLibrary(); setView("list") }}>
+        <ContentLibraryPage user={user} showToast={showToast} onBack={() => { reloadLibrary(); setView("list") }} />
+      </ItinerarySectionErrorBoundary>
+    )
   }
 
   return (
@@ -6328,11 +6384,13 @@ function ItinerariesPage({ user, isOwner, displayName, showToast }) {
       </div>
 
       {preview && (
-        <ItineraryPreviewModal
-          url={preview.url}
-          onClose={() => setPreview(null)}
-          onDownload={() => handleRowDownload(preview.itinerary)}
-        />
+        <ItinerarySectionErrorBoundary key={preview.itinerary?.id || "preview"} onBack={() => setPreview(null)}>
+          <ItineraryPreviewModal
+            url={preview.url}
+            onClose={() => setPreview(null)}
+            onDownload={() => handleRowDownload(preview.itinerary)}
+          />
+        </ItinerarySectionErrorBoundary>
       )}
     </div>
   )
