@@ -33,6 +33,7 @@ export const translations = {
     navExpenses: "Expenses",
     navReports: "Reports",
     navUsers: "Users",
+    navItinerary: "Itinerary",
     ownerDashboardLabel: "OWNER DASHBOARD",
     workerPanelLabel: "WORKER PANEL",
     roleOwner: "Owner",
@@ -417,8 +418,10 @@ export const translations = {
     savingInvoiceBtn: "Saving…",
     invoicePreparedByFallback: "Staff",
 
-    // Swahili Tent Itinerary
-    navItinerary: "Itinerary",
+    // Swahili Tent Itinerary -- restored from git HEAD (values supplied by
+    // Arif from `git show HEAD:src/i18n.jsx`). App.jsx already calls t()
+    // with these exact keys throughout the itinerary editor/builder; they
+    // were missing from the working copy this dictionary was built from.
     itinSaving: "Saving…",
     itinUnsavedChanges: "Unsaved changes",
     itinSaved: "Saved",
@@ -433,6 +436,34 @@ export const translations = {
     itinGuestTypeHoneymoon: "Honeymoon",
     itinGuestTypeWedding: "Wedding",
     itinGuestTypeCustom: "Custom",
+
+    // Debt & Credit -- plain-language labels only (no "Receivable" /
+    // "Payable" client-facing anywhere; those stay as internal code/DB
+    // terms). See dcStatus*/dcTab* usage in App.jsx's Debt & Credit module.
+    dcTabOwedToUs: "Owed to Us",
+    dcTabOwedToUsSub: "People who owe Swahili Tent Village",
+    dcTabWeOwe: "We Owe",
+    dcTabWeOweSub: "People or businesses we owe",
+    dcWhoOwesWhom: "Who owes whom?",
+    dcTheyOweUs: "They owe us",
+    dcTheyOweUsSub: "Money that should come back to Swahili Tent Village",
+    dcWeOweThem: "We owe them",
+    dcWeOweThemSub: "Money Swahili Tent Village needs to pay",
+    dcStatusNotPaid: "Not Paid",
+    dcStatusPartiallyPaid: "Partially Paid",
+    dcStatusPaid: "Paid",
+    dcStatusOverpaid: "Overpaid",
+    dcAmountOwed: "Amount Owed",
+    dcPaidColumn: "Paid",
+    dcStillOwed: "Still Owed",
+    dcStillToPay: "Still to Pay",
+    dcRecordPaymentBtn: "Record Payment",
+    dcNewRecordBtn: "＋ New Debt / Credit",
+    dcAddRecordBtn: "＋ Add Record",
+    dcPaymentRecordedOwedUs: "Payment recorded. They now owe us {{amount}}.",
+    dcPaymentRecordedWeOwe: "Payment recorded. We now owe them {{amount}}.",
+    dcPaymentRecordedFullyPaid: "Payment recorded. Fully paid.",
+    dcPaymentRecordedCredit: "Payment recorded. {{amount}} credited toward future balance.",
   },
 
   sw: {
@@ -453,6 +484,7 @@ export const translations = {
     navExpenses: "Gharama",
     navReports: "Ripoti",
     navUsers: "Watumiaji",
+    navItinerary: "Ratiba",
     ownerDashboardLabel: "DASHIBODI YA MMILIKI",
     workerPanelLabel: "PANELI YA MFANYAKAZI",
     roleOwner: "Mmiliki",
@@ -827,8 +859,8 @@ export const translations = {
     savingInvoiceBtn: "Inahifadhi…",
     invoicePreparedByFallback: "Mfanyakazi",
 
-    // Swahili Tent Itinerary
-    navItinerary: "Ratiba",
+    // Swahili Tent Itinerary -- restored from git HEAD (values supplied by
+    // Arif from `git show HEAD:src/i18n.jsx`, not translated/invented here).
     itinSaving: "Inahifadhi…",
     itinUnsavedChanges: "Mabadiliko hayajahifadhiwa",
     itinSaved: "Imehifadhiwa",
@@ -843,6 +875,36 @@ export const translations = {
     itinGuestTypeHoneymoon: "Fungate",
     itinGuestTypeWedding: "Harusi",
     itinGuestTypeCustom: "Nyingine",
+
+    // Debt & Credit. NOTE for a native-speaker review pass: "kudai" puts the
+    // creditor as the sentence subject and the debtor as its object (e.g.
+    // "tunawadai" = "we claim from them" = they owe us), so these two
+    // direction pairs are built from that rule rather than a literal
+    // word-for-word rendering of the English.
+    dcTabOwedToUs: "Tunawadai",
+    dcTabOwedToUsSub: "Watu wanaodaiwa na Swahili Tent Village",
+    dcTabWeOwe: "Tunadaiwa",
+    dcTabWeOweSub: "Watu au biashara wanaotudai",
+    dcWhoOwesWhom: "Nani Anadaiwa na Nani?",
+    dcTheyOweUs: "Tunamdai",
+    dcTheyOweUsSub: "Pesa inayopaswa kurudi Swahili Tent Village",
+    dcWeOweThem: "Anatudai",
+    dcWeOweThemSub: "Pesa ambayo Swahili Tent Village inahitaji kulipa",
+    dcStatusNotPaid: "Haijalipwa",
+    dcStatusPartiallyPaid: "Imelipwa Kiasi",
+    dcStatusPaid: "Kimelipwa",
+    dcStatusOverpaid: "Imelipwa Zaidi",
+    dcAmountOwed: "Kiasi Kinachodaiwa",
+    dcPaidColumn: "Kimelipwa",
+    dcStillOwed: "Kiasi Kilichobaki",
+    dcStillToPay: "Kiasi Kilichobaki",
+    dcRecordPaymentBtn: "Rekodi Malipo",
+    dcNewRecordBtn: "＋ Deni / Malipo Mapya",
+    dcAddRecordBtn: "＋ Ongeza Rekodi",
+    dcPaymentRecordedOwedUs: "Malipo yamerekodiwa. Sasa wanadaiwa {{amount}}.",
+    dcPaymentRecordedWeOwe: "Malipo yamerekodiwa. Sasa tunadaiwa {{amount}}.",
+    dcPaymentRecordedFullyPaid: "Malipo yamerekodiwa. Deni limekamilika.",
+    dcPaymentRecordedCredit: "Malipo yamerekodiwa. {{amount}} imewekwa kama malipo ya ziada kwa siku zijazo.",
   },
 };
 

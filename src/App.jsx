@@ -26,6 +26,7 @@ import { useAuth } from "./context/AuthContext"
 import { useLanguage } from "./i18n"
 import { downloadInvoicePdf, getInvoicePdfBlobUrl } from "./lib/invoicePdf"
 import { downloadItineraryPdf, getItineraryPdfBlobUrl, getItineraryPdfBlob } from "./lib/itineraryPdf"
+import { getDebtStatementPdfBlobUrl, getDebtPaymentReceiptPdfBlobUrl } from "./lib/debtCreditPdf"
 import {
   GUEST_TYPES as ITIN_GUEST_TYPES,
   emptyItineraryContent,
@@ -283,6 +284,13 @@ export default function App() {
               backed value from AuthContext, not a client-trusted flag. */}
           {page === "itinerary" && isOwner && (
             <ItinerariesPage user={user} isOwner={isOwner} displayName={displayName} showToast={showToast} />
+          )}
+          {/* Debt & Credit -- Owner/Admin only, same three-layer defense as
+              the itinerary block above (Sidebar nav, this route gate, the
+              page's own isOwner check, and RLS -- see the module's own
+              header comment at the end of this file for the fourth layer). */}
+          {page === "debtCredit" && isOwner && (
+            <DebtCreditPage user={user} isOwner={isOwner} displayName={displayName} showToast={showToast} />
           )}
           {page === "reports" && isOwner && (
             <ReportsPage sales={sales} expenses={expenses} services={services} showToast={showToast} />
@@ -581,6 +589,7 @@ function Sidebar({ page, setPage, isOwner, displayName, onLogout, open, onClose 
     { id:"inventory",  label:t("navInventory"),  icon:"📦" },
     { id:"invoices",   label:t("navInvoices"),   icon:"📑" },
     { id:"itinerary",  label:t("navItinerary"),  icon:"🧳" },
+    { id:"debtCredit", label:"Debt & Credit",    icon:"💳" },
     { id:"reports",    label:t("navReports"),    icon:"📈" },
     { id:"users",      label:t("navUsers"),      icon:"👥" },
   ]
@@ -1032,6 +1041,7 @@ function ReceiptModal({ sale, servedByName, capturedAt, draft, onDraftChange, on
             .stv-receipt-print) is visible when printing. */}
         <div className="stv-receipt-print" style={{ border:`1px solid ${C.border}`, borderRadius:RADIUS.sm, padding:18, background:"#fff" }}>
           <div style={{ textAlign:"center", marginBottom:10 }}>
+            <img src={LOGO} alt="" aria-hidden="true" style={{ width:56, height:"auto", margin:"0 auto 6px", display:"block", objectFit:"contain" }} />
             <div style={{ fontWeight:800, fontSize:15, color:C.text, letterSpacing:0.5 }}>SWAHILI TENT VILLAGE</div>
             <div style={{ fontSize:11, color:C.textFaint, fontWeight:600, letterSpacing:1, marginTop:4 }}>{t("receiptHeading")}</div>
           </div>
@@ -1299,6 +1309,13 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, onOpen
     amount:  "",
     note:    "",
     date:    todayStr(),
+    // Credit/Debt integration -- see the Debt & Credit module at the end of
+    // this file. Every existing cash sale keeps working exactly as before;
+    // this only adds a second, optional path that never touches the normal
+    // one. paymentStatus defaults to "paid" so nothing changes unless the
+    // worker/owner deliberately picks Credit/Debt.
+    paymentStatus: "paid", // "paid" | "credit"
+    creditPerson:  null,
   })
   const [filter, setFilter] = useState({ service:"All", from:"", to:"" })
   const [busy, setBusy]     = useState(false)
@@ -1330,6 +1347,7 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, onOpen
     if (!user?.id) { showToast(t("notAuthenticated"), "error"); return }
     if (!form.amount || Number(form.amount) <= 0) { showToast(t("enterValidAmount"), "error"); return }
     if (!safeService) { showToast(t("selectService"), "error"); return }
+    if (form.paymentStatus === "credit" && !form.creditPerson) { showToast("Select or create a person for this credit sale", "error"); return }
     setBusy(true)
     const payload = {
       service: safeService,
@@ -1337,18 +1355,45 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, onOpen
       note:    form.note,
       date:    new Date(form.date + "T12:00:00").toISOString(),
       user_id: user.id,
+      payment_status: form.paymentStatus,
     }
     console.log("Inserting sale:", payload)
     // .select() added so the receipt flow below can use the real inserted
     // row (its id, for a human-readable receipt reference) -- this doesn't
     // change what's written, only what comes back from the same insert.
     const { data, error } = await supabase.from("sales").insert([payload]).select()
+    if (error) { setBusy(false); console.error("Sale insert error:", error.message); showToast(error.message, "error"); return }
+    const saved = data?.[0] || { ...payload, id: null }
+
+    // Credit/Debt integration: the sale itself is already saved above,
+    // exactly like a cash sale -- this only ADDS a linked Debt & Credit
+    // record for the chosen person, it never re-enters or duplicates the
+    // sale. A failure here doesn't roll back the sale (it already happened
+    // and is real revenue); it just tells the owner to add the credit
+    // record manually from the Debt & Credit page instead.
+    if (form.paymentStatus === "credit" && saved?.id) {
+      const { data: dc, error: dcErr } = await supabase.from("debt_credit_records").insert([{
+        person_id: form.creditPerson.id,
+        direction: "RECEIVABLE",
+        category: safeService,
+        description: form.note || null,
+        original_amount: Number(form.amount),
+        source_type: "sale",
+        source_id: saved.id,
+        created_by: user.id,
+        created_by_name: displayName,
+      }]).select().single()
+      if (dcErr) {
+        showToast(`Sale saved, but the credit record could not be created: ${dcErr.message}`, "error")
+      } else if (dc) {
+        await supabase.from("sales").update({ debt_credit_record_id: dc.id }).eq("id", saved.id)
+      }
+    }
+
     setBusy(false)
-    if (error) { console.error("Sale insert error:", error.message); showToast(error.message, "error"); return }
-    setForm(f => ({ ...f, amount:"", note:"" }))
+    setForm(f => ({ ...f, amount:"", note:"", paymentStatus:"paid", creditPerson:null }))
     fetchAll()
     showToast(t("saleRecorded"))
-    const saved = data?.[0] || { ...payload, id: null }
     setLastSaved({ sale: saved, capturedAt: new Date() })
   }
 
@@ -1423,7 +1468,42 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, onOpen
           <input id="sale-date" type="date" value={form.date} onChange={e => setForm(f => ({ ...f, date:e.target.value }))} style={{ ...iS, marginBottom:14 }} />
 
           <label style={lS} htmlFor="sale-note">{t("notesOptional")}</label>
-          <input id="sale-note" placeholder={t("notesPlaceholderSale")} value={form.note} onChange={e => setForm(f => ({ ...f, note:e.target.value }))} onKeyDown={e => e.key === "Enter" && submit()} style={{ ...iS, marginBottom:SPACE.lg+2 }} />
+          <input id="sale-note" placeholder={t("notesPlaceholderSale")} value={form.note} onChange={e => setForm(f => ({ ...f, note:e.target.value }))} onKeyDown={e => e.key === "Enter" && submit()} style={{ ...iS, marginBottom:14 }} />
+
+          {/* Credit/Debt payment option -- see the Debt & Credit module at
+              the end of this file. Cash/mobile/card collection at time of
+              sale is unaffected; this only adds a second path for a guest
+              who pays later. */}
+          <label style={lS} id="sale-payment-label">Payment</label>
+          <div role="group" aria-labelledby="sale-payment-label" style={{ display:"flex", gap:8, marginBottom: form.paymentStatus === "credit" ? 10 : SPACE.lg+2 }}>
+            <button type="button" onClick={() => setForm(f => ({ ...f, paymentStatus:"paid" }))}
+              aria-pressed={form.paymentStatus === "paid"}
+              style={{ flex:1, padding:"9px 10px", borderRadius:RADIUS.sm, border:`1.5px solid ${form.paymentStatus === "paid" ? C.accentStrong : C.border}`, background: form.paymentStatus === "paid" ? C.accentSoft : C.surface, color: form.paymentStatus === "paid" ? C.accentStrong : C.textSub, fontWeight:600, fontSize:12.5, cursor:"pointer", fontFamily:FONT }}>
+              Cash / Paid Now
+            </button>
+            <button type="button" onClick={() => setForm(f => ({ ...f, paymentStatus:"credit" }))}
+              aria-pressed={form.paymentStatus === "credit"}
+              style={{ flex:1, padding:"9px 10px", borderRadius:RADIUS.sm, border:`1.5px solid ${form.paymentStatus === "credit" ? C.warnStrong : C.border}`, background: form.paymentStatus === "credit" ? C.warnSoft : C.surface, color: form.paymentStatus === "credit" ? C.warnStrong : C.textSub, fontWeight:600, fontSize:12.5, cursor:"pointer", fontFamily:FONT }}>
+              Credit / Debt
+            </button>
+          </div>
+
+          {form.paymentStatus === "credit" && (
+            <div style={{ marginBottom:SPACE.lg+2, padding:12, border:`1px solid ${C.border}`, borderRadius:RADIUS.sm, background:C.bg }}>
+              <label style={lS}>Who owes this?</label>
+              {form.creditPerson ? (
+                <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"9px 12px", border:`1px solid ${C.border}`, borderRadius:RADIUS.sm, background:C.surface }}>
+                  <div>
+                    <div style={{ fontSize:13, fontWeight:600 }}>{form.creditPerson.name}</div>
+                    <div style={{ fontSize:11.5, color:C.textFaint }}>{form.creditPerson.phone}</div>
+                  </div>
+                  <button type="button" onClick={() => setForm(f => ({ ...f, creditPerson:null }))} style={{ background:"none", border:"none", color:C.textFaint, cursor:"pointer", fontSize:12 }}>Change</button>
+                </div>
+              ) : (
+                <DebtCreditPersonPicker onSelect={(p) => setForm(f => ({ ...f, creditPerson:p }))} />
+              )}
+            </div>
+          )}
 
           <button type="button" onClick={submit} disabled={busy} className="stv-btn stv-btn-primary" style={{ ...sB, opacity: busy ? 0.7 : 1 }}>
             {busy ? t("saving") : t("recordSaleBtn")}
@@ -1556,7 +1636,15 @@ const CAT_KEYS = {
 
 function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner }) {
   const { t } = useLanguage()
-  const [form, setForm] = useState({ category:EXPENSE_CATS[0], item:"", cost:"", date:todayStr(), time:nowTimeStr() })
+  const [form, setForm] = useState({
+    category:EXPENSE_CATS[0], item:"", cost:"", date:todayStr(), time:nowTimeStr(),
+    // Credit/Debt integration -- see the Debt & Credit module at the end of
+    // this file. Defaults to "paid" so every existing expense-recording flow
+    // is unaffected unless Credit/We Owe is deliberately chosen.
+    paymentStatus: "paid", // "paid" | "credit"
+    creditPerson:  null,
+  })
+  const expenseDisplayName = user?.user_metadata?.name || user?.email?.split("@")[0] || "User"
   const [filter, setFilter] = useState({ category:"All", from:"", to:"" })
   const [busy, setBusy] = useState(false)
 
@@ -1564,6 +1652,7 @@ function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner }) {
     if (!user?.id) { showToast(t("notAuthenticated"), "error"); return }
     if (!form.item.trim())            { showToast(t("enterItemDescription"), "error"); return }
     if (!form.cost || Number(form.cost) <= 0) { showToast(t("enterValidCost"), "error"); return }
+    if (form.paymentStatus === "credit" && !form.creditPerson) { showToast("Select or create a person/supplier for this credit expense", "error"); return }
     setBusy(true)
     // Combine the user-selected date AND time into one timestamp -- the
     // `expenses.date` column is already `timestamptz` (same as `sales.date`),
@@ -1588,12 +1677,40 @@ function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner }) {
       date:       `${form.date}T${timePart}:00.000Z`,
       user_id:    user.id,
       created_by: user.email,
+      payment_status: form.paymentStatus,
     }
     console.log("Inserting expense:", payload)
-    const { error } = await supabase.from("expenses").insert([payload])
+    // .select() added (was a bare insert before) so the Credit/We Owe path
+    // below can reference the real inserted row's id -- the cash/paid path
+    // stores exactly what it always did.
+    const { data, error } = await supabase.from("expenses").insert([payload]).select()
+    if (error) { setBusy(false); console.error("Expense insert error:", error.message); showToast(error.message, "error"); return }
+    const saved = data?.[0]
+
+    // Credit/Debt integration -- see the Debt & Credit module at the end of
+    // this file. The expense itself is already saved above, unchanged; this
+    // only adds a linked "we owe them" record for the chosen supplier/person.
+    if (form.paymentStatus === "credit" && saved?.id) {
+      const { data: dc, error: dcErr } = await supabase.from("debt_credit_records").insert([{
+        person_id: form.creditPerson.id,
+        direction: "PAYABLE",
+        category: form.category,
+        description: form.item || null,
+        original_amount: Number(form.cost),
+        source_type: "expense",
+        source_id: saved.id,
+        created_by: user.id,
+        created_by_name: expenseDisplayName,
+      }]).select().single()
+      if (dcErr) {
+        showToast(`Expense saved, but the credit record could not be created: ${dcErr.message}`, "error")
+      } else if (dc) {
+        await supabase.from("expenses").update({ debt_credit_record_id: dc.id }).eq("id", saved.id)
+      }
+    }
+
     setBusy(false)
-    if (error) { console.error("Expense insert error:", error.message); showToast(error.message, "error"); return }
-    setForm(f => ({ ...f, item:"", cost:"" }))
+    setForm(f => ({ ...f, item:"", cost:"", paymentStatus:"paid", creditPerson:null }))
     fetchAll()
     showToast(t("expenseRecorded"))
   }
@@ -1651,6 +1768,41 @@ function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner }) {
               <input id="exp-time" type="time" value={form.time} onChange={e => setForm(f => ({ ...f, time:e.target.value }))} onKeyDown={e => e.key === "Enter" && submit()} style={iS} />
             </div>
           </div>
+
+          {/* Credit/Debt payment option -- see the Debt & Credit module at
+              the end of this file. Paying in full at the time of purchase
+              is unaffected; this only adds a second path for a supplier bill
+              settled later. */}
+          <label style={lS} id="exp-payment-label">Payment</label>
+          <div role="group" aria-labelledby="exp-payment-label" style={{ display:"flex", gap:8, marginBottom: form.paymentStatus === "credit" ? 10 : 22 }}>
+            <button type="button" onClick={() => setForm(f => ({ ...f, paymentStatus:"paid" }))}
+              aria-pressed={form.paymentStatus === "paid"}
+              style={{ flex:1, padding:"9px 10px", borderRadius:RADIUS.sm, border:`1.5px solid ${form.paymentStatus === "paid" ? C.accentStrong : C.border}`, background: form.paymentStatus === "paid" ? C.accentSoft : C.surface, color: form.paymentStatus === "paid" ? C.accentStrong : C.textSub, fontWeight:600, fontSize:12.5, cursor:"pointer", fontFamily:FONT }}>
+              Paid
+            </button>
+            <button type="button" onClick={() => setForm(f => ({ ...f, paymentStatus:"credit" }))}
+              aria-pressed={form.paymentStatus === "credit"}
+              style={{ flex:1, padding:"9px 10px", borderRadius:RADIUS.sm, border:`1.5px solid ${form.paymentStatus === "credit" ? C.warnStrong : C.border}`, background: form.paymentStatus === "credit" ? C.warnSoft : C.surface, color: form.paymentStatus === "credit" ? C.warnStrong : C.textSub, fontWeight:600, fontSize:12.5, cursor:"pointer", fontFamily:FONT }}>
+              Credit / We Owe
+            </button>
+          </div>
+
+          {form.paymentStatus === "credit" && (
+            <div style={{ marginBottom:22, padding:12, border:`1px solid ${C.border}`, borderRadius:RADIUS.sm, background:C.bg }}>
+              <label style={lS}>Who do we owe?</label>
+              {form.creditPerson ? (
+                <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"9px 12px", border:`1px solid ${C.border}`, borderRadius:RADIUS.sm, background:C.surface }}>
+                  <div>
+                    <div style={{ fontSize:13, fontWeight:600 }}>{form.creditPerson.name}</div>
+                    <div style={{ fontSize:11.5, color:C.textFaint }}>{form.creditPerson.phone}</div>
+                  </div>
+                  <button type="button" onClick={() => setForm(f => ({ ...f, creditPerson:null }))} style={{ background:"none", border:"none", color:C.textFaint, cursor:"pointer", fontSize:12 }}>Change</button>
+                </div>
+              ) : (
+                <DebtCreditPersonPicker onSelect={(p) => setForm(f => ({ ...f, creditPerson:p }))} />
+              )}
+            </div>
+          )}
 
           <button type="button" onClick={submit} disabled={busy} className="stv-btn stv-btn-danger-solid" style={{ ...sB, background:C.warnStrong, opacity: busy ? 0.7 : 1 }}>
             {busy ? t("saving") : t("recordExpenseBtn")}
@@ -6391,6 +6543,880 @@ function ItinerariesPage({ user, isOwner, displayName, showToast }) {
             onDownload={() => handleRowDownload(preview.itinerary)}
           />
         </ItinerarySectionErrorBoundary>
+      )}
+    </div>
+  )
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   DEBT & CREDIT — a small, auditable credit/debt ledger for a business
+   that runs partly on trust: customers who eat/play now and pay later,
+   suppliers who deliver now and get paid later, a family member who
+   borrows business cash and returns it. Owner/Admin only, gated the same
+   three-layer way as the itinerary module above: Sidebar nav (ownerNav
+   only), App()'s route gate (`page === "debtCredit" && isOwner`), this
+   page's own `isOwner` check below, and the debt_credit_* RLS policies
+   (admin-only ALL + admin-only SELECT -- the STRICTEST pattern already in
+   this app, matching invoices, not the looser sales/expenses shape).
+
+   Direction convention throughout:
+     RECEIVABLE = a person/account owes Swahili Tent Village ("Money Owed to Us")
+     PAYABLE    = Swahili Tent Village owes a person/account ("Money We Owe")
+
+   Balances are never a stored, editable field -- debt_credit_record_balances
+   / debt_credit_person_balances (Postgres views, security_invoker so they
+   respect the querying user's own RLS) always compute
+   original_amount - sum(payments), so a balance can never drift out of sync
+   with its payment history. Deliberately no due dates, no overdue
+   countdowns, no automatic reminders -- the owner follows up manually; this
+   module only records the financial reality accurately.
+
+   Sales/Expenses integration (see SalesPage/ExpensesPage above) never
+   duplicates a sale or expense: a "Credit" sale/expense is saved exactly
+   like a cash one, and a linked debt_credit_records row is created
+   afterward (source_type/source_id pointing back at it, plus a
+   debt_credit_record_id back-reference on the sale/expense itself) -- the
+   sale/expense stays the single source of truth for what was sold/bought,
+   and Debt & Credit only tracks whether it was collected.
+   ══════════════════════════════════════════════════════════════════════ */
+
+// Suggested categories for a standalone Debt & Credit record (one not tied
+// to a sale/expense) -- a plain client-side list, no DB constraint, so a new
+// one is a one-line change later (same convention as EXPENSE_CATS above).
+// Records created FROM a sale/expense use that sale/expense's own
+// service/category string directly instead of this list, which is exactly
+// right (a Restaurant sale on credit becomes a "Restaurant" debt record).
+const DC_CATEGORIES = ["Restaurant","Go-Kart","Paintball","Accommodation","Product","Supplier Purchase","Transport","Utilities","Other"]
+// User-facing wording is plain language only ("Owed to Us" / "We Owe" /
+// "They owe us" / "We owe them") -- never "Receivable"/"Payable" client-side.
+// RECEIVABLE/PAYABLE stay as-is as the internal direction values (DB column,
+// JS variable names, RLS, PDF internals) -- only what a person reads changes
+// here. Every label below is a translation KEY, resolved via t() at the call
+// site, not a literal string, so this object can be a plain module-level
+// const (it's read by components, which is where the language context lives).
+const DC_DIRECTIONS = {
+  RECEIVABLE: { tabKey:"dcTabOwedToUs", tabSubKey:"dcTabOwedToUsSub", shortKey:"dcTheyOweUs", shortSubKey:"dcTheyOweUsSub" },
+  PAYABLE:    { tabKey:"dcTabWeOwe",    tabSubKey:"dcTabWeOweSub",    shortKey:"dcWeOweThem",  shortSubKey:"dcWeOweThemSub" },
+}
+
+function dcStatusLabel(status, t) {
+  const key = { outstanding:"dcStatusNotPaid", partially_paid:"dcStatusPartiallyPaid", paid:"dcStatusPaid", overpaid:"dcStatusOverpaid" }[status]
+  return key ? t(key) : t_capitalize(status || "")
+}
+function dcStatusColor(status) {
+  if (status === "paid") return C.accentStrong
+  if (status === "overpaid") return C.accent
+  if (status === "partially_paid") return C.warn
+  return C.warnStrong // outstanding
+}
+
+/* A deliberate, separate copy of the same pattern as ItinerarySectionErrorBoundary
+   above -- NOT a shared/renamed version of it. Keeping the two modules'
+   error boundaries fully independent means a future edit to one can never
+   accidentally change the other, and this module never has to touch a
+   single line of the itinerary code to exist. Same purpose either way: no
+   itinerary action -- sorry, no DEBT & CREDIT action -- should ever produce
+   a silent blank page; an uncaught render exception here shows a real
+   panel with Retry / Back instead. */
+class DebtCreditSectionErrorBoundary extends Component {
+  constructor(props) { super(props); this.state = { error: null } }
+  static getDerivedStateFromError(error) { return { error } }
+  componentDidCatch(error, info) { console.error("Debt & Credit section failed to render:", error, info) }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding:"64px 24px", textAlign:"center" }}>
+          <p style={{ margin:"0 0 6px", fontWeight:700, fontSize:15, color:C.text }}>Unable to load Debt & Credit.</p>
+          <p style={{ margin:"0 0 22px", fontSize:13, color:C.textFaint }}>{this.state.error?.message || "An unexpected error occurred."}</p>
+          <div style={{ display:"flex", gap:10, justifyContent:"center" }}>
+            <button type="button" onClick={() => this.setState({ error: null })} className="stv-btn stv-btn-primary"
+              style={{ background:C.accentStrong, color:"#fff", border:"none", borderRadius:RADIUS.sm, padding:"9px 18px", fontSize:13, fontWeight:600, cursor:"pointer" }}>
+              Retry
+            </button>
+            <button type="button" onClick={() => { this.setState({ error: null }); this.props.onBack && this.props.onBack() }} className="stv-btn stv-btn-secondary"
+              style={{ background:C.surface, color:C.text, border:`1px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"9px 18px", fontSize:13, fontWeight:600, cursor:"pointer" }}>
+              Back
+            </button>
+          </div>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
+/* Search-existing-or-create-new person picker. Reused in three places:
+   the standalone "+ New Credit/Debt" flow, the Person Detail "+ Add
+   Credit/Debt" flow, and inline in SalesPage/ExpensesPage's own Credit
+   payment option above -- so a person created from any of those three
+   places is the exact same reusable account everywhere, never a duplicate. */
+function DebtCreditPersonPicker({ onSelect, autoFocus }) {
+  const [query, setQuery] = useState("")
+  const [results, setResults] = useState([])
+  const [loading, setLoading] = useState(false)
+  const [creating, setCreating] = useState(false)
+  const [newForm, setNewForm] = useState({ name:"", phone:"", email:"", notes:"" })
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState("")
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    const h = setTimeout(async () => {
+      let q = supabase.from("debt_credit_people").select("id,name,phone,email").is("archived_at", null).order("name").limit(20)
+      if (query.trim()) q = q.ilike("name", `%${query.trim()}%`)
+      const { data, error } = await q
+      if (!cancelled) { setResults(error ? [] : (data || [])); setLoading(false) }
+    }, 250)
+    return () => { cancelled = true; clearTimeout(h) }
+  }, [query])
+
+  async function createPerson() {
+    if (!newForm.name.trim() || !newForm.phone.trim()) { setErr("Name and phone are required"); return }
+    setBusy(true); setErr("")
+    const { data, error } = await supabase.from("debt_credit_people").insert([{
+      name: newForm.name.trim(), phone: newForm.phone.trim(),
+      email: newForm.email.trim() || null, notes: newForm.notes.trim() || null,
+    }]).select().single()
+    setBusy(false)
+    if (error) { setErr(error.message); return }
+    onSelect(data)
+    setCreating(false)
+  }
+
+  if (creating) {
+    return (
+      <div style={{ border:`1px solid ${C.border}`, borderRadius:RADIUS.sm, padding:14, background:C.surface }}>
+        <label style={lS}>Name</label>
+        <input style={{ ...iS, marginBottom:10 }} value={newForm.name} onChange={e => setNewForm(f => ({ ...f, name:e.target.value }))} placeholder="Full name" />
+        <label style={lS}>Phone</label>
+        <input style={{ ...iS, marginBottom:10 }} value={newForm.phone} onChange={e => setNewForm(f => ({ ...f, phone:e.target.value }))} placeholder="+255…" />
+        <label style={lS}>Email (optional)</label>
+        <input style={{ ...iS, marginBottom:10 }} value={newForm.email} onChange={e => setNewForm(f => ({ ...f, email:e.target.value }))} />
+        <label style={lS}>Notes (optional)</label>
+        <input style={{ ...iS, marginBottom:10 }} value={newForm.notes} onChange={e => setNewForm(f => ({ ...f, notes:e.target.value }))} />
+        {err && <div style={{ color:C.warnStrong, fontSize:12, marginBottom:10 }}>{err}</div>}
+        <div style={{ display:"flex", gap:8 }}>
+          <button type="button" disabled={busy} onClick={createPerson} style={{ background:C.accentStrong, color:"#fff", border:"none", borderRadius:RADIUS.sm, padding:"9px 16px", fontSize:12.5, fontWeight:600, cursor:"pointer", opacity:busy?0.7:1 }}>
+            {busy ? "Creating…" : "Create & Select"}
+          </button>
+          <button type="button" onClick={() => { setCreating(false); setErr("") }} style={{ background:"none", border:`1px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"9px 16px", fontSize:12.5, cursor:"pointer", fontFamily:FONT }}>Cancel</button>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      <input autoFocus={autoFocus} placeholder="Search by name…" value={query} onChange={e => setQuery(e.target.value)} style={{ ...iS, marginBottom:8 }} />
+      <div style={{ maxHeight:180, overflowY:"auto", border:`1px solid ${C.border}`, borderRadius:RADIUS.sm, background:C.surface }}>
+        {loading && <div style={{ padding:12, fontSize:12.5, color:C.textFaint }}>Searching…</div>}
+        {!loading && results.map(p => (
+          <button type="button" key={p.id} onClick={() => onSelect(p)}
+            style={{ display:"block", width:"100%", textAlign:"left", padding:"9px 12px", border:"none", borderBottom:`1px solid ${C.bg}`, background:"none", cursor:"pointer", fontFamily:FONT }}>
+            <div style={{ fontSize:13, fontWeight:600, color:C.text }}>{p.name}</div>
+            <div style={{ fontSize:11.5, color:C.textFaint }}>{p.phone}</div>
+          </button>
+        ))}
+        {!loading && results.length === 0 && <div style={{ padding:12, fontSize:12.5, color:C.textFaint }}>No matches.</div>}
+      </div>
+      <button type="button" onClick={() => setCreating(true)} style={{ marginTop:8, background:"none", border:`1.5px dashed ${C.borderStrong}`, color:C.textSub, borderRadius:RADIUS.sm, padding:"7px 12px", fontSize:12, fontWeight:500, cursor:"pointer", fontFamily:FONT }}>
+        ＋ Create New Person
+      </button>
+    </div>
+  )
+}
+
+function DebtCreditEditPersonModal({ person, showToast, onClose, onSaved }) {
+  const [form, setForm] = useState({ name:person.name||"", phone:person.phone||"", email:person.email||"", notes:person.notes||"" })
+  const [busy, setBusy] = useState(false)
+  async function submit() {
+    if (!form.name.trim() || !form.phone.trim()) { showToast("Name and phone are required", "error"); return }
+    setBusy(true)
+    const { error } = await supabase.from("debt_credit_people").update({
+      name: form.name.trim(), phone: form.phone.trim(), email: form.email.trim() || null, notes: form.notes.trim() || null,
+    }).eq("id", person.id)
+    setBusy(false)
+    if (error) { showToast(error.message, "error"); return }
+    showToast("Person updated")
+    onSaved?.()
+  }
+  return (
+    <div onClick={onClose} style={{ position:"fixed", inset:0, background:"rgba(20,20,30,0.5)", zIndex:1200, display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}>
+      <div onClick={e => e.stopPropagation()} role="dialog" aria-modal="true"
+        style={{ background:C.surface, borderRadius:RADIUS.lg, padding:"clamp(18px,4vw,26px)", width:"min(94vw,420px)", boxShadow:SHADOW.modal }}>
+        <h2 style={{ margin:"0 0 16px", fontFamily:FONT, fontWeight:700, fontSize:16, color:C.text }}>Edit Person</h2>
+        <label style={lS}>Name</label>
+        <input style={{ ...iS, marginBottom:10 }} value={form.name} onChange={e => setForm(f => ({ ...f, name:e.target.value }))} />
+        <label style={lS}>Phone</label>
+        <input style={{ ...iS, marginBottom:10 }} value={form.phone} onChange={e => setForm(f => ({ ...f, phone:e.target.value }))} />
+        <label style={lS}>Email</label>
+        <input style={{ ...iS, marginBottom:10 }} value={form.email} onChange={e => setForm(f => ({ ...f, email:e.target.value }))} />
+        <label style={lS}>Notes</label>
+        <textarea rows={2} style={{ ...iS, marginBottom:16, resize:"vertical" }} value={form.notes} onChange={e => setForm(f => ({ ...f, notes:e.target.value }))} />
+        <div style={{ display:"flex", gap:10 }}>
+          <button type="button" onClick={onClose} style={{ flex:1, padding:"12px", borderRadius:RADIUS.sm, border:`1px solid ${C.border}`, background:C.surface, color:C.text, cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5 }}>Cancel</button>
+          <button type="button" onClick={submit} disabled={busy} style={{ flex:1, padding:"12px", borderRadius:RADIUS.sm, border:"none", background:C.accentStrong, color:"#fff", cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5, opacity:busy?0.7:1 }}>{busy ? "Saving…" : "Save"}</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function DebtCreditRecordModal({ direction: initialDirection, personPreset, user, displayName, showToast, onClose, onSaved }) {
+  const { t } = useLanguage()
+  const [direction, setDirection] = useState(initialDirection || "RECEIVABLE")
+  const [person, setPerson] = useState(personPreset || null)
+  const [category, setCategory] = useState(DC_CATEGORIES[0])
+  const [description, setDescription] = useState("")
+  const [amount, setAmount] = useState("")
+  const [internalNote, setInternalNote] = useState("")
+  const [busy, setBusy] = useState(false)
+
+  async function submit() {
+    if (!person) { showToast("Select or create a person first", "error"); return }
+    if (!amount || Number(amount) <= 0) { showToast("Enter a valid amount", "error"); return }
+    setBusy(true)
+    const payload = {
+      person_id: person.id, direction, category,
+      description: description.trim() || null,
+      original_amount: Number(amount),
+      internal_note: internalNote.trim() || null,
+      created_by: user?.id || null, created_by_name: displayName || null,
+    }
+    const { data, error } = await supabase.from("debt_credit_records").insert([payload]).select().single()
+    setBusy(false)
+    if (error) { showToast(error.message, "error"); return }
+    showToast("Credit/Debt record added")
+    onSaved?.(data)
+  }
+
+  return (
+    <div onClick={onClose} style={{ position:"fixed", inset:0, background:"rgba(20,20,30,0.5)", zIndex:1200, display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}>
+      <div onClick={e => e.stopPropagation()} role="dialog" aria-modal="true"
+        style={{ background:C.surface, borderRadius:RADIUS.lg, padding:"clamp(18px,4vw,26px)", width:"min(94vw,480px)", maxHeight:"92vh", overflowY:"auto", boxShadow:SHADOW.modal }}>
+        <h2 style={{ margin:"0 0 4px", fontFamily:FONT, fontWeight:700, fontSize:16, color:C.text }}>{personPreset ? t("dcAddRecordBtn").replace("＋ ", "") : t("dcNewRecordBtn").replace("＋ ", "")}</h2>
+        <p style={{ margin:"0 0 12px", fontSize:13, fontWeight:600, color:C.textSub }}>{t("dcWhoOwesWhom")}</p>
+
+        <div role="group" aria-label={t("dcWhoOwesWhom")} style={{ display:"flex", gap:8, marginBottom:14 }}>
+          {Object.entries(DC_DIRECTIONS).map(([key, d]) => (
+            <button key={key} type="button" onClick={() => setDirection(key)}
+              aria-pressed={direction === key}
+              style={{ flex:1, padding:"12px 10px", borderRadius:RADIUS.sm, border:`1.5px solid ${direction === key ? C.accentStrong : C.border}`, background: direction === key ? C.accentSoft : C.surface, color: direction === key ? C.accentStrong : C.textSub, cursor:"pointer", fontFamily:FONT, textAlign:"left" }}>
+              <div style={{ fontWeight:700, fontSize:14 }}>{t(d.shortKey)}</div>
+              <div style={{ fontWeight:500, fontSize:11, marginTop:2, color: direction === key ? C.accentStrong : C.textFaint }}>{t(d.shortSubKey)}</div>
+            </button>
+          ))}
+        </div>
+
+        <div style={{ marginBottom:14 }}>
+          <label style={lS}>Person</label>
+          {personPreset ? (
+            <div style={{ padding:"9px 12px", background:C.bg, borderRadius:RADIUS.sm }}>
+              <div style={{ fontSize:13, fontWeight:600 }}>{personPreset.name}</div>
+              <div style={{ fontSize:11.5, color:C.textFaint }}>{personPreset.phone}</div>
+            </div>
+          ) : person ? (
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"9px 12px", border:`1px solid ${C.border}`, borderRadius:RADIUS.sm }}>
+              <div><div style={{ fontSize:13, fontWeight:600 }}>{person.name}</div><div style={{ fontSize:11.5, color:C.textFaint }}>{person.phone}</div></div>
+              <button type="button" onClick={() => setPerson(null)} style={{ background:"none", border:"none", color:C.textFaint, cursor:"pointer", fontSize:12 }}>Change</button>
+            </div>
+          ) : <DebtCreditPersonPicker onSelect={setPerson} autoFocus />}
+        </div>
+
+        <label style={lS}>Category</label>
+        <select value={category} onChange={e => setCategory(e.target.value)} style={{ ...iS, marginBottom:12 }}>
+          {DC_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+        </select>
+
+        <label style={lS}>Amount (TZS)</label>
+        <input type="number" value={amount} onChange={e => setAmount(e.target.value)} style={{ ...iS, fontSize:19, fontWeight:700, marginBottom:12 }} />
+
+        <label style={lS}>Note (visible on the statement)</label>
+        <input value={description} onChange={e => setDescription(e.target.value)} placeholder="e.g. Lunch with family" style={{ ...iS, marginBottom:12 }} />
+
+        <label style={lS}>Internal note (staff only, never shown to the person)</label>
+        <textarea value={internalNote} onChange={e => setInternalNote(e.target.value)} rows={2} placeholder="e.g. Cooking gas" style={{ ...iS, marginBottom:16, resize:"vertical" }} />
+
+        <div style={{ display:"flex", gap:10 }}>
+          <button type="button" onClick={onClose} style={{ flex:1, padding:"12px", borderRadius:RADIUS.sm, border:`1px solid ${C.border}`, background:C.surface, color:C.text, cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5 }}>Cancel</button>
+          <button type="button" onClick={submit} disabled={busy} style={{ flex:1, padding:"12px", borderRadius:RADIUS.sm, border:"none", background:C.accentStrong, color:"#fff", cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5, opacity:busy?0.7:1 }}>
+            {busy ? "Saving…" : "Save Record"}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function DebtCreditPaymentModal({ record, user, displayName, showToast, onClose, onSaved }) {
+  const { t } = useLanguage()
+  const [amount, setAmount] = useState("")
+  const [note, setNote] = useState("")
+  const [busy, setBusy] = useState(false)
+  const remaining = Number(record.remaining || 0)
+  const newRemaining = remaining - (Number(amount) || 0)
+
+  async function submit() {
+    if (!amount || Number(amount) <= 0) { showToast("Enter a valid amount", "error"); return }
+    setBusy(true)
+    const { data, error } = await supabase.from("debt_credit_payments").insert([{
+      debt_credit_record_id: record.id, person_id: record.person_id,
+      amount: Number(amount), note: note.trim() || null,
+      recorded_by: user?.id || null, recorded_by_name: displayName || null,
+    }]).select().single()
+    setBusy(false)
+    if (error) { showToast(error.message, "error"); return }
+    // Direction-aware confirmation -- "Payment recorded" alone doesn't say
+    // which way the new balance runs; this makes it explicit every time,
+    // matching the same plain-language rule as the rest of this module.
+    let toastMsg
+    if (newRemaining > 0) {
+      toastMsg = record.direction === "RECEIVABLE"
+        ? t("dcPaymentRecordedOwedUs", { amount: TZS(newRemaining) })
+        : t("dcPaymentRecordedWeOwe", { amount: TZS(newRemaining) })
+    } else if (newRemaining === 0) {
+      toastMsg = t("dcPaymentRecordedFullyPaid")
+    } else {
+      toastMsg = t("dcPaymentRecordedCredit", { amount: TZS(Math.abs(newRemaining)) })
+    }
+    showToast(toastMsg)
+    onSaved?.(data)
+  }
+
+  return (
+    <div onClick={onClose} style={{ position:"fixed", inset:0, background:"rgba(20,20,30,0.5)", zIndex:1200, display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}>
+      <div onClick={e => e.stopPropagation()} role="dialog" aria-modal="true"
+        style={{ background:C.surface, borderRadius:RADIUS.lg, padding:"clamp(18px,4vw,26px)", width:"min(94vw,420px)", boxShadow:SHADOW.modal }}>
+        <h2 style={{ margin:"0 0 6px", fontFamily:FONT, fontWeight:700, fontSize:16, color:C.text }}>{t("dcRecordPaymentBtn")}</h2>
+        <p style={{ margin:"0 0 16px", fontSize:12.5, color:C.textFaint }}>{record.category} — {formatDMY(record.created_at)}</p>
+
+        <div style={{ display:"flex", justifyContent:"space-between", fontSize:13, marginBottom:4 }}><span style={{ color:C.textSub }}>Original</span><span style={{ fontWeight:600 }}>{TZS(record.original_amount)}</span></div>
+        <div style={{ display:"flex", justifyContent:"space-between", fontSize:13, marginBottom:12 }}><span style={{ color:C.textSub }}>Remaining</span><span style={{ fontWeight:700, color:C.warnStrong }}>{TZS(remaining)}</span></div>
+
+        <label style={lS}>Payment amount (TZS)</label>
+        <input type="number" autoFocus value={amount} onChange={e => setAmount(e.target.value)} style={{ ...iS, fontSize:19, fontWeight:700, marginBottom:8 }} />
+        {!!amount && Number(amount) > 0 && (
+          <div style={{ fontSize:12, color: newRemaining < 0 ? C.accentStrong : C.textFaint, marginBottom:12 }}>
+            {newRemaining < 0 ? `Overpayment -- ${TZS(Math.abs(newRemaining))} credit will be recorded` : `New remaining balance: ${TZS(newRemaining)}`}
+          </div>
+        )}
+
+        <label style={lS}>Note (optional)</label>
+        <input value={note} onChange={e => setNote(e.target.value)} style={{ ...iS, marginBottom:16 }} />
+
+        <div style={{ display:"flex", gap:10 }}>
+          <button type="button" onClick={onClose} style={{ flex:1, padding:"12px", borderRadius:RADIUS.sm, border:`1px solid ${C.border}`, background:C.surface, color:C.text, cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5 }}>Cancel</button>
+          <button type="button" onClick={submit} disabled={busy} style={{ flex:1, padding:"12px", borderRadius:RADIUS.sm, border:"none", background:C.accentStrong, color:"#fff", cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5, opacity:busy?0.7:1 }}>
+            {busy ? "Saving…" : t("dcRecordPaymentBtn")}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// Same iframe-modal pattern already used for invoice/itinerary PDF previews
+// in this app (InvoicePreviewModal / ItineraryPreviewModal) rather than
+// window.open() -- window.open() on a blob: URL is a real, established
+// cross-browser popup-blocker risk when called from inside an async
+// handler (exactly what generating a PDF requires), and this app's own
+// existing pattern already avoids it everywhere else.
+function DebtCreditPdfModal({ title, url, onClose }) {
+  return (
+    <div onClick={onClose} style={{ position:"fixed", inset:0, background:"rgba(20,20,30,0.6)", zIndex:1300, display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}>
+      <div onClick={e => e.stopPropagation()} role="dialog" aria-modal="true"
+        style={{ background:C.surface, borderRadius:RADIUS.lg, width:"min(96vw, 780px)", height:"92vh", display:"flex", flexDirection:"column", boxShadow:SHADOW.modal, overflow:"hidden" }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"14px 18px", borderBottom:`1px solid ${C.border}` }}>
+          <span style={{ fontWeight:700, fontSize:14, color:C.text }}>{title}</span>
+          <button type="button" onClick={onClose} style={{ background:C.surface, color:C.text, border:`1px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"7px 13px", fontSize:12.5, fontWeight:600, cursor:"pointer" }}>Close</button>
+        </div>
+        <iframe title={title} src={url} style={{ flex:1, border:"none", width:"100%" }} />
+      </div>
+    </div>
+  )
+}
+
+function DebtCreditPersonDetail({ personId, user, displayName, showToast, onBack, onDataChanged }) {
+  const { t } = useLanguage()
+  const [person, setPerson] = useState(null)
+  const [records, setRecords] = useState([])   // debt_credit_record_balances rows, this person, all directions
+  const [payments, setPayments] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [loadErr, setLoadErr] = useState("")
+  const [showArchivedRecords, setShowArchivedRecords] = useState(false)
+  const [showAddRecord, setShowAddRecord] = useState(false)
+  const [payTarget, setPayTarget] = useState(null)
+  const [editingPerson, setEditingPerson] = useState(false)
+  const [statementBusy, setStatementBusy] = useState(false)
+  const [busyRecordId, setBusyRecordId] = useState(null)
+  const [pdfPreview, setPdfPreview] = useState(null) // { title, url }
+
+  async function load() {
+    setLoading(true); setLoadErr("")
+    try {
+      const [{ data: p, error: pErr }, { data: r, error: rErr }] = await Promise.all([
+        supabase.from("debt_credit_people").select("*").eq("id", personId).single(),
+        supabase.from("debt_credit_record_balances").select("*").eq("person_id", personId).order("created_at", { ascending:false }),
+      ])
+      if (pErr) throw pErr
+      if (rErr) throw rErr
+      const recordIds = (r || []).map(x => x.id)
+      let pay = []
+      if (recordIds.length) {
+        const { data: payData, error: payErr } = await supabase.from("debt_credit_payments").select("*").in("debt_credit_record_id", recordIds).order("payment_date", { ascending:false })
+        if (payErr) throw payErr
+        pay = payData || []
+      }
+      setPerson(p); setRecords(r || []); setPayments(pay)
+    } catch (e) {
+      setLoadErr(e.message || "Failed to load")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { load() }, [personId])
+
+  if (loadErr) {
+    return (
+      <div style={{ padding:"40px 0", textAlign:"center" }}>
+        <p style={{ color:C.warnStrong, fontWeight:600, marginBottom:16 }}>Could not load this account: {loadErr}</p>
+        <div style={{ display:"flex", gap:10, justifyContent:"center" }}>
+          <button type="button" onClick={load} style={{ background:C.accentStrong, color:"#fff", border:"none", borderRadius:RADIUS.sm, padding:"9px 16px", fontSize:13, fontWeight:600, cursor:"pointer" }}>Retry</button>
+          <button type="button" onClick={onBack} style={{ background:"none", border:`1px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"9px 16px", cursor:"pointer" }}>Back to Debt & Credit</button>
+        </div>
+      </div>
+    )
+  }
+  if (loading || !person) return <p style={{ color:C.textFaint }}>Loading…</p>
+
+  const visibleRecords = records.filter(r => showArchivedRecords ? true : !r.archived_at)
+  const receivableActive = records.filter(r => !r.archived_at && r.direction === "RECEIVABLE")
+  const payableActive = records.filter(r => !r.archived_at && r.direction === "PAYABLE")
+  const receivableOutstanding = receivableActive.reduce((a,r) => a + Number(r.remaining||0), 0)
+  const payableOutstanding = payableActive.reduce((a,r) => a + Number(r.remaining||0), 0)
+  // Paid-so-far totals, purely for the "They owe us / Paid / Still owed"
+  // style summary cards below -- read-only display sums over data already
+  // fetched, not a new stored/calculated field.
+  const receivablePaid = receivableActive.reduce((a,r) => a + Number(r.paid_total||0), 0)
+  const payablePaid = payableActive.reduce((a,r) => a + Number(r.paid_total||0), 0)
+  const receivableOriginal = receivableActive.reduce((a,r) => a + Number(r.original_amount||0), 0)
+  const payableOriginal = payableActive.reduce((a,r) => a + Number(r.original_amount||0), 0)
+
+  async function archiveRecord(r) {
+    if (!confirm(`Archive this ${r.category} record? It will leave the active list but stay in history.`)) return
+    setBusyRecordId(r.id)
+    const { error } = await supabase.from("debt_credit_records").update({ archived_at: new Date().toISOString(), archived_by: user?.id || null }).eq("id", r.id)
+    setBusyRecordId(null)
+    if (error) { showToast(error.message, "error"); return }
+    showToast("Record archived")
+    load(); onDataChanged?.()
+  }
+  async function unarchiveRecord(r) {
+    setBusyRecordId(r.id)
+    const { error } = await supabase.from("debt_credit_records").update({ archived_at: null, archived_by: null }).eq("id", r.id)
+    setBusyRecordId(null)
+    if (error) { showToast(error.message, "error"); return }
+    showToast("Record restored")
+    load(); onDataChanged?.()
+  }
+  async function archivePerson() {
+    if (!confirm(`Archive ${person.name}? They'll leave the main list but their history is kept and can be restored later.`)) return
+    const { error } = await supabase.from("debt_credit_people").update({ archived_at: new Date().toISOString(), archived_by: user?.id || null }).eq("id", person.id)
+    if (error) { showToast(error.message, "error"); return }
+    showToast("Person archived")
+    onDataChanged?.(); onBack()
+  }
+  async function unarchivePerson() {
+    const { error } = await supabase.from("debt_credit_people").update({ archived_at: null, archived_by: null }).eq("id", person.id)
+    if (error) { showToast(error.message, "error"); return }
+    showToast("Person restored")
+    load(); onDataChanged?.()
+  }
+
+  async function printStatement() {
+    setStatementBusy(true)
+    try {
+      const { data: statementNumber, error: numErr } = await supabase.rpc("next_debt_statement_number")
+      if (numErr) throw numErr
+      const url = await getDebtStatementPdfBlobUrl(person, records.filter(r => !r.archived_at), payments, statementNumber)
+      setPdfPreview({ title: "Account Statement", url })
+    } catch (e) {
+      showToast(`Could not generate statement: ${e.message}`, "error")
+    } finally {
+      setStatementBusy(false)
+    }
+  }
+
+  async function printReceipt(payment, record) {
+    try {
+      const url = await getDebtPaymentReceiptPdfBlobUrl(person, record, payment)
+      setPdfPreview({ title: "Payment Receipt", url })
+    } catch (e) {
+      showToast(`Could not generate receipt: ${e.message}`, "error")
+    }
+  }
+
+  return (
+    <div>
+      <button type="button" onClick={onBack} style={{ background:"none", border:"none", color:C.textSub, cursor:"pointer", fontSize:13, marginBottom:14, padding:0 }}>← Back to Debt & Credit</button>
+
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", flexWrap:"wrap", gap:12, marginBottom:SPACE.lg }}>
+        <div>
+          <h1 style={pT}>{person.name}{person.archived_at && <span style={{ marginLeft:10, fontSize:12, fontWeight:600, color:C.textFaint }}>(Archived)</span>}</h1>
+          <p style={{ margin:"2px 0", color:C.textSub, fontSize:13 }}>{person.phone}{person.email ? ` · ${person.email}` : ""}</p>
+          {person.notes && <p style={{ margin:"4px 0 0", color:C.textFaint, fontSize:12.5 }}>{person.notes}</p>}
+        </div>
+        <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+          <button type="button" onClick={() => setEditingPerson(true)} style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"8px 14px", fontSize:12.5, fontWeight:600, cursor:"pointer" }}>Edit Person</button>
+          <button type="button" onClick={printStatement} disabled={statementBusy} style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"8px 14px", fontSize:12.5, fontWeight:600, cursor:"pointer", opacity:statementBusy?0.6:1 }}>{statementBusy ? "Preparing…" : "Statement PDF"}</button>
+          {!person.archived_at
+            ? <button type="button" onClick={archivePerson} style={{ background:C.warnSoft, color:C.warnStrong, border:"none", borderRadius:RADIUS.sm, padding:"8px 14px", fontSize:12.5, fontWeight:600, cursor:"pointer" }}>Archive Person</button>
+            : <button type="button" onClick={unarchivePerson} style={{ background:C.accentSoft, color:C.accentStrong, border:"none", borderRadius:RADIUS.sm, padding:"8px 14px", fontSize:12.5, fontWeight:600, cursor:"pointer" }}>Restore Person</button>}
+        </div>
+      </div>
+
+      {/* One natural-language summary card per direction the person actually
+          has active records in ("Ahmed Ali owes us: TZS X / Paid: TZS Y /
+          Still owed: TZS Z") -- a person who has only ever been a customer
+          never sees an irrelevant zero "We owe them" card, and vice versa.
+          A person who is both (rare but possible) sees both cards. */}
+      <div style={{ display:"grid", gap:SPACE.md, marginBottom:SPACE.xl, gridTemplateColumns:"repeat(auto-fit, minmax(220px, 1fr))" }}>
+        {receivableActive.length > 0 && (
+          <div style={panelS}>
+            <div style={{ fontSize:12.5, fontWeight:700, color:C.text, marginBottom:10 }}>{t("dcTheyOweUs")}</div>
+            <div style={{ display:"flex", justifyContent:"space-between", fontSize:12.5, color:C.textSub, marginBottom:3 }}><span>{t("dcAmountOwed")}</span><span style={{ fontWeight:600, color:C.text }}>{TZS(receivableOriginal)}</span></div>
+            <div style={{ display:"flex", justifyContent:"space-between", fontSize:12.5, color:C.textSub, marginBottom:3 }}><span>{t("dcPaidColumn")}</span><span style={{ fontWeight:600, color:C.text }}>{TZS(receivablePaid)}</span></div>
+            <div style={{ display:"flex", justifyContent:"space-between", fontSize:13.5, marginTop:6, paddingTop:6, borderTop:`1px solid ${C.border}` }}><span style={{ fontWeight:600, color:C.textSub }}>{t("dcStillOwed")}</span><span style={{ fontWeight:800, color: receivableOutstanding > 0 ? C.warnStrong : C.text }}>{TZS(receivableOutstanding)}</span></div>
+          </div>
+        )}
+        {payableActive.length > 0 && (
+          <div style={panelS}>
+            <div style={{ fontSize:12.5, fontWeight:700, color:C.text, marginBottom:10 }}>{t("dcWeOweThem")}</div>
+            <div style={{ display:"flex", justifyContent:"space-between", fontSize:12.5, color:C.textSub, marginBottom:3 }}><span>{t("dcAmountOwed")}</span><span style={{ fontWeight:600, color:C.text }}>{TZS(payableOriginal)}</span></div>
+            <div style={{ display:"flex", justifyContent:"space-between", fontSize:12.5, color:C.textSub, marginBottom:3 }}><span>{t("dcPaidColumn")}</span><span style={{ fontWeight:600, color:C.text }}>{TZS(payablePaid)}</span></div>
+            <div style={{ display:"flex", justifyContent:"space-between", fontSize:13.5, marginTop:6, paddingTop:6, borderTop:`1px solid ${C.border}` }}><span style={{ fontWeight:600, color:C.textSub }}>{t("dcStillToPay")}</span><span style={{ fontWeight:800, color: payableOutstanding > 0 ? C.warnStrong : C.text }}>{TZS(payableOutstanding)}</span></div>
+          </div>
+        )}
+      </div>
+
+      {!person.archived_at && (
+        <button type="button" onClick={() => setShowAddRecord(true)} className="stv-btn stv-btn-primary" style={{ ...sB, width:"auto", padding:"11px 20px", marginBottom:SPACE.lg }}>{t("dcAddRecordBtn")}</button>
+      )}
+
+      <div style={{ ...panelS, marginBottom:SPACE.lg }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14, flexWrap:"wrap", gap:8 }}>
+          <h2 style={{ margin:0, fontSize:14, fontWeight:600, color:C.text }}>Transaction History</h2>
+          <label style={{ display:"flex", alignItems:"center", gap:6, fontSize:12, color:C.textFaint, cursor:"pointer" }}>
+            <input type="checkbox" checked={showArchivedRecords} onChange={e => setShowArchivedRecords(e.target.checked)} /> Show archived
+          </label>
+        </div>
+        <div style={{ overflowX:"auto", WebkitOverflowScrolling:"touch" }}>
+          <table className="stv-table" style={{ width:"100%", minWidth:680, borderCollapse:"collapse" }}>
+            <thead>
+              <tr style={{ borderBottom:`1.5px solid ${C.border}` }}>
+                {["Date","Category","Note","Direction",t("dcAmountOwed"),"Balance","Status",""].map(h => (
+                  <th key={h} scope="col" style={{ textAlign:"left", padding:"0 10px 10px 0", fontSize:10.5, color:C.textFaint, fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {visibleRecords.map(r => (
+                <tr key={r.id} style={{ borderBottom:`1px solid ${C.bg}`, opacity:r.archived_at ? 0.55 : 1 }}>
+                  <td style={tS}>{formatDMY(r.created_at)}</td>
+                  <td style={tS}>{r.category}</td>
+                  <td style={{ ...tS, color:C.textFaint }}>{r.description || "—"}</td>
+                  <td style={tS}>{t(DC_DIRECTIONS[r.direction]?.shortKey)}</td>
+                  <td style={{ ...tS, fontWeight:600 }}>{TZS(r.original_amount)}</td>
+                  <td style={{ ...tS, fontWeight:700, color: r.remaining > 0 ? C.warnStrong : C.textFaint }}>{TZS(r.remaining)}</td>
+                  <td style={tS}>
+                    <span style={{ display:"inline-block", padding:"3px 9px", borderRadius:RADIUS.pill, fontSize:11, fontWeight:700, background:`${dcStatusColor(r.status)}22`, color:dcStatusColor(r.status) }}>
+                      {dcStatusLabel(r.status, t)}
+                    </span>
+                  </td>
+                  <td style={tS}>
+                    <div style={{ display:"flex", gap:6, whiteSpace:"nowrap" }}>
+                      {!r.archived_at && r.status !== "paid" && (
+                        <button type="button" onClick={() => setPayTarget(r)} disabled={busyRecordId===r.id} style={{ background:"none", border:"none", color:C.accentStrong, fontWeight:600, fontSize:12, cursor:"pointer" }}>Pay</button>
+                      )}
+                      {!r.archived_at
+                        ? <button type="button" onClick={() => archiveRecord(r)} disabled={busyRecordId===r.id} style={{ background:"none", border:"none", color:C.textFaint, fontSize:12, cursor:"pointer" }}>Archive</button>
+                        : <button type="button" onClick={() => unarchiveRecord(r)} disabled={busyRecordId===r.id} style={{ background:"none", border:"none", color:C.accentStrong, fontSize:12, cursor:"pointer" }}>Restore</button>}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+              {visibleRecords.length === 0 && (
+                <tr><td colSpan={8} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:20 }}>No records yet.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div style={panelS}>
+        <h2 style={{ margin:"0 0 14px", fontSize:14, fontWeight:600, color:C.text }}>Payment History</h2>
+        <div style={{ overflowX:"auto", WebkitOverflowScrolling:"touch" }}>
+          <table className="stv-table" style={{ width:"100%", minWidth:560, borderCollapse:"collapse" }}>
+            <thead>
+              <tr style={{ borderBottom:`1.5px solid ${C.border}` }}>
+                {["Date","Amount","Note","Recorded By","Receipt",""].map(h => (
+                  <th key={h} scope="col" style={{ textAlign:"left", padding:"0 10px 10px 0", fontSize:10.5, color:C.textFaint, fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {payments.map(p => {
+                const rec = records.find(r => r.id === p.debt_credit_record_id)
+                return (
+                  <tr key={p.id} style={{ borderBottom:`1px solid ${C.bg}` }}>
+                    <td style={tS}>{formatDMY(p.payment_date)}</td>
+                    <td style={{ ...tS, fontWeight:600 }}>{TZS(p.amount)}</td>
+                    <td style={{ ...tS, color:C.textFaint }}>{p.note || "—"}</td>
+                    <td style={{ ...tS, color:C.textFaint }}>{p.recorded_by_name || "—"}</td>
+                    <td style={{ ...tS, color:C.textFaint }}>{p.receipt_number || "—"}</td>
+                    <td style={tS}>
+                      {rec && <button type="button" onClick={() => printReceipt(p, rec)} style={{ background:"none", border:"none", color:C.accentStrong, fontWeight:600, fontSize:12, cursor:"pointer" }}>Receipt PDF</button>}
+                    </td>
+                  </tr>
+                )
+              })}
+              {payments.length === 0 && (
+                <tr><td colSpan={6} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:20 }}>No payments yet.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {showAddRecord && (
+        <DebtCreditRecordModal
+          personPreset={person}
+          user={user} displayName={displayName} showToast={showToast}
+          onClose={() => setShowAddRecord(false)}
+          onSaved={() => { setShowAddRecord(false); load(); onDataChanged?.() }}
+        />
+      )}
+      {payTarget && (
+        <DebtCreditPaymentModal
+          record={payTarget} user={user} displayName={displayName} showToast={showToast}
+          onClose={() => setPayTarget(null)}
+          onSaved={async () => { setPayTarget(null); await load(); onDataChanged?.() }}
+        />
+      )}
+      {editingPerson && (
+        <DebtCreditEditPersonModal
+          person={person} showToast={showToast}
+          onClose={() => setEditingPerson(false)}
+          onSaved={() => { setEditingPerson(false); load(); onDataChanged?.() }}
+        />
+      )}
+      {pdfPreview && (
+        <DebtCreditPdfModal
+          title={pdfPreview.title}
+          url={pdfPreview.url}
+          onClose={() => setPdfPreview(null)}
+        />
+      )}
+    </div>
+  )
+}
+
+/* ── TOP-LEVEL PAGE ──────────────────────────────────────────
+   Same list/detail router shape as ItinerariesPage above (this app's own
+   established pattern for a multi-view owner-only module), just with two
+   direction tabs plus a History/Archived tab instead of itinerary's
+   list/editor/media/library views. */
+function DebtCreditPage({ user, isOwner, displayName, showToast }) {
+  const { t } = useLanguage()
+  const [direction, setDirection] = useState("RECEIVABLE")
+  const [view, setView] = useState("list") // list | person | archived
+  const [selectedPersonId, setSelectedPersonId] = useState(null)
+  const [people, setPeople] = useState([])
+  const [records, setRecords] = useState([])   // debt_credit_record_balances, active only, all directions
+  const [archivedPeople, setArchivedPeople] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [loadErr, setLoadErr] = useState("")
+  const [search, setSearch] = useState("")
+  const [showNewRecord, setShowNewRecord] = useState(false)
+
+  async function load() {
+    setLoading(true); setLoadErr("")
+    try {
+      const [{ data: p, error: pErr }, { data: r, error: rErr }, { data: arch, error: archErr }] = await Promise.all([
+        supabase.from("debt_credit_people").select("*").is("archived_at", null).order("name"),
+        supabase.from("debt_credit_record_balances").select("*").is("archived_at", null).order("created_at", { ascending:false }),
+        supabase.from("debt_credit_people").select("id,name,phone,email,archived_at").not("archived_at", "is", null).order("archived_at", { ascending:false }),
+      ])
+      if (pErr) throw pErr
+      if (rErr) throw rErr
+      if (archErr) throw archErr
+      setPeople(p || []); setRecords(r || []); setArchivedPeople(arch || [])
+    } catch (e) {
+      setLoadErr(e.message || "Failed to load")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { load() }, [])
+
+  // Rules of Hooks: every hook above runs unconditionally on every render,
+  // so this gate is placed after all of them, same as ItinerariesPage.
+  if (!isOwner) return null
+
+  if (loadErr) {
+    return (
+      <div style={{ padding:"60px 0", textAlign:"center" }}>
+        <p style={{ color:C.warnStrong, fontWeight:600, marginBottom:16 }}>Unable to load Debt & Credit: {loadErr}</p>
+        <button type="button" onClick={load} style={{ background:C.accentStrong, color:"#fff", border:"none", borderRadius:RADIUS.sm, padding:"9px 16px", fontSize:13, fontWeight:600, cursor:"pointer" }}>Retry</button>
+      </div>
+    )
+  }
+
+  if (view === "person" && selectedPersonId) {
+    return (
+      <DebtCreditSectionErrorBoundary onBack={() => { setView("list"); load() }}>
+        <DebtCreditPersonDetail
+          key={selectedPersonId} personId={selectedPersonId}
+          user={user} displayName={displayName} showToast={showToast}
+          onBack={() => { setView("list"); load() }}
+          onDataChanged={load}
+        />
+      </DebtCreditSectionErrorBoundary>
+    )
+  }
+
+  // People shown under a direction tab: anyone with at least one ACTIVE
+  // record in that direction -- not just an outstanding one, so a
+  // fully-settled account still shows (with Outstanding: TZS 0) rather than
+  // silently disappearing once paid off.
+  function rowsForDirection(dir) {
+    const map = new Map()
+    for (const r of records) {
+      if (r.direction !== dir) continue
+      const cur = map.get(r.person_id) || { count:0, outstanding:0 }
+      cur.count += 1
+      cur.outstanding += Number(r.remaining || 0)
+      map.set(r.person_id, cur)
+    }
+    const q = search.trim().toLowerCase()
+    return people
+      .filter(p => map.has(p.id))
+      .filter(p => !q || p.name.toLowerCase().includes(q))
+      .map(p => ({ person:p, ...map.get(p.id) }))
+      .sort((a,b) => b.outstanding - a.outstanding)
+  }
+
+  const totalReceivable = records.filter(r => r.direction === "RECEIVABLE").reduce((a,r) => a + Number(r.remaining||0), 0)
+  const totalPayable = records.filter(r => r.direction === "PAYABLE").reduce((a,r) => a + Number(r.remaining||0), 0)
+
+  return (
+    <div>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:12, marginBottom:SPACE.xl }}>
+        <div>
+          <h1 style={pT}>Debt & Credit</h1>
+          <p style={{ margin:0, color:C.textFaint, fontSize:13 }}>{t(DC_DIRECTIONS[direction].tabSubKey)}</p>
+        </div>
+        <button type="button" onClick={() => setShowNewRecord(true)} className="stv-btn stv-btn-primary" style={{ ...sB, width:"auto", padding:"11px 20px" }}>{t("dcNewRecordBtn")}</button>
+      </div>
+
+      <div style={{ display:"grid", gap:SPACE.md, marginBottom:SPACE.xl, gridTemplateColumns:"repeat(auto-fit, minmax(220px, 1fr))" }}>
+        <div style={panelS}>
+          <div style={{ fontSize:11, fontWeight:600, color:C.textFaint, textTransform:"uppercase", marginBottom:6 }}>{t("dcTabOwedToUs")}</div>
+          <div style={{ fontSize:24, fontWeight:800, color: totalReceivable>0 ? C.warnStrong : C.text }}>{TZS(totalReceivable)}</div>
+        </div>
+        <div style={panelS}>
+          <div style={{ fontSize:11, fontWeight:600, color:C.textFaint, textTransform:"uppercase", marginBottom:6 }}>{t("dcTabWeOwe")}</div>
+          <div style={{ fontSize:24, fontWeight:800, color: totalPayable>0 ? C.warnStrong : C.text }}>{TZS(totalPayable)}</div>
+        </div>
+      </div>
+
+      <div role="tablist" style={{ display:"flex", gap:4, marginBottom:16, borderBottom:`1.5px solid ${C.border}`, flexWrap:"wrap" }}>
+        {Object.entries(DC_DIRECTIONS).map(([key,d]) => (
+          <button key={key} type="button" role="tab" aria-selected={direction===key && view!=="archived"}
+            onClick={() => { setDirection(key); setView("list") }}
+            style={{ padding:"10px 16px", background:"none", border:"none", borderBottom: (direction===key && view!=="archived") ? `2px solid ${C.accentStrong}` : "2px solid transparent", color: (direction===key && view!=="archived") ? C.accentStrong : C.textSub, fontWeight:600, fontSize:13.5, cursor:"pointer", fontFamily:FONT, marginBottom:-1.5 }}>
+            {t(d.tabKey)}
+          </button>
+        ))}
+        <button type="button" role="tab" aria-selected={view==="archived"} onClick={() => setView("archived")}
+          style={{ padding:"10px 16px", background:"none", border:"none", borderBottom: view==="archived" ? `2px solid ${C.accentStrong}` : "2px solid transparent", color: view==="archived" ? C.accentStrong : C.textSub, fontWeight:600, fontSize:13.5, cursor:"pointer", fontFamily:FONT, marginBottom:-1.5 }}>
+          History / Archived
+        </button>
+      </div>
+
+      {view !== "archived" && (
+        <>
+          <div style={{ marginBottom:16, maxWidth:360 }}>
+            <input placeholder="Search by name…" value={search} onChange={e => setSearch(e.target.value)} style={iS} aria-label="Search people" />
+          </div>
+          <div style={panelS}>
+            <div style={{ overflowX:"auto", WebkitOverflowScrolling:"touch" }}>
+              <table className="stv-table" style={{ width:"100%", minWidth:520, borderCollapse:"collapse" }}>
+                <thead>
+                  <tr style={{ borderBottom:`1.5px solid ${C.border}` }}>
+                    {["Person","Phone","Records", direction === "RECEIVABLE" ? t("dcStillOwed") : t("dcStillToPay")].map((h,i) => (
+                      <th key={h} scope="col" style={{ textAlign: i===3?"right":"left", padding:"0 12px 10px 0", fontSize:10.5, color:C.textFaint, fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {rowsForDirection(direction).map(row => (
+                    <tr key={row.person.id} style={{ borderBottom:`1px solid ${C.bg}`, cursor:"pointer" }} onClick={() => { setSelectedPersonId(row.person.id); setView("person") }}>
+                      <td style={{ ...tS, fontWeight:700 }}>{row.person.name}</td>
+                      <td style={tS}>{row.person.phone}</td>
+                      <td style={tS}>{row.count}</td>
+                      <td style={{ ...tS, textAlign:"right", fontWeight:700, color: row.outstanding>0 ? C.warnStrong : C.textFaint }}>{TZS(row.outstanding)}</td>
+                    </tr>
+                  ))}
+                  {!loading && rowsForDirection(direction).length === 0 && (
+                    <tr><td colSpan={4} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>No accounts yet in "{t(DC_DIRECTIONS[direction].tabKey)}".</td></tr>
+                  )}
+                  {loading && (<tr><td colSpan={4} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>Loading…</td></tr>)}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      )}
+
+      {view === "archived" && (
+        <div style={panelS}>
+          <div style={{ overflowX:"auto", WebkitOverflowScrolling:"touch" }}>
+            <table className="stv-table" style={{ width:"100%", minWidth:480, borderCollapse:"collapse" }}>
+              <thead>
+                <tr style={{ borderBottom:`1.5px solid ${C.border}` }}>
+                  {["Person","Phone","Archived On"].map(h => (
+                    <th key={h} scope="col" style={{ textAlign:"left", padding:"0 12px 10px 0", fontSize:10.5, color:C.textFaint, fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {archivedPeople.map(p => (
+                  <tr key={p.id} style={{ borderBottom:`1px solid ${C.bg}`, cursor:"pointer" }} onClick={() => { setSelectedPersonId(p.id); setView("person") }}>
+                    <td style={{ ...tS, fontWeight:700 }}>{p.name}</td>
+                    <td style={tS}>{p.phone}</td>
+                    <td style={tS}>{formatDMY(p.archived_at)}</td>
+                  </tr>
+                ))}
+                {archivedPeople.length === 0 && (
+                  <tr><td colSpan={3} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>No archived people.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {showNewRecord && (
+        <DebtCreditRecordModal
+          direction={direction}
+          user={user} displayName={displayName} showToast={showToast}
+          onClose={() => setShowNewRecord(false)}
+          onSaved={() => { setShowNewRecord(false); load() }}
+        />
       )}
     </div>
   )
