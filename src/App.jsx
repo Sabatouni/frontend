@@ -28,6 +28,12 @@ import { downloadInvoicePdf, getInvoicePdfBlobUrl } from "./lib/invoicePdf"
 import { downloadItineraryPdf, getItineraryPdfBlobUrl, getItineraryPdfBlob } from "./lib/itineraryPdf"
 import { getDebtStatementPdfBlobUrl, getDebtPaymentReceiptPdfBlobUrl } from "./lib/debtCreditPdf"
 import {
+  fetchActiveMenuItems, fetchAllMenuItems, createMenuItem, updateMenuItem, setMenuItemActive,
+  fetchOpenOrders, fetchOrderHistory, fetchOrderWithItems, createOrder, updateOrderCustomerName,
+  discardOrder, markOrderPaid, addMenuItemToOrder, addCustomItemToOrder, updateOrderItemQuantity,
+  updateOrderItemPrice, removeOrderItem,
+} from "./lib/takeOrders"
+import {
   GUEST_TYPES as ITIN_GUEST_TYPES,
   emptyItineraryContent,
   nightsBetween as itinNightsBetween,
@@ -268,6 +274,15 @@ export default function App() {
               expenses={expenses} fetchAll={fetchAll}
               user={user} showToast={showToast} isOwner={isOwner}
             />
+          )}
+          {/* Take Orders -- open to workers AND owner/admin (Sidebar has it
+              in both navs, unlike Debt & Credit/Itinerary/Reports/Users
+              below, which are owner/admin only). Menu management inside
+              the page is still gated on isOwner, same pattern as the
+              "+ Add Service" button on SalesPage. Fully isolated from
+              Sales -- see src/lib/takeOrders.js's header comment. */}
+          {page === "takeOrders" && (
+            <TakeOrdersPage user={user} isOwner={isOwner} displayName={displayName} showToast={showToast} />
           )}
           {page === "inventory" && (
             <InventoryPage user={user} isOwner={isOwner} showToast={showToast} />
@@ -585,6 +600,7 @@ function Sidebar({ page, setPage, isOwner, displayName, onLogout, open, onClose 
   const ownerNav = [
     { id:"dashboard",  label:t("navDashboard"),  icon:"📊" },
     { id:"sales",      label:t("navSales"),      icon:"💰" },
+    { id:"takeOrders", label:"Take Orders",      icon:"🍽️" },
     { id:"expenses",   label:t("navExpenses"),   icon:"🧾" },
     { id:"inventory",  label:t("navInventory"),  icon:"📦" },
     { id:"invoices",   label:t("navInvoices"),   icon:"📑" },
@@ -596,6 +612,7 @@ function Sidebar({ page, setPage, isOwner, displayName, onLogout, open, onClose 
   const workerNav = [
     { id:"dashboard",  label:t("navHome"),       icon:"🏠" },
     { id:"sales",      label:t("navRecordSale"), icon:"💰" },
+    { id:"takeOrders", label:"Take Orders",      icon:"🍽️" },
     { id:"expenses",   label:t("navExpenses"),   icon:"🧾" },
     { id:"inventory",  label:t("navInventory"),  icon:"📦" },
     { id:"invoices",   label:t("navInvoices"),   icon:"📑" },
@@ -7418,6 +7435,698 @@ function DebtCreditPage({ user, isOwner, displayName, showToast }) {
           onSaved={() => { setShowNewRecord(false); load() }}
         />
       )}
+    </div>
+  )
+}
+
+/* ── TAKE ORDERS ──────────────────────────────────────────────
+   Restaurant/walk-in order-taking tool. Fully isolated: it does not read
+   or write sales/expenses/debt_credit/invoices/itinerary tables, and
+   marking an order PAID (see OrderEditor below) never creates or updates
+   a Sales record -- see src/lib/takeOrders.js's header comment for the
+   full list of things this module deliberately does not touch.
+
+   Access: every stv-pos user (worker included) can take orders -- Sidebar
+   has this nav entry in both ownerNav and workerNav, and the route above
+   renders this page with no isOwner gate, matching Sales/Expenses. Menu
+   management is owner/admin only, enforced here (isOwner check before
+   opening MenuManagerModal) AND at the database layer
+   (order_menu_items_admin_all RLS policy) -- the RLS policy is the real
+   boundary; this is just so a worker never even sees the button. */
+
+const ORDER_TABS = [
+  { id:"open",    label:"Open Orders" },
+  { id:"history", label:"Order History" },
+]
+
+function TakeOrdersPage({ user, isOwner, displayName, showToast }) {
+  const [tab, setTab] = useState("open")
+  const [openOrders, setOpenOrders] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [loadErr, setLoadErr] = useState("")
+  const [selectedOrderId, setSelectedOrderId] = useState(null)
+  const [showMenuManager, setShowMenuManager] = useState(false)
+  const [busy, setBusy] = useState(false)
+
+  async function load() {
+    setLoading(true); setLoadErr("")
+    try {
+      setOpenOrders(await fetchOpenOrders())
+    } catch (e) {
+      setLoadErr(e.message || "Failed to load")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { load() }, [])
+
+  const startNewOrder = async () => {
+    if (!user?.id) { showToast("Not authenticated", "error"); return }
+    setBusy(true)
+    try {
+      const order = await createOrder({ userId: user.id, displayName })
+      setSelectedOrderId(order.id)
+    } catch (e) {
+      showToast(e.message || "Could not start a new order", "error")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (selectedOrderId) {
+    return (
+      <OrderEditor
+        orderId={selectedOrderId}
+        showToast={showToast}
+        onBack={() => { setSelectedOrderId(null); load() }}
+      />
+    )
+  }
+
+  return (
+    <div>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:12, marginBottom:SPACE.xl }}>
+        <div>
+          <h1 style={pT}>Take Orders</h1>
+          <p style={{ margin:0, color:C.textFaint, fontSize:13 }}>Walk-in and restaurant order taking</p>
+        </div>
+        <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
+          {isOwner && (
+            <button type="button" onClick={() => setShowMenuManager(true)} className="stv-btn stv-btn-secondary"
+              style={{ padding:"11px 18px", borderRadius:RADIUS.sm, border:`1px solid ${C.border}`, background:C.surface, color:C.text, fontWeight:600, fontSize:13.5, cursor:"pointer", fontFamily:FONT }}>
+              Manage Menu
+            </button>
+          )}
+          <button type="button" onClick={startNewOrder} disabled={busy} className="stv-btn stv-btn-primary"
+            style={{ ...sB, width:"auto", padding:"11px 20px", opacity: busy ? 0.7 : 1 }}>
+            ＋ New Order
+          </button>
+        </div>
+      </div>
+
+      <div role="tablist" style={{ display:"flex", gap:4, marginBottom:16, borderBottom:`1.5px solid ${C.border}`, flexWrap:"wrap" }}>
+        {ORDER_TABS.map(tb => (
+          <button key={tb.id} type="button" role="tab" aria-selected={tab === tb.id}
+            onClick={() => setTab(tb.id)}
+            style={{ padding:"10px 16px", background:"none", border:"none", borderBottom: tab === tb.id ? `2px solid ${C.accentStrong}` : "2px solid transparent", color: tab === tb.id ? C.accentStrong : C.textSub, fontWeight:600, fontSize:13.5, cursor:"pointer", fontFamily:FONT, marginBottom:-1.5 }}>
+            {tb.label}
+          </button>
+        ))}
+      </div>
+
+      {tab === "open" && (
+        loading ? (
+          <p style={{ color:C.textFaint, fontSize:13 }}>Loading…</p>
+        ) : loadErr ? (
+          <div style={{ padding:"40px 0", textAlign:"center" }}>
+            <p style={{ color:C.warnStrong, fontWeight:600, marginBottom:16 }}>Unable to load orders: {loadErr}</p>
+            <button type="button" onClick={load} style={{ background:C.accentStrong, color:"#fff", border:"none", borderRadius:RADIUS.sm, padding:"9px 16px", fontSize:13, fontWeight:600, cursor:"pointer" }}>Retry</button>
+          </div>
+        ) : openOrders.length === 0 ? (
+          <p style={{ color:C.textFaint, fontSize:13.5, padding:"20px 0" }}>No open orders. Start one with "＋ New Order".</p>
+        ) : (
+          <div style={{ display:"grid", gap:SPACE.md, gridTemplateColumns:"repeat(auto-fit, minmax(220px, 1fr))" }}>
+            {openOrders.map(o => (
+              <button key={o.id} type="button" onClick={() => setSelectedOrderId(o.id)}
+                style={{ ...panelS, textAlign:"left", cursor:"pointer", fontFamily:FONT, display:"flex", flexDirection:"column", gap:6 }}>
+                <span style={{ fontSize:11, fontWeight:600, color:C.textFaint, textTransform:"uppercase" }}>{o.order_number}</span>
+                <span style={{ fontSize:15, fontWeight:700, color:C.text }}>{o.customer_name || "(no name yet)"}</span>
+                <span style={{ fontSize:13, color:C.textSub }}>{TZS(o.total_amount)}</span>
+                {o.created_by_name && <span style={{ fontSize:11.5, color:C.textFaint }}>Started by {o.created_by_name}</span>}
+              </button>
+            ))}
+          </div>
+        )
+      )}
+
+      {tab === "history" && <OrderHistoryPanel showToast={showToast} />}
+
+      {showMenuManager && (
+        <MenuManagerModal onClose={() => setShowMenuManager(false)} showToast={showToast} />
+      )}
+    </div>
+  )
+}
+
+function OrderEditor({ orderId, onBack, showToast }) {
+  const [order, setOrder] = useState(null)
+  const [items, setItems] = useState([])
+  const [menu, setMenu] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [loadErr, setLoadErr] = useState("")
+  const [customerNameDraft, setCustomerNameDraft] = useState("")
+  const [busy, setBusy] = useState(false)
+  const [showCustom, setShowCustom] = useState(false)
+  const [customForm, setCustomForm] = useState({ name:"", price:"", qty:"1" })
+
+  async function load() {
+    setLoading(true); setLoadErr("")
+    try {
+      const [{ order: o, items: it }, activeMenu] = await Promise.all([
+        fetchOrderWithItems(orderId),
+        fetchActiveMenuItems(),
+      ])
+      setOrder(o); setItems(it); setMenu(activeMenu)
+      setCustomerNameDraft(o.customer_name || "")
+    } catch (e) {
+      setLoadErr(e.message || "Failed to load order")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { load() }, [orderId])
+
+  const isLocked = order?.status === "PAID"
+
+  const saveCustomerName = async () => {
+    if (isLocked) return
+    try {
+      const updated = await updateOrderCustomerName(orderId, customerNameDraft)
+      setOrder(updated)
+    } catch (e) {
+      showToast(e.message || "Could not save name", "error")
+    }
+  }
+
+  const handleAddMenuItem = async (item) => {
+    setBusy(true)
+    try {
+      await addMenuItemToOrder(orderId, item)
+      await load()
+    } catch (e) {
+      showToast(e.message || "Could not add item", "error")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleAddCustom = async () => {
+    if (!customForm.name.trim() || Number(customForm.price) < 0 || !customForm.price) {
+      showToast("Enter a name and price for the custom item", "error"); return
+    }
+    setBusy(true)
+    try {
+      await addCustomItemToOrder(orderId, { name: customForm.name, unitPrice: customForm.price, quantity: customForm.qty })
+      setCustomForm({ name:"", price:"", qty:"1" })
+      setShowCustom(false)
+      await load()
+    } catch (e) {
+      showToast(e.message || "Could not add item", "error")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const changeQty = async (item, delta) => {
+    const next = item.quantity + delta
+    if (next <= 0) { await handleRemove(item); return }
+    setBusy(true)
+    try {
+      await updateOrderItemQuantity(item.id, next)
+      await load()
+    } catch (e) {
+      showToast(e.message || "Could not update quantity", "error")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const changePrice = async (item, value) => {
+    if (value === "" || Number(value) < 0) return
+    try {
+      await updateOrderItemPrice(item.id, value)
+      await load()
+    } catch (e) {
+      showToast(e.message || "Could not update price", "error")
+    }
+  }
+
+  const handleRemove = async (item) => {
+    setBusy(true)
+    try {
+      await removeOrderItem(item.id)
+      await load()
+    } catch (e) {
+      showToast(e.message || "Could not remove item", "error")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleDiscard = async () => {
+    if (!confirm("Discard this draft order? This cannot be undone.")) return
+    setBusy(true)
+    try {
+      await discardOrder(orderId)
+      showToast("Draft discarded")
+      onBack()
+    } catch (e) {
+      showToast(e.message || "Could not discard order", "error")
+      setBusy(false)
+    }
+  }
+
+  const handleMarkPaid = async () => {
+    if (!customerNameDraft.trim()) {
+      showToast("Enter a customer/identifier name before marking this order paid", "error"); return
+    }
+    if (items.length === 0) {
+      showToast("Add at least one item before marking this order paid", "error"); return
+    }
+    if (!confirm("Mark this order as PAID? It will be locked and moved to Order History.")) return
+    setBusy(true)
+    try {
+      await markOrderPaid(orderId, customerNameDraft)
+      showToast(`Order ${order.order_number} marked paid ✓`)
+      onBack()
+    } catch (e) {
+      showToast(e.message || "Could not mark order paid", "error")
+      setBusy(false)
+    }
+  }
+
+  if (loading) return <p style={{ color:C.textFaint, fontSize:13 }}>Loading…</p>
+  if (loadErr) {
+    return (
+      <div style={{ padding:"40px 0", textAlign:"center" }}>
+        <p style={{ color:C.warnStrong, fontWeight:600, marginBottom:16 }}>Unable to load this order: {loadErr}</p>
+        <button type="button" onClick={onBack} style={{ background:C.accentStrong, color:"#fff", border:"none", borderRadius:RADIUS.sm, padding:"9px 16px", fontSize:13, fontWeight:600, cursor:"pointer" }}>Back</button>
+      </div>
+    )
+  }
+  if (!order) return null
+
+  // Group active menu items by category for a friendlier picker.
+  const byCategory = new Map()
+  for (const m of menu) {
+    const key = m.category || "Other"
+    if (!byCategory.has(key)) byCategory.set(key, [])
+    byCategory.get(key).push(m)
+  }
+
+  return (
+    <div>
+      <button type="button" onClick={onBack} className="stv-btn stv-btn-ghost"
+        style={{ background:"none", border:"none", color:C.textSub, fontWeight:600, fontSize:13, cursor:"pointer", padding:0, marginBottom:16, fontFamily:FONT }}>
+        ← Back to Orders
+      </button>
+
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:12, marginBottom:SPACE.lg }}>
+        <div>
+          <h1 style={pT}>{order.order_number}</h1>
+          <p style={{ margin:0, color:C.textFaint, fontSize:13 }}>{isLocked ? "Paid — locked" : "Editing"}</p>
+        </div>
+        {isLocked && <span style={{ background:C.accentStrong+"18", color:C.accentStrong, padding:"6px 14px", borderRadius:RADIUS.pill, fontSize:12.5, fontWeight:700 }}>PAID</span>}
+      </div>
+
+      <div style={{ display:"flex", gap:20, flexWrap:"wrap", alignItems:"flex-start" }}>
+        {!isLocked && (
+          <div style={{ ...fC, flex:"1 1 320px", maxWidth:460 }}>
+            <h2 style={fTi}>Menu</h2>
+            {menu.length === 0 && <p style={{ color:C.textFaint, fontSize:13 }}>No active menu items yet.</p>}
+            {[...byCategory.entries()].map(([cat, catItems]) => (
+              <div key={cat} style={{ marginBottom:14 }}>
+                <div style={{ fontSize:11, fontWeight:600, color:C.textFaint, textTransform:"uppercase", marginBottom:8 }}>{cat}</div>
+                <div style={{ display:"flex", flexWrap:"wrap", gap:7 }}>
+                  {catItems.map(m => (
+                    <button key={m.id} type="button" disabled={busy} onClick={() => handleAddMenuItem(m)}
+                      className="stv-btn"
+                      style={{ padding:"8px 13px", borderRadius:RADIUS.sm, border:`1.5px solid ${C.border}`, background:C.surface, color:C.textSub, fontSize:12.5, fontWeight:600, cursor: busy ? "not-allowed" : "pointer", fontFamily:FONT }}>
+                      {m.name} · {TZS(m.default_price)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+
+            {!showCustom ? (
+              <button type="button" onClick={() => setShowCustom(true)} className="stv-btn stv-btn-ghost"
+                style={{ display:"flex", alignItems:"center", gap:6, background:"none", border:`1.5px dashed ${C.borderStrong}`, color:C.textSub, borderRadius:RADIUS.sm, padding:"7px 12px", fontSize:12, fontWeight:500, cursor:"pointer", fontFamily:FONT, marginTop:6 }}>
+                <span style={{ fontSize:15 }}>＋</span> Add custom item
+              </button>
+            ) : (
+              <div style={{ marginTop:10, padding:12, background:C.bg, borderRadius:RADIUS.sm }}>
+                <input placeholder="Item name" value={customForm.name}
+                  onChange={e => setCustomForm(f => ({ ...f, name:e.target.value }))}
+                  style={{ ...iS, marginBottom:8 }} />
+                <div style={{ display:"flex", gap:8, marginBottom:8 }}>
+                  <input placeholder="Price (TZS)" type="number" min="0" value={customForm.price}
+                    onChange={e => setCustomForm(f => ({ ...f, price:e.target.value }))} style={iS} />
+                  <input placeholder="Qty" type="number" min="1" value={customForm.qty}
+                    onChange={e => setCustomForm(f => ({ ...f, qty:e.target.value }))} style={{ ...iS, maxWidth:80 }} />
+                </div>
+                <div style={{ display:"flex", gap:8 }}>
+                  <button type="button" onClick={() => setShowCustom(false)} style={{ flex:1, padding:"9px", borderRadius:RADIUS.sm, border:`1px solid ${C.border}`, background:C.surface, color:C.text, cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:12.5 }}>Cancel</button>
+                  <button type="button" onClick={handleAddCustom} disabled={busy} style={{ flex:1, padding:"9px", borderRadius:RADIUS.sm, border:"none", background:C.accentStrong, color:"#fff", cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:12.5 }}>Add</button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        <div style={{ ...fC, flex:"1 1 380px" }}>
+          <label style={lS} htmlFor="order-customer-name">Customer / Identifier Name</label>
+          <input id="order-customer-name" value={customerNameDraft} disabled={isLocked}
+            onChange={e => setCustomerNameDraft(e.target.value)}
+            onBlur={saveCustomerName}
+            placeholder="e.g. Table 4, John, Room 12"
+            style={{ ...iS, marginBottom:SPACE.md+2 }} />
+
+          <h2 style={fTi}>Items</h2>
+          {items.length === 0 ? (
+            <p style={{ color:C.textFaint, fontSize:13 }}>No items yet.</p>
+          ) : (
+            <table style={{ width:"100%", borderCollapse:"collapse", marginBottom:SPACE.md }}>
+              <thead>
+                <tr style={{ borderBottom:`1.5px solid ${C.border}` }}>
+                  <th style={{ ...tS, textAlign:"left", fontSize:11, textTransform:"uppercase", color:C.textFaint }}>Item</th>
+                  <th style={{ ...tS, textAlign:"center", fontSize:11, textTransform:"uppercase", color:C.textFaint }}>Qty</th>
+                  <th style={{ ...tS, textAlign:"right", fontSize:11, textTransform:"uppercase", color:C.textFaint }}>Unit Price</th>
+                  <th style={{ ...tS, textAlign:"right", fontSize:11, textTransform:"uppercase", color:C.textFaint }}>Line Total</th>
+                  {!isLocked && <th style={tS}></th>}
+                </tr>
+              </thead>
+              <tbody>
+                {items.map(it => (
+                  <tr key={it.id} style={{ borderBottom:`1px solid ${C.bg}` }}>
+                    <td style={tS}>
+                      {it.item_name_snapshot}
+                      {it.actual_unit_price !== it.default_unit_price && (
+                        <span style={{ marginLeft:6, fontSize:10.5, fontWeight:700, color:C.warnStrong }}>OVERRIDE</span>
+                      )}
+                    </td>
+                    <td style={{ ...tS, textAlign:"center" }}>
+                      {isLocked ? it.quantity : (
+                        <div style={{ display:"inline-flex", alignItems:"center", gap:6 }}>
+                          <button type="button" disabled={busy} onClick={() => changeQty(it, -1)} style={{ width:24, height:24, borderRadius:6, border:`1px solid ${C.border}`, background:C.surface, cursor:"pointer" }}>–</button>
+                          <span style={{ minWidth:18, textAlign:"center" }}>{it.quantity}</span>
+                          <button type="button" disabled={busy} onClick={() => changeQty(it, 1)} style={{ width:24, height:24, borderRadius:6, border:`1px solid ${C.border}`, background:C.surface, cursor:"pointer" }}>+</button>
+                        </div>
+                      )}
+                    </td>
+                    <td style={{ ...tS, textAlign:"right" }}>
+                      {isLocked ? TZS(it.actual_unit_price) : (
+                        <input type="number" min="0" defaultValue={it.actual_unit_price}
+                          onBlur={e => changePrice(it, e.target.value)}
+                          style={{ width:90, padding:"6px 8px", border:`1px solid ${C.border}`, borderRadius:6, fontSize:13, textAlign:"right", fontFamily:FONT }} />
+                      )}
+                    </td>
+                    <td style={{ ...tS, textAlign:"right", fontWeight:700 }}>{TZS(it.line_total)}</td>
+                    {!isLocked && (
+                      <td style={{ ...tS, textAlign:"right" }}>
+                        <button type="button" onClick={() => handleRemove(it)} aria-label={`Remove ${it.item_name_snapshot}`}
+                          style={{ background:"none", border:"none", color:C.warnStrong, cursor:"pointer", fontSize:15 }}>✕</button>
+                      </td>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"14px 0", borderTop:`1.5px solid ${C.border}`, marginBottom:SPACE.lg }}>
+            <span style={{ fontSize:13, fontWeight:600, color:C.textSub, textTransform:"uppercase" }}>Total</span>
+            <span style={{ fontSize:22, fontWeight:800, color:C.text }}>{TZS(order.total_amount)}</span>
+          </div>
+
+          {!isLocked && (
+            <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
+              {items.length === 0 && (
+                <button type="button" onClick={handleDiscard} disabled={busy}
+                  style={{ flex:"1 1 140px", padding:"12px", borderRadius:RADIUS.sm, border:`1px solid ${C.border}`, background:C.surface, color:C.warnStrong, cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5 }}>
+                  Discard Draft
+                </button>
+              )}
+              <button type="button" onClick={handleMarkPaid} disabled={busy}
+                style={{ flex:"2 1 200px", padding:"12px", borderRadius:RADIUS.sm, border:"none", background:C.accentStrong, color:"#fff", cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5, opacity: busy ? 0.7 : 1 }}>
+                Mark Paid
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function OrderHistoryPanel({ showToast }) {
+  const [orders, setOrders] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [loadErr, setLoadErr] = useState("")
+  const [filter, setFilter] = useState({ from:"", to:"" })
+  const [viewingOrderId, setViewingOrderId] = useState(null)
+
+  async function load() {
+    setLoading(true); setLoadErr("")
+    try {
+      setOrders(await fetchOrderHistory(filter))
+    } catch (e) {
+      setLoadErr(e.message || "Failed to load order history")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { load() }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (loading) return <p style={{ color:C.textFaint, fontSize:13 }}>Loading…</p>
+  if (loadErr) {
+    return (
+      <div style={{ padding:"40px 0", textAlign:"center" }}>
+        <p style={{ color:C.warnStrong, fontWeight:600, marginBottom:16 }}>Unable to load order history: {loadErr}</p>
+        <button type="button" onClick={load} style={{ background:C.accentStrong, color:"#fff", border:"none", borderRadius:RADIUS.sm, padding:"9px 16px", fontSize:13, fontWeight:600, cursor:"pointer" }}>Retry</button>
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      <div style={{ display:"flex", gap:10, flexWrap:"wrap", alignItems:"flex-end", marginBottom:16 }}>
+        <div>
+          <label style={lS} htmlFor="hist-from">From</label>
+          <input id="hist-from" type="date" value={filter.from} onChange={e => setFilter(f => ({ ...f, from:e.target.value }))} style={iS} />
+        </div>
+        <div>
+          <label style={lS} htmlFor="hist-to">To</label>
+          <input id="hist-to" type="date" value={filter.to} onChange={e => setFilter(f => ({ ...f, to:e.target.value }))} style={iS} />
+        </div>
+        <button type="button" onClick={load} style={{ padding:"11px 16px", borderRadius:RADIUS.sm, border:`1px solid ${C.border}`, background:C.surface, color:C.text, fontWeight:600, fontSize:13, cursor:"pointer", fontFamily:FONT }}>Apply</button>
+      </div>
+
+      {orders.length === 0 ? (
+        <p style={{ color:C.textFaint, fontSize:13.5 }}>No paid orders in this range.</p>
+      ) : (
+        <table style={{ width:"100%", borderCollapse:"collapse" }}>
+          <thead>
+            <tr style={{ borderBottom:`1.5px solid ${C.border}` }}>
+              <th style={{ ...tS, textAlign:"left", fontSize:11, textTransform:"uppercase", color:C.textFaint }}>Order</th>
+              <th style={{ ...tS, textAlign:"left", fontSize:11, textTransform:"uppercase", color:C.textFaint }}>Customer</th>
+              <th style={{ ...tS, textAlign:"left", fontSize:11, textTransform:"uppercase", color:C.textFaint }}>Paid</th>
+              <th style={{ ...tS, textAlign:"right", fontSize:11, textTransform:"uppercase", color:C.textFaint }}>Total</th>
+              <th style={tS}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {orders.map(o => (
+              <tr key={o.id} style={{ borderBottom:`1px solid ${C.bg}` }}>
+                <td style={{ ...tS, fontWeight:700 }}>{o.order_number}</td>
+                <td style={tS}>{o.customer_name}</td>
+                <td style={tS}>{formatDMY(o.paid_at)}</td>
+                <td style={{ ...tS, textAlign:"right", fontWeight:700 }}>{TZS(o.total_amount)}</td>
+                <td style={{ ...tS, textAlign:"right" }}>
+                  <button type="button" onClick={() => setViewingOrderId(o.id)}
+                    style={{ background:"none", border:`1px solid ${C.border}`, borderRadius:6, padding:"5px 10px", fontSize:12, cursor:"pointer", fontFamily:FONT, color:C.text }}>
+                    View
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      {viewingOrderId && (
+        <OrderDetailModal orderId={viewingOrderId} onClose={() => setViewingOrderId(null)} />
+      )}
+    </div>
+  )
+}
+
+function OrderDetailModal({ orderId, onClose }) {
+  const [order, setOrder] = useState(null)
+  const [items, setItems] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [err, setErr] = useState("")
+
+  useEffect(() => {
+    let cancelled = false
+    fetchOrderWithItems(orderId)
+      .then(({ order: o, items: it }) => { if (!cancelled) { setOrder(o); setItems(it) } })
+      .catch(e => { if (!cancelled) setErr(e.message || "Failed to load") })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [orderId])
+
+  return (
+    <div onClick={onClose} style={{ position:"fixed", inset:0, background:"rgba(20,20,30,0.5)", zIndex:1000, display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}>
+      <div onClick={e => e.stopPropagation()} role="dialog" aria-modal="true"
+        style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:RADIUS.lg, padding:"clamp(22px,5vw,32px)", width:"min(92vw, 480px)", maxHeight:"90vh", overflowY:"auto", boxShadow:SHADOW.modal }}>
+        {loading ? (
+          <p style={{ color:C.textFaint, fontSize:13 }}>Loading…</p>
+        ) : err ? (
+          <p style={{ color:C.warnStrong, fontSize:13 }}>{err}</p>
+        ) : (
+          <>
+            <h2 style={{ margin:"0 0 4px", fontFamily:FONT, fontWeight:700, fontSize:17, color:C.text }}>{order.order_number}</h2>
+            <p style={{ margin:"0 0 18px", color:C.textFaint, fontSize:13 }}>{order.customer_name} · Paid {formatDMY(order.paid_at)}</p>
+            <table style={{ width:"100%", borderCollapse:"collapse", marginBottom:16 }}>
+              <tbody>
+                {items.map(it => (
+                  <tr key={it.id} style={{ borderBottom:`1px solid ${C.bg}` }}>
+                    <td style={tS}>{it.item_name_snapshot} × {it.quantity}</td>
+                    <td style={{ ...tS, textAlign:"right", fontWeight:700 }}>{TZS(it.line_total)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div style={{ display:"flex", justifyContent:"space-between", fontWeight:800, fontSize:16, marginBottom:20 }}>
+              <span>Total</span><span>{TZS(order.total_amount)}</span>
+            </div>
+            <button type="button" onClick={onClose} style={{ width:"100%", padding:"12px", borderRadius:RADIUS.sm, border:`1px solid ${C.border}`, background:C.surface, color:C.text, cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5 }}>Close</button>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function MenuManagerModal({ onClose, showToast }) {
+  const [items, setItems] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [err, setErr] = useState("")
+  const [form, setForm] = useState({ name:"", category:"", price:"" })
+  const [editingId, setEditingId] = useState(null)
+  const [editForm, setEditForm] = useState({ name:"", category:"", price:"" })
+  const [busy, setBusy] = useState(false)
+
+  async function load() {
+    setLoading(true); setErr("")
+    try {
+      setItems(await fetchAllMenuItems())
+    } catch (e) {
+      setErr(e.message || "Failed to load menu")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { load() }, [])
+
+  const submitNew = async () => {
+    if (!form.name.trim() || form.price === "" || Number(form.price) < 0) {
+      showToast("Enter a name and a valid price", "error"); return
+    }
+    setBusy(true)
+    try {
+      await createMenuItem({ name: form.name, category: form.category, default_price: form.price })
+      setForm({ name:"", category:"", price:"" })
+      await load()
+      showToast("Menu item added ✓")
+    } catch (e) {
+      showToast(e.message || "Could not add menu item", "error")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const startEdit = (item) => {
+    setEditingId(item.id)
+    setEditForm({ name:item.name, category:item.category || "", price:String(item.default_price) })
+  }
+
+  const saveEdit = async () => {
+    setBusy(true)
+    try {
+      await updateMenuItem(editingId, { name: editForm.name, category: editForm.category, default_price: editForm.price })
+      setEditingId(null)
+      await load()
+    } catch (e) {
+      showToast(e.message || "Could not save changes", "error")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const toggleActive = async (item) => {
+    setBusy(true)
+    try {
+      await setMenuItemActive(item.id, !item.active)
+      await load()
+    } catch (e) {
+      showToast(e.message || "Could not update item", "error")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div onClick={onClose} style={{ position:"fixed", inset:0, background:"rgba(20,20,30,0.5)", zIndex:1000, display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}>
+      <div onClick={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="menu-manager-title"
+        style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:RADIUS.lg, padding:"clamp(22px,5vw,32px)", width:"min(92vw, 560px)", maxHeight:"90vh", overflowY:"auto", boxShadow:SHADOW.modal }}>
+        <h2 id="menu-manager-title" style={{ margin:"0 0 20px", fontFamily:FONT, fontWeight:700, fontSize:17, color:C.text }}>Manage Menu</h2>
+
+        <div style={{ display:"flex", gap:8, marginBottom:20, flexWrap:"wrap" }}>
+          <input placeholder="Item name" value={form.name} onChange={e => setForm(f => ({ ...f, name:e.target.value }))} style={{ ...iS, flex:"2 1 140px" }} />
+          <input placeholder="Category (optional)" value={form.category} onChange={e => setForm(f => ({ ...f, category:e.target.value }))} style={{ ...iS, flex:"1 1 110px" }} />
+          <input placeholder="Price" type="number" min="0" value={form.price} onChange={e => setForm(f => ({ ...f, price:e.target.value }))} style={{ ...iS, flex:"1 1 90px" }} />
+          <button type="button" onClick={submitNew} disabled={busy} style={{ padding:"11px 16px", borderRadius:RADIUS.sm, border:"none", background:C.accentStrong, color:"#fff", fontWeight:600, fontSize:13, cursor:"pointer", fontFamily:FONT }}>＋ Add</button>
+        </div>
+
+        {loading ? (
+          <p style={{ color:C.textFaint, fontSize:13 }}>Loading…</p>
+        ) : err ? (
+          <p style={{ color:C.warnStrong, fontSize:13 }}>{err}</p>
+        ) : items.length === 0 ? (
+          <p style={{ color:C.textFaint, fontSize:13 }}>No menu items yet — add one above.</p>
+        ) : (
+          <table style={{ width:"100%", borderCollapse:"collapse" }}>
+            <tbody>
+              {items.map(item => (
+                <tr key={item.id} style={{ borderBottom:`1px solid ${C.bg}`, opacity: item.active ? 1 : 0.5 }}>
+                  {editingId === item.id ? (
+                    <td colSpan={2} style={{ padding:"10px 0" }}>
+                      <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                        <input value={editForm.name} onChange={e => setEditForm(f => ({ ...f, name:e.target.value }))} style={{ ...iS, flex:"2 1 120px", padding:"8px 10px" }} />
+                        <input value={editForm.category} onChange={e => setEditForm(f => ({ ...f, category:e.target.value }))} style={{ ...iS, flex:"1 1 90px", padding:"8px 10px" }} />
+                        <input type="number" min="0" value={editForm.price} onChange={e => setEditForm(f => ({ ...f, price:e.target.value }))} style={{ ...iS, flex:"1 1 80px", padding:"8px 10px" }} />
+                        <button type="button" onClick={saveEdit} disabled={busy} style={{ padding:"8px 12px", borderRadius:6, border:"none", background:C.accentStrong, color:"#fff", fontSize:12.5, fontWeight:600, cursor:"pointer" }}>Save</button>
+                        <button type="button" onClick={() => setEditingId(null)} style={{ padding:"8px 12px", borderRadius:6, border:`1px solid ${C.border}`, background:C.surface, color:C.text, fontSize:12.5, fontWeight:600, cursor:"pointer" }}>Cancel</button>
+                      </div>
+                    </td>
+                  ) : (
+                    <>
+                      <td style={tS}>
+                        <div style={{ fontWeight:700 }}>{item.name}</div>
+                        <div style={{ fontSize:11.5, color:C.textFaint }}>{item.category || "Uncategorized"} · {TZS(item.default_price)}{!item.active && " · inactive"}</div>
+                      </td>
+                      <td style={{ ...tS, textAlign:"right", whiteSpace:"nowrap" }}>
+                        <button type="button" onClick={() => startEdit(item)} style={{ background:"none", border:`1px solid ${C.border}`, borderRadius:6, padding:"5px 10px", fontSize:12, cursor:"pointer", fontFamily:FONT, color:C.text, marginRight:6 }}>Edit</button>
+                        <button type="button" onClick={() => toggleActive(item)} disabled={busy} style={{ background:"none", border:`1px solid ${C.border}`, borderRadius:6, padding:"5px 10px", fontSize:12, cursor:"pointer", fontFamily:FONT, color: item.active ? C.warnStrong : C.accentStrong }}>
+                          {item.active ? "Deactivate" : "Activate"}
+                        </button>
+                      </td>
+                    </>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+
+        <button type="button" onClick={onClose} style={{ width:"100%", marginTop:20, padding:"12px", borderRadius:RADIUS.sm, border:`1px solid ${C.border}`, background:C.surface, color:C.text, cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5 }}>Close</button>
+      </div>
     </div>
   )
 }
