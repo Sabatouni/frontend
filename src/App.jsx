@@ -34,6 +34,13 @@ import {
   updateOrderItemPrice, removeOrderItem,
 } from "./lib/takeOrders"
 import {
+  generateReportTitle, formatOrdinalDate, buildSalesSnapshot, buildExpenseSnapshot,
+  sumAmounts, computeNetProfit, computeClosingCash,
+  fetchReportHistory, fetchReportById, createReport, updateReport, deleteReport,
+  draftReportFromPeriod,
+} from "./lib/weeklyReports"
+import { getWeeklyReportPdfBlobUrl } from "./lib/weeklyReportPdf"
+import {
   GUEST_TYPES as ITIN_GUEST_TYPES,
   emptyItineraryContent,
   nightsBetween as itinNightsBetween,
@@ -308,7 +315,7 @@ export default function App() {
             <DebtCreditPage user={user} isOwner={isOwner} displayName={displayName} showToast={showToast} />
           )}
           {page === "reports" && isOwner && (
-            <ReportsPage sales={sales} expenses={expenses} services={services} showToast={showToast} />
+            <ReportsPage sales={sales} expenses={expenses} services={services} user={user} isOwner={isOwner} displayName={displayName} showToast={showToast} />
           )}
           {page === "users" && isOwner && <UsersPage showToast={showToast} />}
         </div>
@@ -3298,7 +3305,43 @@ function buildTaxReportWorkbook({ rows, totalSales, totalExpenses, fromDisplay, 
 }
 
 /* ── REPORTS PAGE ────────────────────────────────────────── */
-function ReportsPage({ sales, expenses, services, showToast }) {
+/* Upgraded this session to hold two areas side by side, per the Weekly
+   Manager's Report brief: the pre-existing analytics dashboard (charts,
+   CSV/Excel/ZRA exports -- untouched, just renamed and moved into its own
+   panel below) stays exactly as it was, and a brand-new "Weekly Manager's
+   Report" builder is added alongside it via a simple tab switch. Neither
+   area's code reaches into the other's state. */
+function ReportsPage({ sales, expenses, services, user, isOwner, displayName, showToast }) {
+  const [reportsTab, setReportsTab] = useState("analytics") // "analytics" | "weekly"
+
+  const tabBtnS = (active) => ({
+    padding: "10px 18px",
+    borderRadius: RADIUS.sm,
+    border: `1.5px solid ${active ? C.accentStrong : C.border}`,
+    background: active ? C.accentStrong : C.surface,
+    color: active ? "#fff" : C.textSub,
+    fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: FONT,
+  })
+
+  return (
+    <div>
+      <div style={{ display:"flex", gap:8, marginBottom:SPACE.xl, flexWrap:"wrap" }}>
+        {/* Hardcoded labels, not t() keys -- same precedent as the Take
+            Orders nav label: a brand-new module's UI strings are written
+            directly rather than risking an orphaned/missing i18n key. */}
+        <button type="button" onClick={() => setReportsTab("analytics")} style={tabBtnS(reportsTab === "analytics")}>📊 Analytics</button>
+        <button type="button" onClick={() => setReportsTab("weekly")} style={tabBtnS(reportsTab === "weekly")}>📋 Weekly Manager's Report</button>
+      </div>
+      {reportsTab === "analytics" ? (
+        <ReportsAnalyticsPanel sales={sales} expenses={expenses} services={services} showToast={showToast} />
+      ) : (
+        <WeeklyReportsPanel sales={sales} expenses={expenses} user={user} isOwner={isOwner} displayName={displayName} showToast={showToast} />
+      )}
+    </div>
+  )
+}
+
+function ReportsAnalyticsPanel({ sales, expenses, services, showToast }) {
   const { t } = useLanguage()
   const [range, setRange]     = useState({ from:"", to:"" })
   const [service, setService] = useState("All")
@@ -8127,6 +8170,768 @@ function MenuManagerModal({ onClose, showToast }) {
 
         <button type="button" onClick={onClose} style={{ width:"100%", marginTop:20, padding:"12px", borderRadius:RADIUS.sm, border:`1px solid ${C.border}`, background:C.surface, color:C.text, cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5 }}>Close</button>
       </div>
+    </div>
+  )
+}
+/* ── WEEKLY MANAGER'S REPORT ─────────────────────────────────────────────
+   Additive module living inside the existing Reports page (see the
+   ReportsPage/ReportsAnalyticsPanel split above). Fully isolated from the
+   analytics panel and from every other module -- it only ever reads
+   `sales`/`expenses` (already-fetched, in-memory, from the app's top-level
+   fetchAll()) to build a one-time snapshot when a report is created or
+   explicitly re-populated; after that a report is just a row in
+   weekly_reports like any other saved document. Owner/admin only, same
+   three-layer gate as Debt & Credit: Sidebar nav (unchanged -- "Reports"
+   already owner-only), the route gate at `page === "reports" && isOwner`
+   (unchanged), and RLS (`weekly_reports_admin_all`, workers get zero
+   access, not even SELECT). */
+
+const WR_AMBER = { bg: "#FBF3D9", border: "#E7D48A", text: "#7A5E10" }
+
+function wrStatusColor(status) {
+  if (status === "APPROVED") return { bg: C.accentStrong, text: "#fff", border: C.accentStrong }
+  if (status === "COMPLETED") return { bg: C.accentSoft, text: C.accentStrong, border: C.accent }
+  return { bg: C.bg, text: C.textSub, border: C.border } // DRAFT
+}
+
+function WrStatusPill({ status }) {
+  const c = wrStatusColor(status)
+  return (
+    <span style={{ display:"inline-block", padding:"3px 10px", borderRadius:RADIUS.pill, fontSize:11, fontWeight:700, letterSpacing:.3, background:c.bg, color:c.text, border:`1px solid ${c.border}` }}>
+      {status}
+    </span>
+  )
+}
+
+/* Keeps only rows that have some content -- drops rows a user added via
+   "+ Add row" and then never filled in, so an empty report doesn't save a
+   pile of blank lines. `textKeys` are the row's non-numeric fields; a row
+   with a non-zero amount but no text is still kept (a real figure with a
+   forgotten label shouldn't silently vanish on save). */
+function wrCleanMoneyRows(rows, textKeys) {
+  return (rows || [])
+    .map(r => ({ ...r, amount: Number(r.amount) || 0 }))
+    .filter(r => r.amount !== 0 || textKeys.some(k => (r[k] || "").toString().trim()))
+}
+function wrCleanTextRows(rows, requiredKey) {
+  return (rows || []).filter(r => (r[requiredKey] || "").toString().trim())
+}
+
+/* Generic editable-rows table used for every repeatable section (Sales
+   Breakdown, Expense Breakdown, Capital Added, Other Cash Movements,
+   Operations Update, Compliance items, Action Plan). Column type "select"
+   renders as a text input backed by a <datalist> -- gives a dropdown of
+   suggestions while still allowing free-form entry, per the brief's
+   "preferably a dropdown ... but allow free text entry" for status fields,
+   without needing a second per-row UI mode. */
+function WrRowsEditor({ rows, onChange, columns, addLabel, emptyRow, disabled, idPrefix }) {
+  const set = (idx, key, val) => onChange(rows.map((r, i) => (i === idx ? { ...r, [key]: val } : r)))
+  const addRow = () => onChange([...(rows || []), { ...emptyRow }])
+  const removeRow = (idx) => onChange(rows.filter((_, i) => i !== idx))
+
+  const cellS = { padding:"7px 6px", border:`1px solid ${C.border}`, borderRadius:6, fontSize:12.5, fontFamily:FONT, background: disabled ? C.bg : C.surface, color:C.text, width:"100%" }
+
+  return (
+    <div>
+      <div style={{ overflowX:"auto", WebkitOverflowScrolling:"touch" }}>
+        <table className="stv-table" style={{ width:"100%", minWidth: columns.length > 3 ? 620 : 420, borderCollapse:"collapse" }}>
+          <thead>
+            <tr style={{ borderBottom:`1.5px solid ${C.border}` }}>
+              {columns.map(c => (
+                <th key={c.key} scope="col" style={{ textAlign: c.type === "number" ? "right" : "left", padding:"0 8px 8px 0", fontSize:10.5, color:C.textFaint, fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{c.label}</th>
+              ))}
+              {!disabled && <th style={{ width:32 }}></th>}
+            </tr>
+          </thead>
+          <tbody>
+            {(!rows || rows.length === 0) && (
+              <tr><td colSpan={columns.length + 1} style={{ padding:"14px 0", textAlign:"center", color:C.textFaint, fontSize:12.5 }}>No rows yet.</td></tr>
+            )}
+            {(rows || []).map((r, i) => (
+              <tr key={i} style={{ borderBottom:`1px solid ${C.bg}` }}>
+                {columns.map(c => {
+                  const listId = `${idPrefix}-${c.key}-opts`
+                  return (
+                    <td key={c.key} style={{ padding:"6px 8px 6px 0", verticalAlign:"top" }}>
+                      {c.type === "select" ? (
+                        <>
+                          <input
+                            list={listId}
+                            disabled={disabled}
+                            value={r[c.key] ?? ""}
+                            onChange={e => set(i, c.key, e.target.value)}
+                            style={cellS}
+                            placeholder={c.placeholder || ""}
+                          />
+                          <datalist id={listId}>
+                            {c.options.map(o => <option key={o} value={o} />)}
+                          </datalist>
+                        </>
+                      ) : (
+                        <input
+                          type={c.type === "number" ? "number" : c.type === "date" ? "date" : "text"}
+                          disabled={disabled}
+                          value={r[c.key] ?? ""}
+                          onChange={e => set(i, c.key, e.target.value)}
+                          style={{ ...cellS, textAlign: c.type === "number" ? "right" : "left" }}
+                          placeholder={c.placeholder || ""}
+                        />
+                      )}
+                    </td>
+                  )
+                })}
+                {!disabled && (
+                  <td style={{ padding:"6px 0" }}>
+                    <button type="button" onClick={() => removeRow(i)} aria-label="Remove row" style={{ background:"none", border:"none", cursor:"pointer", fontSize:15, color:C.warnStrong, padding:4 }}>✕</button>
+                  </td>
+                )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {!disabled && (
+        <button
+          type="button"
+          onClick={addRow}
+          className="stv-btn stv-btn-secondary"
+          style={{ marginTop:10, padding:"8px 14px", borderRadius:RADIUS.sm, border:`1.5px solid ${C.border}`, background:C.surface, color:C.text, cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:12.5 }}
+        >
+          {addLabel}
+        </button>
+      )}
+    </div>
+  )
+}
+
+const WR_OPERATIONS_STATUSES = ["Completed", "Pending", "In Progress", "Issue"]
+const WR_COMPLIANCE_STATUSES = ["Compliant", "Pending", "Overdue", "N/A"]
+const WR_ACTION_STATUSES = ["Pending", "In Progress", "Completed", "Delayed"]
+
+/* ── Weekly Reports: list/history + entry point for the editor ────────── */
+function WeeklyReportsPanel({ sales, expenses, user, isOwner, displayName, showToast }) {
+  const [view, setView] = useState("history") // "history" | "editor"
+  const [reports, setReports] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [loadErr, setLoadErr] = useState("")
+  const [search, setSearch] = useState("")
+  const [statusFilter, setStatusFilter] = useState("All")
+  const [rowBusyId, setRowBusyId] = useState(null)
+  const [preview, setPreview] = useState(null) // { title, url }
+  const [showNewForm, setShowNewForm] = useState(false)
+  const [newFrom, setNewFrom] = useState("")
+  const [newTo, setNewTo] = useState("")
+  const [activeReport, setActiveReport] = useState(null)
+  const [activeReadOnly, setActiveReadOnly] = useState(false)
+
+  async function load() {
+    setLoading(true)
+    try {
+      const rows = await fetchReportHistory({})
+      setReports(rows)
+      setLoadErr("")
+    } catch (e) {
+      setLoadErr(e.message || "Could not load saved reports.")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { load() }, [])
+
+  const filtered = reports
+    .filter(r => statusFilter === "All" || r.status === statusFilter)
+    .filter(r => {
+      const q = search.trim().toLowerCase()
+      if (!q) return true
+      return (r.title || "").toLowerCase().includes(q) || (r.prepared_by || "").toLowerCase().includes(q)
+    })
+
+  function startNewReport() {
+    setNewFrom(""); setNewTo("")
+    setShowNewForm(true)
+  }
+
+  function createDraftAndEdit() {
+    if (!newFrom || !newTo) { showToast("Choose both a From and To date.", "error"); return }
+    if (newFrom > newTo) { showToast("The From date must be before the To date.", "error"); return }
+    const draft = draftReportFromPeriod({ from: newFrom, to: newTo, sales, expenses, preparedBy: displayName || "" })
+    setActiveReport(draft)
+    setActiveReadOnly(false)
+    setShowNewForm(false)
+    setView("editor")
+  }
+
+  async function openReport(row, { readOnly }) {
+    if (row.status === "APPROVED" && !readOnly) {
+      if (!confirm("This report is marked Approved. Are you sure you want to edit it?")) return
+    }
+    setRowBusyId(row.id)
+    try {
+      const full = await fetchReportById(row.id)
+      setActiveReport(full)
+      setActiveReadOnly(!!readOnly)
+      setView("editor")
+    } catch (e) {
+      showToast(e.message || "Could not load this report.", "error")
+    } finally {
+      setRowBusyId(null)
+    }
+  }
+
+  async function handleGeneratePdf(row) {
+    setRowBusyId(row.id)
+    try {
+      const full = await fetchReportById(row.id)
+      const { url } = await getWeeklyReportPdfBlobUrl(full)
+      setPreview({ title: full.title, url })
+    } catch (e) {
+      showToast(e.message || "Could not generate the PDF.", "error")
+    } finally {
+      setRowBusyId(null)
+    }
+  }
+
+  async function handleDelete(row) {
+    if (!confirm(`Delete "${row.title}"? This cannot be undone.`)) return
+    setRowBusyId(row.id)
+    try {
+      await deleteReport(row.id)
+      setReports(prev => prev.filter(r => r.id !== row.id))
+      showToast("Report deleted.")
+    } catch (e) {
+      showToast(e.message || "Could not delete this report.", "error")
+    } finally {
+      setRowBusyId(null)
+    }
+  }
+
+  if (view === "editor" && activeReport) {
+    return (
+      <WeeklyReportEditor
+        initialReport={activeReport}
+        readOnly={activeReadOnly}
+        sales={sales}
+        expenses={expenses}
+        user={user}
+        displayName={displayName}
+        showToast={showToast}
+        onBack={() => { setView("history"); setActiveReport(null); load() }}
+        onSaved={() => load()}
+      />
+    )
+  }
+
+  return (
+    <div>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:SPACE.lg, flexWrap:"wrap", gap:12 }}>
+        <div>
+          <h2 style={{ ...fTi, marginBottom:4 }}>Saved Reports</h2>
+          <p style={{ margin:0, color:C.textFaint, fontSize:13 }}>Weekly Manager's Reports, newest reporting period first.</p>
+        </div>
+        <button type="button" onClick={startNewReport} className="stv-btn stv-btn-primary" style={{ ...sB, width:"auto", padding:"10px 18px", fontSize:13 }}>
+          + New Weekly Report
+        </button>
+      </div>
+
+      {showNewForm && (
+        <div style={{ ...panelS, marginBottom:SPACE.lg }}>
+          <h3 style={{ ...fTi, marginBottom:14, fontSize:14 }}>New Weekly Report — choose the reporting period</h3>
+          <div style={{ display:"flex", gap:12, flexWrap:"wrap", alignItems:"flex-end" }}>
+            <div>
+              <label style={lS} htmlFor="wr-new-from">From</label>
+              <input id="wr-new-from" type="date" value={newFrom} onChange={e => setNewFrom(e.target.value)} style={iS} />
+            </div>
+            <div>
+              <label style={lS} htmlFor="wr-new-to">To</label>
+              <input id="wr-new-to" type="date" value={newTo} onChange={e => setNewTo(e.target.value)} style={iS} />
+            </div>
+            <button type="button" onClick={createDraftAndEdit} className="stv-btn stv-btn-primary" style={{ ...sB, width:"auto", padding:"11px 20px" }}>Create Draft</button>
+            <button type="button" onClick={() => setShowNewForm(false)} style={{ background:"none", border:`1px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"11px 16px", cursor:"pointer", fontFamily:FONT, color:C.textSub, fontWeight:600, fontSize:13 }}>Cancel</button>
+          </div>
+          <p style={{ margin:"12px 0 0", fontSize:12, color:C.textFaint }}>
+            Sales and expenses for this period are pulled in automatically from the POS. You'll be able to review and edit everything before saving.
+          </p>
+        </div>
+      )}
+
+      <div style={{ display:"flex", gap:12, marginBottom:16, flexWrap:"wrap", alignItems:"center" }}>
+        <input placeholder="Search by title or prepared by…" value={search} onChange={e => setSearch(e.target.value)} style={{ ...iS, maxWidth:320 }} aria-label="Search saved reports" />
+        <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)} style={seS}>
+          <option value="All">All statuses</option>
+          <option value="DRAFT">Draft</option>
+          <option value="COMPLETED">Completed</option>
+          <option value="APPROVED">Approved</option>
+        </select>
+      </div>
+
+      {loading ? (
+        <p style={{ color:C.textFaint, fontSize:13 }}>Loading…</p>
+      ) : loadErr ? (
+        <div style={{ padding:"30px 0", textAlign:"center" }}>
+          <p style={{ color:C.warnStrong, fontWeight:600, marginBottom:14 }}>Could not load saved reports: {loadErr}</p>
+          <button type="button" onClick={load} style={{ background:C.accentStrong, color:"#fff", border:"none", borderRadius:RADIUS.sm, padding:"9px 16px", fontSize:13, fontWeight:600, cursor:"pointer" }}>Retry</button>
+        </div>
+      ) : filtered.length === 0 ? (
+        <div style={{ ...panelS, textAlign:"center", color:C.textFaint, fontSize:13, padding:"40px 20px" }}>
+          {reports.length === 0 ? "No weekly reports saved yet — create your first one above." : "No reports match your search/filter."}
+        </div>
+      ) : (
+        <div style={{ display:"grid", gap:12 }}>
+          {filtered.map(row => (
+            <div key={row.id} style={{ ...panelS, padding:"16px 20px", display:"flex", alignItems:"center", justifyContent:"space-between", gap:16, flexWrap:"wrap" }}>
+              <div style={{ minWidth:220 }}>
+                <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:4, flexWrap:"wrap" }}>
+                  <span style={{ fontWeight:700, fontSize:14, color:C.text }}>{row.title}</span>
+                  <WrStatusPill status={row.status} />
+                </div>
+                <div style={{ fontSize:12, color:C.textFaint }}>
+                  {formatOrdinalDate(row.report_from)} – {formatOrdinalDate(row.report_to)} · Prepared by {row.prepared_by || "—"} · Net Profit {TZS(row.net_profit)}
+                </div>
+              </div>
+              <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+                <button type="button" disabled={rowBusyId === row.id} onClick={() => openReport(row, { readOnly: true })} style={wrGhostBtnS}>View</button>
+                <button type="button" disabled={rowBusyId === row.id} onClick={() => openReport(row, { readOnly: false })} style={wrGhostBtnS}>Edit</button>
+                <button type="button" disabled={rowBusyId === row.id} onClick={() => handleGeneratePdf(row)} style={wrGhostBtnS}>{rowBusyId === row.id ? "…" : "Generate PDF"}</button>
+                <button type="button" disabled={rowBusyId === row.id} onClick={() => handleDelete(row)} style={{ ...wrGhostBtnS, color:C.warnStrong, borderColor:C.warnSoft }}>Delete</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {preview && <DebtCreditPdfModal title={preview.title} url={preview.url} onClose={() => setPreview(null)} />}
+    </div>
+  )
+}
+
+const wrGhostBtnS = { background:C.surface, border:`1.5px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"7px 13px", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:FONT, color:C.text }
+
+/* ── Weekly Report editor: the big multi-section form ──────────────────── */
+function WeeklyReportEditor({ initialReport, readOnly, sales, expenses, user, displayName, showToast, onBack, onSaved }) {
+  const [report, setReport] = useState(initialReport)
+  const [titleTouched, setTitleTouched] = useState(!!initialReport.id)
+  const [saving, setSaving] = useState(false)
+  const [pdfBusy, setPdfBusy] = useState(false)
+  const [preview, setPreview] = useState(null)
+  const [locked, setLocked] = useState(!!readOnly)
+
+  const update = (patch) => setReport(r => ({ ...r, ...patch }))
+  const updateArray = (key, rows) => update({ [key]: rows })
+
+  function handleDateChange(field, value) {
+    const next = { ...report, [field]: value }
+    if (!titleTouched) next.title = generateReportTitle(next.report_from, next.report_to)
+    setReport(next)
+  }
+
+  function handleTitleChange(value) {
+    setTitleTouched(true)
+    update({ title: value })
+  }
+
+  function refetchFromPos() {
+    if (!report.report_from || !report.report_to) { showToast("Choose both a From and To date first.", "error"); return }
+    if (!confirm("This replaces the current Sales Breakdown and Expense Breakdown with fresh data from the POS for the selected period, and recalculates Gross Sales / Operating Expenses. Continue?")) return
+    const salesBreakdown = buildSalesSnapshot(sales, report.report_from, report.report_to)
+    const expenseBreakdown = buildExpenseSnapshot(expenses, report.report_from, report.report_to)
+    const gross = sumAmounts(salesBreakdown)
+    const opex = sumAmounts(expenseBreakdown)
+    update({
+      sales_breakdown: salesBreakdown, expense_breakdown: expenseBreakdown,
+      gross_sales_source: gross, gross_sales: gross,
+      operating_expenses_source: opex, operating_expenses: opex,
+    })
+    showToast("Sales and expense figures refreshed from the POS for this period.")
+  }
+
+  const grossSales = Number(report.gross_sales) || 0
+  const operatingExpenses = Number(report.operating_expenses) || 0
+  const netProfit = computeNetProfit(grossSales, operatingExpenses)
+  const openingCashBalance = Number(report.opening_cash_balance) || 0
+  const closingCash = computeClosingCash({
+    openingCashBalance, capitalMovements: report.capital_movements, grossSales, operatingExpenses,
+    otherCashMovements: report.other_cash_movements,
+  })
+
+  function buildPayload(targetStatus) {
+    const capitalMovements = wrCleanMoneyRows(report.capital_movements, ["date", "description"])
+    const otherCashMovements = wrCleanMoneyRows(report.other_cash_movements, ["date", "description"])
+    const gross = Math.round(grossSales)
+    const opex = Math.round(operatingExpenses)
+    const opening = Math.round(openingCashBalance)
+    return {
+      report_from: report.report_from,
+      report_to: report.report_to,
+      title: (report.title || "").trim() || generateReportTitle(report.report_from, report.report_to),
+      prepared_by: (report.prepared_by || "").trim(),
+      date_submitted: report.date_submitted || todayStr(),
+      status: targetStatus,
+      gross_sales_source: report.gross_sales_source ?? gross,
+      gross_sales: gross,
+      operating_expenses_source: report.operating_expenses_source ?? opex,
+      operating_expenses: opex,
+      net_profit: computeNetProfit(gross, opex),
+      opening_cash_balance: opening,
+      closing_cash_position: computeClosingCash({ openingCashBalance: opening, capitalMovements, grossSales: gross, operatingExpenses: opex, otherCashMovements }),
+      memo_text: report.memo_text || "",
+      executive_summary: report.executive_summary || "",
+      marketing_social_media: report.marketing_social_media || "",
+      compliance: report.compliance || "",
+      challenges: report.challenges || "",
+      manager_comments: report.manager_comments || "",
+      sales_breakdown: wrCleanMoneyRows(report.sales_breakdown, ["date", "item"]),
+      expense_breakdown: wrCleanMoneyRows(report.expense_breakdown, ["date", "note"]),
+      capital_movements: capitalMovements,
+      other_cash_movements: otherCashMovements,
+      operations_update: wrCleanTextRows(report.operations_update, "text"),
+      compliance_items: wrCleanTextRows(report.compliance_items, "description"),
+      action_plan: wrCleanTextRows(report.action_plan, "activity"),
+      manager_approved_by: (report.manager_approved_by || "").trim(),
+      managing_director_approved_by: (report.managing_director_approved_by || "").trim(),
+    }
+  }
+
+  async function handleSave(targetStatus) {
+    if (!report.report_from || !report.report_to) { showToast("Please select both a From and To date.", "error"); return }
+    if (report.report_from > report.report_to) { showToast("The From date must be before the To date.", "error"); return }
+
+    if (targetStatus === "COMPLETED") {
+      const blanks = []
+      if (!(report.executive_summary || "").trim()) blanks.push("Executive Summary")
+      if (!(report.operations_update || []).length) blanks.push("Operations Update")
+      if (!(report.marketing_social_media || "").trim()) blanks.push("Marketing & Social Media")
+      if (!(report.challenges || "").trim()) blanks.push("Challenges")
+      if (blanks.length && !confirm(`These sections are still empty: ${blanks.join(", ")}.\n\nMark this report Completed anyway?`)) return
+    }
+    if (targetStatus === "APPROVED" && report.status !== "APPROVED") {
+      if (!confirm("Mark this report as Approved? It can still be edited later, with a confirmation.")) return
+    }
+
+    setSaving(true)
+    try {
+      const payload = buildPayload(targetStatus || report.status || "DRAFT")
+      let saved
+      if (report.id) {
+        saved = await updateReport(report.id, payload)
+      } else {
+        saved = await createReport({ ...payload, created_by: user?.id || null, created_by_name: displayName || "" })
+      }
+      setReport(r => ({ ...r, ...saved }))
+      showToast(`Report saved${saved.status !== report.status ? ` as ${saved.status}` : ""}.`)
+      onSaved && onSaved(saved)
+    } catch (e) {
+      showToast(e.message || "Could not save the report.", "error")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function handleGeneratePdf() {
+    setPdfBusy(true)
+    try {
+      const pdfReport = buildPayload(report.status || "DRAFT")
+      const { url } = await getWeeklyReportPdfBlobUrl({ ...report, ...pdfReport })
+      setPreview({ title: pdfReport.title, url })
+    } catch (e) {
+      showToast(e.message || "Could not generate the PDF.", "error")
+    } finally {
+      setPdfBusy(false)
+    }
+  }
+
+  const disabled = locked
+
+  // Same "Approved reports still editable, but only after a confirmation"
+  // rule the history panel's own Edit button enforces -- repeated here so
+  // switching modes from inside an already-open View doesn't bypass it.
+  function switchToEdit() {
+    if (report.status === "APPROVED" && !confirm("This report is marked Approved. Are you sure you want to edit it?")) return
+    setLocked(false)
+  }
+
+  return (
+    <div>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:SPACE.lg, flexWrap:"wrap", gap:12 }}>
+        <button type="button" onClick={onBack} style={{ background:"none", border:"none", color:C.textSub, fontSize:12.5, fontWeight:600, cursor:"pointer", padding:0, fontFamily:FONT }}>
+          ← Back to Saved Reports
+        </button>
+        <div style={{ display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" }}>
+          {disabled ? (
+            <button type="button" onClick={switchToEdit} className="stv-btn stv-btn-secondary" style={{ ...wrGhostBtnS }}>Switch to Edit</button>
+          ) : (
+            <>
+              <button type="button" disabled={saving} onClick={() => handleSave("DRAFT")} style={wrGhostBtnS}>{saving ? "Saving…" : "Save Draft"}</button>
+              <button type="button" disabled={saving} onClick={() => handleSave("COMPLETED")} style={wrGhostBtnS}>Mark Completed</button>
+              <button type="button" disabled={saving} onClick={() => handleSave("APPROVED")} className="stv-btn stv-btn-primary" style={{ background:C.accentStrong, color:"#fff", border:"none", borderRadius:RADIUS.sm, padding:"9px 15px", fontSize:12.5, fontWeight:600, cursor:"pointer", fontFamily:FONT }}>Mark Approved</button>
+            </>
+          )}
+          <button type="button" disabled={pdfBusy} onClick={handleGeneratePdf} className="stv-btn stv-btn-secondary" style={wrGhostBtnS}>{pdfBusy ? "Generating…" : "Generate PDF"}</button>
+        </div>
+      </div>
+
+      {disabled && (
+        <div style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"10px 14px", fontSize:12.5, color:C.textSub, marginBottom:SPACE.lg }}>
+          Viewing in read-only mode. Click "Switch to Edit" to make changes.
+        </div>
+      )}
+
+      {/* Header */}
+      <div style={{ ...panelS, marginBottom:16 }}>
+        <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:16, flexWrap:"wrap" }}>
+          <h2 style={{ ...fTi, marginBottom:0 }}>Report Header</h2>
+          <WrStatusPill status={report.status || "DRAFT"} />
+        </div>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(180px, 1fr))", gap:16, marginBottom:16 }}>
+          <div>
+            <label style={lS} htmlFor="wr-from">Reporting Period — From</label>
+            <input id="wr-from" type="date" disabled={disabled} value={report.report_from || ""} onChange={e => handleDateChange("report_from", e.target.value)} style={iS} />
+          </div>
+          <div>
+            <label style={lS} htmlFor="wr-to">Reporting Period — To</label>
+            <input id="wr-to" type="date" disabled={disabled} value={report.report_to || ""} onChange={e => handleDateChange("report_to", e.target.value)} style={iS} />
+          </div>
+          <div>
+            <label style={lS} htmlFor="wr-prepared">Prepared By</label>
+            <input id="wr-prepared" disabled={disabled} value={report.prepared_by || ""} onChange={e => update({ prepared_by: e.target.value })} style={iS} />
+          </div>
+          <div>
+            <label style={lS} htmlFor="wr-submitted">Date Submitted</label>
+            <input id="wr-submitted" type="date" disabled={disabled} value={report.date_submitted || ""} onChange={e => update({ date_submitted: e.target.value })} style={iS} />
+          </div>
+        </div>
+        <div>
+          <label style={lS} htmlFor="wr-title">Report Title (auto-generated from the dates above — editable)</label>
+          <input id="wr-title" disabled={disabled} value={report.title || ""} onChange={e => handleTitleChange(e.target.value)} style={iS} />
+        </div>
+        {!disabled && (
+          <button type="button" onClick={refetchFromPos} className="stv-btn stv-btn-secondary" style={{ ...wrGhostBtnS, marginTop:14 }}>
+            ↻ Re-fetch Sales &amp; Expenses from POS for this period
+          </button>
+        )}
+      </div>
+
+      {/* Financial Performance */}
+      <div style={{ ...panelS, marginBottom:16 }}>
+        <h2 style={fTi}>Financial Performance</h2>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(200px, 1fr))", gap:16 }}>
+          <div style={{ background:C.accentSoft, border:`1px solid ${C.accent}`, borderRadius:RADIUS.sm, padding:14 }}>
+            <label style={{ ...lS, color:C.accentStrong }} htmlFor="wr-gross">Gross Sales (TZS)</label>
+            <input id="wr-gross" type="number" disabled={disabled} value={report.gross_sales ?? 0} onChange={e => update({ gross_sales: e.target.value })} style={{ ...iS, background:"#fff" }} />
+            {report.gross_sales_source != null && Number(report.gross_sales_source) !== Number(report.gross_sales) && (
+              <div style={{ fontSize:11, color:C.textFaint, marginTop:4 }}>Auto-calculated from POS: {TZS(report.gross_sales_source)}</div>
+            )}
+          </div>
+          <div style={{ background:C.warnSoft, border:`1px solid ${C.warn}`, borderRadius:RADIUS.sm, padding:14 }}>
+            <label style={{ ...lS, color:C.warnStrong }} htmlFor="wr-opex">Operating Expenses (TZS)</label>
+            <input id="wr-opex" type="number" disabled={disabled} value={report.operating_expenses ?? 0} onChange={e => update({ operating_expenses: e.target.value })} style={{ ...iS, background:"#fff" }} />
+            {report.operating_expenses_source != null && Number(report.operating_expenses_source) !== Number(report.operating_expenses) && (
+              <div style={{ fontSize:11, color:C.textFaint, marginTop:4 }}>Auto-calculated from POS: {TZS(report.operating_expenses_source)}</div>
+            )}
+          </div>
+          <div style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:RADIUS.sm, padding:14 }}>
+            <div style={lS}>Net Profit (auto-calculated)</div>
+            <div style={{ fontSize:19, fontWeight:800, color: netProfit >= 0 ? C.accentStrong : C.warnStrong }}>{TZS(netProfit)}</div>
+            <div style={{ fontSize:11, color:C.textFaint, marginTop:4 }}>= Gross Sales − Operating Expenses</div>
+          </div>
+        </div>
+      </div>
+
+      {/* Sales breakdown */}
+      <div style={{ ...panelS, marginBottom:16, background:C.accentSoft }}>
+        <h2 style={fTi}>Sales Breakdown</h2>
+        <WrRowsEditor
+          idPrefix="wr-sales"
+          rows={report.sales_breakdown || []}
+          onChange={rows => updateArray("sales_breakdown", rows)}
+          disabled={disabled}
+          addLabel="+ Add Sale Row"
+          emptyRow={{ date: report.report_to || todayStr(), item: "", amount: "" }}
+          columns={[
+            { key:"date", label:"Date", type:"date" },
+            { key:"item", label:"Item / Service", type:"text", placeholder:"e.g. Restaurant" },
+            { key:"amount", label:"Amount (TZS)", type:"number" },
+          ]}
+        />
+      </div>
+
+      {/* Expense breakdown */}
+      <div style={{ ...panelS, marginBottom:16, background:C.warnSoft }}>
+        <h2 style={fTi}>Expense Breakdown</h2>
+        <WrRowsEditor
+          idPrefix="wr-exp"
+          rows={report.expense_breakdown || []}
+          onChange={rows => updateArray("expense_breakdown", rows)}
+          disabled={disabled}
+          addLabel="+ Add Expense Row"
+          emptyRow={{ date: report.report_to || todayStr(), note: "", amount: "" }}
+          columns={[
+            { key:"date", label:"Date", type:"date" },
+            { key:"note", label:"Note / Reason", type:"text", placeholder:"e.g. Alphard fuel" },
+            { key:"amount", label:"Amount (TZS)", type:"number" },
+          ]}
+        />
+      </div>
+
+      {/* Memo / Cash Movements -- subtle yellow background per the brief */}
+      <div style={{ ...panelS, marginBottom:16, background:WR_AMBER.bg, border:`1px solid ${WR_AMBER.border}` }}>
+        <h2 style={{ ...fTi, color:WR_AMBER.text }}>Memo / Cash Movements</h2>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(220px, 1fr))", gap:16, marginBottom:18 }}>
+          <div>
+            <label style={lS} htmlFor="wr-opening">Opening Cash Balance (TZS)</label>
+            <input id="wr-opening" type="number" disabled={disabled} value={report.opening_cash_balance ?? 0} onChange={e => update({ opening_cash_balance: e.target.value })} style={{ ...iS, background:"#fff" }} />
+          </div>
+          <div style={{ background:"#fff", border:`1px solid ${WR_AMBER.border}`, borderRadius:RADIUS.sm, padding:14 }}>
+            <div style={lS}>Calculated Closing Cash Position</div>
+            <div style={{ fontSize:19, fontWeight:800, color:C.text }}>{TZS(closingCash)}</div>
+            <div style={{ fontSize:11, color:C.textFaint, marginTop:4 }}>Opening + Capital Added + Sales − Expenses ± Other Movements</div>
+          </div>
+        </div>
+
+        <h3 style={{ ...fTi, fontSize:13, marginBottom:10 }}>Cash / Capital Added</h3>
+        <p style={{ margin:"0 0 10px", fontSize:11.5, color:C.textFaint }}>Owner/boss capital injections — never counted as revenue, kept separate from Gross Sales.</p>
+        <WrRowsEditor
+          idPrefix="wr-capital"
+          rows={report.capital_movements || []}
+          onChange={rows => updateArray("capital_movements", rows)}
+          disabled={disabled}
+          addLabel="+ Add Capital Row"
+          emptyRow={{ date: todayStr(), description: "", amount: "" }}
+          columns={[
+            { key:"date", label:"Date", type:"date" },
+            { key:"description", label:"Description", type:"text" },
+            { key:"amount", label:"Amount (TZS)", type:"number" },
+          ]}
+        />
+
+        <h3 style={{ ...fTi, fontSize:13, margin:"18px 0 10px" }}>Other Cash Movements</h3>
+        <WrRowsEditor
+          idPrefix="wr-other-cash"
+          rows={report.other_cash_movements || []}
+          onChange={rows => updateArray("other_cash_movements", rows)}
+          disabled={disabled}
+          addLabel="+ Add Row"
+          emptyRow={{ date: todayStr(), description: "", amount: "" }}
+          columns={[
+            { key:"date", label:"Date", type:"date" },
+            { key:"description", label:"Description", type:"text" },
+            { key:"amount", label:"Amount (TZS)", type:"number" },
+          ]}
+        />
+
+        <div style={{ marginTop:18 }}>
+          <label style={lS} htmlFor="wr-memo">Memo</label>
+          <textarea id="wr-memo" rows={5} disabled={disabled} value={report.memo_text || ""} onChange={e => update({ memo_text: e.target.value })} style={{ ...iS, resize:"vertical", background:"#fff" }} placeholder="Free-form notes on cash handling, deposits, till counts, etc." />
+        </div>
+      </div>
+
+      {/* Executive summary */}
+      <div style={{ ...panelS, marginBottom:16 }}>
+        <h2 style={fTi}>1. Executive Summary</h2>
+        <textarea rows={6} disabled={disabled} value={report.executive_summary || ""} onChange={e => update({ executive_summary: e.target.value })} style={{ ...iS, resize:"vertical" }} placeholder="Overall summary of the week…" />
+      </div>
+
+      {/* Operations update */}
+      <div style={{ ...panelS, marginBottom:16 }}>
+        <h2 style={fTi}>2. Operations Update</h2>
+        <WrRowsEditor
+          idPrefix="wr-ops"
+          rows={report.operations_update || []}
+          onChange={rows => updateArray("operations_update", rows)}
+          disabled={disabled}
+          addLabel="+ Add Update"
+          emptyRow={{ text: "", status: "" }}
+          columns={[
+            { key:"text", label:"Update", type:"text" },
+            { key:"status", label:"Status", type:"select", options: WR_OPERATIONS_STATUSES },
+          ]}
+        />
+      </div>
+
+      {/* Marketing */}
+      <div style={{ ...panelS, marginBottom:16 }}>
+        <h2 style={fTi}>3. Marketing &amp; Social Media</h2>
+        <textarea rows={5} disabled={disabled} value={report.marketing_social_media || ""} onChange={e => update({ marketing_social_media: e.target.value })} style={{ ...iS, resize:"vertical" }} placeholder="Campaigns, posts, promotions this week…" />
+      </div>
+
+      {/* Compliance */}
+      <div style={{ ...panelS, marginBottom:16 }}>
+        <h2 style={fTi}>4. Compliance</h2>
+        <textarea rows={4} disabled={disabled} value={report.compliance || ""} onChange={e => update({ compliance: e.target.value })} style={{ ...iS, resize:"vertical", marginBottom:14 }} placeholder="General compliance notes…" />
+        <WrRowsEditor
+          idPrefix="wr-compliance"
+          rows={report.compliance_items || []}
+          onChange={rows => updateArray("compliance_items", rows)}
+          disabled={disabled}
+          addLabel="+ Add Compliance Item"
+          emptyRow={{ description: "", status: "", deadline: "" }}
+          columns={[
+            { key:"description", label:"Description", type:"text" },
+            { key:"status", label:"Status", type:"select", options: WR_COMPLIANCE_STATUSES },
+            { key:"deadline", label:"Deadline", type:"date" },
+          ]}
+        />
+      </div>
+
+      {/* Challenges -- amber/warning tint per the brief */}
+      <div style={{ ...panelS, marginBottom:16, background:WR_AMBER.bg, border:`1px solid ${WR_AMBER.border}` }}>
+        <h2 style={{ ...fTi, color:WR_AMBER.text }}>5. Challenges</h2>
+        <textarea rows={5} disabled={disabled} value={report.challenges || ""} onChange={e => update({ challenges: e.target.value })} style={{ ...iS, resize:"vertical", background:"#fff" }} placeholder="Any issues, blockers or risks this week…" />
+      </div>
+
+      {/* Action plan */}
+      <div style={{ ...panelS, marginBottom:16 }}>
+        <h2 style={fTi}>6. Action Plan (Next Week)</h2>
+        <WrRowsEditor
+          idPrefix="wr-action"
+          rows={report.action_plan || []}
+          onChange={rows => updateArray("action_plan", rows)}
+          disabled={disabled}
+          addLabel="+ Add Action Item"
+          emptyRow={{ activity: "", deadline: "", responsible: "", status: "" }}
+          columns={[
+            { key:"activity", label:"Activity", type:"text" },
+            { key:"deadline", label:"Deadline", type:"date" },
+            { key:"responsible", label:"Responsible", type:"text" },
+            { key:"status", label:"Status", type:"select", options: WR_ACTION_STATUSES },
+          ]}
+        />
+      </div>
+
+      {/* Manager's comments */}
+      <div style={{ ...panelS, marginBottom:16 }}>
+        <h2 style={fTi}>7. Manager's Comments</h2>
+        <textarea rows={5} disabled={disabled} value={report.manager_comments || ""} onChange={e => update({ manager_comments: e.target.value })} style={{ ...iS, resize:"vertical" }} placeholder="Any additional comments…" />
+      </div>
+
+      {/* Approval */}
+      <div style={{ ...panelS, marginBottom:16 }}>
+        <h2 style={fTi}>Approval</h2>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(220px, 1fr))", gap:16 }}>
+          <div>
+            <label style={lS} htmlFor="wr-manager-appr">Manager</label>
+            <input id="wr-manager-appr" disabled={disabled} value={report.manager_approved_by || ""} onChange={e => update({ manager_approved_by: e.target.value })} style={iS} placeholder="Name" />
+          </div>
+          <div>
+            <label style={lS} htmlFor="wr-md-appr">Managing Director</label>
+            <input id="wr-md-appr" disabled={disabled} value={report.managing_director_approved_by || ""} onChange={e => update({ managing_director_approved_by: e.target.value })} style={iS} placeholder="Name" />
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:40 }}>
+        {!disabled && (
+          <>
+            <button type="button" disabled={saving} onClick={() => handleSave("DRAFT")} className="stv-btn stv-btn-primary" style={{ ...sB, width:"auto", padding:"13px 26px", opacity: saving ? 0.7 : 1 }}>
+              {saving ? "Saving…" : "Save Draft"}
+            </button>
+            <button type="button" disabled={saving} onClick={() => handleSave("COMPLETED")} style={wrGhostBtnS}>Mark Completed</button>
+          </>
+        )}
+        <button type="button" disabled={pdfBusy} onClick={handleGeneratePdf} style={wrGhostBtnS}>{pdfBusy ? "Generating…" : "Generate PDF"}</button>
+      </div>
+
+      {preview && <DebtCreditPdfModal title={preview.title} url={preview.url} onClose={() => setPreview(null)} />}
     </div>
   )
 }
