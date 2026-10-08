@@ -130,6 +130,7 @@ export default function App() {
   const [sales,    setSales]    = useState([])
   const [expenses, setExpenses] = useState([])
   const [services, setServices] = useState([])
+  const [memberNames, setMemberNames] = useState({})
   const [page,     setPage]     = useState("dashboard")
   const [sidebarOpen, setSidebarOpen]   = useState(true)
   const [toast,    setToast]    = useState(null)
@@ -157,6 +158,9 @@ export default function App() {
     // see context/AuthContext.jsx for why that traffic matters here.
     console.log("USER ID:", user?.id)
 
+    // No role filter here on purpose: Postgres RLS decides which rows come
+    // back (a Worker only ever receives the rows they recorded, Owner/Admin
+    // receive everything), so other workers' rows never reach this browser.
     const [
       { data: s, error: sErr },
       { data: e, error: eErr },
@@ -180,11 +184,32 @@ export default function App() {
   }
 
   useEffect(() => {
-    if (!user) return
+    if (!user) {
+      // Signed out -- drop the previous user's rows so the next person to
+      // sign in on this device never sees them, even for one render.
+      setSales([])
+      setExpenses([])
+      setMemberNames({})
+      return
+    }
     fetchAll()
     const i = setInterval(fetchAll, 5000)
     return () => clearInterval(i)
   }, [user])
+
+  // Owner-only: user_id -> display name, so the Sales/Expenses tables can
+  // show who recorded each row. application_members() is gated server-side
+  // (it returns nothing to a Worker), so this is never an access boundary.
+  useEffect(() => {
+    if (!user || !isOwner) return
+    let cancelled = false
+    supabase.rpc("application_members", { p_application_slug: "stv-pos" }).then(({ data, error }) => {
+      if (cancelled) return
+      if (error) { console.error("Members fetch error:", error.message); return }
+      setMemberNames(Object.fromEntries((data || []).map(m => [m.user_id, m.full_name || m.email])))
+    })
+    return () => { cancelled = true }
+  }, [user, isOwner])
 
   const addService = async (newSvc) => {
     const { error } = await supabase.from("services").insert([{
@@ -268,18 +293,18 @@ export default function App() {
 
         <div style={{ padding:"18px clamp(14px,4vw,28px) 32px" }}>
           {page === "dashboard" && isOwner  && <OwnerDashboard sales={sales} expenses={expenses} services={services} />}
-          {page === "dashboard" && !isOwner && <WorkerHome sales={sales} displayName={displayName} setPage={setPage} />}
+          {page === "dashboard" && !isOwner && <WorkerHome sales={sales} expenses={expenses} displayName={displayName} setPage={setPage} />}
           {page === "sales"     && (
             <SalesPage
               sales={sales} services={services} fetchAll={fetchAll}
-              user={user} showToast={showToast} isOwner={isOwner}
+              user={user} showToast={showToast} isOwner={isOwner} memberNames={memberNames}
               onOpenAddService={() => setShowAddService(true)}
             />
           )}
           {page === "expenses"  && (
             <ExpensesPage
               expenses={expenses} fetchAll={fetchAll}
-              user={user} showToast={showToast} isOwner={isOwner}
+              user={user} showToast={showToast} isOwner={isOwner} memberNames={memberNames}
             />
           )}
           {/* Take Orders -- open to workers AND owner/admin (Sidebar has it
@@ -1266,10 +1291,14 @@ function OwnerDashboard({ sales, expenses, services }) {
 }
 
 /* ── WORKER HOME ─────────────────────────────────────────── */
-function WorkerHome({ sales, displayName, setPage }) {
+function WorkerHome({ sales, expenses, displayName, setPage }) {
   const { t } = useLanguage()
+  // `sales`/`expenses` here are already only this worker's own rows -- RLS
+  // never returns anyone else's to a Worker session.
   const count      = sales.filter(s => s.date?.startsWith(todayStr())).length
   const todaySales = sales.filter(s => s.date?.startsWith(todayStr())).reduce((a, b) => a + Number(b.amount || 0), 0)
+  const expCount   = expenses.filter(e => e.date?.startsWith(todayStr())).length
+  const todayExp   = expenses.filter(e => e.date?.startsWith(todayStr())).reduce((a, b) => a + Number(b.cost || 0), 0)
 
   return (
     <div>
@@ -1278,6 +1307,7 @@ function WorkerHome({ sales, displayName, setPage }) {
 
       <div style={{ display:"grid", gap:SPACE.md, marginBottom:SPACE.xl, gridTemplateColumns:"repeat(auto-fit, minmax(200px, 1fr))" }}>
         <StatCard label={t("todaysSales")} value={TZS(todaySales)} color={C.accent} icon="💰" sub={t("transactionsRecorded", { count, plural: count !== 1 ? "s" : "" })} />
+        <StatCard label={t("todaysExpenses")} value={TZS(todayExp)} color={C.warn} icon="🧾" sub={t("transactionsRecorded", { count: expCount, plural: expCount !== 1 ? "s" : "" })} />
       </div>
 
       <div style={{ display:"grid", gap:SPACE.md, gridTemplateColumns:"repeat(auto-fit, minmax(220px, 1fr))" }}>
@@ -1326,7 +1356,7 @@ function WorkerHome({ sales, displayName, setPage }) {
 }
 
 /* ── SALES PAGE ──────────────────────────────────────────── */
-function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, onOpenAddService }) {
+function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, memberNames = {}, onOpenAddService }) {
   const { t, lang } = useLanguage()
   const [form, setForm] = useState({
     service: services[0]?.name || "",
@@ -1444,7 +1474,7 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, onOpen
       <div style={{ display:"flex", gap:20, flexWrap:"wrap", alignItems:"flex-start" }}>
 
         {/* Form card */}
-        <div style={{ ...fC, flex: isOwner ? "1 1 280px" : "1 1 100%", flexShrink:1, width:"auto", maxWidth: isOwner ? 340 : 460 }}>
+        <div style={{ ...fC, flex:"1 1 280px", flexShrink:1, width:"auto", maxWidth:340 }}>
           <h2 style={fTi}>{t("recordASale")}</h2>
 
           <label style={lS} id="sale-service-label">{t("serviceLabel")}</label>
@@ -1564,8 +1594,9 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, onOpen
           )}
         </div>
 
-        {/* Table (owner only) */}
-        {isOwner && (
+        {/* Table -- a Worker sees only their own rows (enforced by RLS, not
+            here); the recorder column and Delete stay Owner/Admin only. */}
+        {(
           <div style={{ flex:2, minWidth:0 }}>
             <div style={panelS}>
               {/* Filters */}
@@ -1584,7 +1615,7 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, onOpen
               <table className="stv-table" style={{ width:"100%", minWidth:560, borderCollapse:"collapse" }}>
                 <thead>
                   <tr style={{ borderBottom:`1.5px solid ${C.border}` }}>
-                    {[t("colDate"),t("colService"),t("colAmount"),t("colNote"),""].map(h => (
+                    {[t("colDate"),t("colService"),t("colAmount"),t("colNote"),...(isOwner ? [t("colRecordedBy")] : []),""].map(h => (
                       <th key={h} scope="col" style={{ textAlign:"left", padding:"0 0 10px", fontSize:10.5, color:C.textFaint, fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
                     ))}
                   </tr>
@@ -1596,6 +1627,7 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, onOpen
                       <td style={tS}><ServiceBadge name={s.service} services={services} /></td>
                       <td style={{ ...tS, fontWeight:600 }}>{TZS(s.amount)}</td>
                       <td style={{ ...tS, color:C.textFaint }}>{s.note || "—"}</td>
+                      {isOwner && <td style={{ ...tS, color:C.textSub }}>{memberNames[s.user_id] || "—"}</td>}
                       <td style={tS}>
                         <div style={{ display:"flex", gap:6 }}>
                           <button
@@ -1608,21 +1640,23 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, onOpen
                           >
                             🧾
                           </button>
-                          <button
-                            type="button"
-                            onClick={() => deleteSale(s.id)}
-                            className="stv-btn stv-btn-danger"
-                            aria-label={t("delete")}
-                            style={{ background:C.warnSoft, color:C.warnStrong, border:"none", padding:"5px 11px", borderRadius:RADIUS.sm, fontSize:11, cursor:"pointer", fontWeight:600 }}
-                          >
-                            {t("delete")}
-                          </button>
+                          {isOwner && (
+                            <button
+                              type="button"
+                              onClick={() => deleteSale(s.id)}
+                              className="stv-btn stv-btn-danger"
+                              aria-label={t("delete")}
+                              style={{ background:C.warnSoft, color:C.warnStrong, border:"none", padding:"5px 11px", borderRadius:RADIUS.sm, fontSize:11, cursor:"pointer", fontWeight:600 }}
+                            >
+                              {t("delete")}
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>
                   ))}
                   {filtered.length === 0 && (
-                    <tr><td colSpan={5} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>{t("noSalesYet")}</td></tr>
+                    <tr><td colSpan={isOwner ? 6 : 5} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>{t("noSalesYet")}</td></tr>
                   )}
                 </tbody>
               </table>
@@ -1658,7 +1692,7 @@ const CAT_KEYS = {
   Other:         "catOther",
 }
 
-function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner }) {
+function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner, memberNames = {} }) {
   const { t } = useLanguage()
   const [form, setForm] = useState({
     category:EXPENSE_CATS[0], item:"", cost:"", date:todayStr(), time:nowTimeStr(),
@@ -1768,7 +1802,7 @@ function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner }) {
       <div style={{ display:"flex", gap:20, flexWrap:"wrap", alignItems:"flex-start" }}>
 
         {/* Form */}
-        <div style={{ ...fC, flex: isOwner ? "1 1 280px" : "1 1 100%", flexShrink:1, width:"auto", maxWidth: isOwner ? 340 : 460 }}>
+        <div style={{ ...fC, flex:"1 1 280px", flexShrink:1, width:"auto", maxWidth:340 }}>
           <h2 style={fTi}>{t("recordAnExpense")}</h2>
 
           <label style={lS} htmlFor="exp-category">{t("categoryLabel")}</label>
@@ -1833,8 +1867,9 @@ function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner }) {
           </button>
         </div>
 
-        {/* Table (owner only) */}
-        {isOwner && (
+        {/* Table -- a Worker sees only their own rows (enforced by RLS, not
+            here); the recorder column and Delete stay Owner/Admin only. */}
+        {(
           <div style={{ flex:2, minWidth:0 }}>
             <div style={panelS}>
               {/* Filters */}
@@ -1855,7 +1890,7 @@ function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner }) {
               <table className="stv-table" style={{ width:"100%", minWidth:560, borderCollapse:"collapse" }}>
                 <thead>
                   <tr style={{ borderBottom:`1.5px solid ${C.border}` }}>
-                    {[t("colDate"),t("timeLabel"),t("colCategory"),t("colItem"),t("colCost"),""].map((h, i) => (
+                    {[t("colDate"),t("timeLabel"),t("colCategory"),t("colItem"),t("colCost"),...(isOwner ? [t("colRecordedBy")] : []),""].map((h, i) => (
                       <th key={i} scope="col" style={{ textAlign:"left", padding:"0 0 10px", fontSize:10.5, color:C.textFaint, fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
                     ))}
                   </tr>
@@ -1868,20 +1903,23 @@ function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner }) {
                       <td style={tS}>{t(CAT_KEYS[e.category] || e.category)}</td>
                       <td style={tS}>{e.item}</td>
                       <td style={{ ...tS, fontWeight:600, color:C.warnStrong }}>{TZS(e.cost)}</td>
+                      {isOwner && <td style={{ ...tS, color:C.textSub }}>{memberNames[e.user_id] || e.created_by || "—"}</td>}
                       <td style={tS}>
-                        <button
-                          type="button"
-                          onClick={() => deleteExpense(e.id)}
-                          className="stv-btn stv-btn-danger"
-                          style={{ background:C.warnSoft, color:C.warnStrong, border:"none", padding:"5px 11px", borderRadius:RADIUS.sm, fontSize:11, cursor:"pointer", fontWeight:600 }}
-                        >
-                          {t("delete")}
-                        </button>
+                        {isOwner && (
+                          <button
+                            type="button"
+                            onClick={() => deleteExpense(e.id)}
+                            className="stv-btn stv-btn-danger"
+                            style={{ background:C.warnSoft, color:C.warnStrong, border:"none", padding:"5px 11px", borderRadius:RADIUS.sm, fontSize:11, cursor:"pointer", fontWeight:600 }}
+                          >
+                            {t("delete")}
+                          </button>
+                        )}
                       </td>
                     </tr>
                   ))}
                   {filtered.length === 0 && (
-                    <tr><td colSpan={6} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>{t("noExpensesYet")}</td></tr>
+                    <tr><td colSpan={isOwner ? 7 : 6} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>{t("noExpensesYet")}</td></tr>
                   )}
                 </tbody>
               </table>
