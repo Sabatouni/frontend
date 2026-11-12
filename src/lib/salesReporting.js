@@ -12,16 +12,15 @@ import {
  * exported, so every report path (Analytics table, CSV, Excel, Tax report,
  * Sales Report PDF, Weekly Manager's Report) shows the same thing.
  *
- * Historical sales recorded before `sales.description` existed have
- * description = NULL; they are shown with an empty description, never
- * hidden or rewritten.
+ * Description = `sales.description`, falling back to the existing
+ * `sales.note` (where historical sales already keep their description) --
+ * see ./saleText.js. Nothing in the database is rewritten.
  */
 
-export const SALE_DESCRIPTION_MAX = 500
+import { saleDescription, saleExtraNote } from "./saleText"
+export { saleDescription, saleExtraNote }
 
-export function saleDescription(sale) {
-  return String(sale?.description ?? "").trim()
-}
+export const SALE_DESCRIPTION_MAX = 500
 
 export function recordedByName(row, memberNames = {}, fallback = "") {
   return memberNames[row?.user_id] || fallback || ""
@@ -40,7 +39,9 @@ export function buildSalesTransactionRows(sales, memberNames = {}, fallbackRecor
       description: saleDescription(s),
       amount: Number(s.amount) || 0,
       recordedBy: recordedByName(s, memberNames, fallbackRecorder),
-      note: String(s.note ?? "").trim(),
+      // Only an ADDITIONAL note (new sale with both fields); empty when the
+      // note is already being shown as the description.
+      note: saleExtraNote(s),
       paymentStatus: s.payment_status || "paid",
     }))
     .sort((a, b) => a.date.localeCompare(b.date))
