@@ -38,13 +38,13 @@ import {
   generateReportTitle, formatOrdinalDate, buildSalesSnapshot, buildExpenseSnapshot,
   sumAmounts, computeNetProfit, computeClosingCash,
   fetchReportHistory, fetchReportById, createReport, updateReport, deleteReport,
-  draftReportFromPeriod,
+  draftReportFromPeriod, fillEmptySaleDescriptions,
 } from "./lib/weeklyReports"
 import { getWeeklyReportPdfBlobUrl } from "./lib/weeklyReportPdf"
 import OperationsDocumentsPage from "./OperationsDocuments"
 import { FEATURES } from "./config/features"
 import {
-  SALE_DESCRIPTION_MAX, saleDescription, saleMatchesSearch,
+  SALE_DESCRIPTION_MAX, saleDescription, saleExtraNote, saleMatchesSearch,
   buildSalesTransactionRows, buildExpenseTransactionRows, toCsv, downloadBlob,
   presetRange, periodLabel, getSalesReportPdfBlobUrl,
 } from "./lib/salesReporting"
@@ -1010,7 +1010,9 @@ function ReceiptModal({ sale, servedByName, capturedAt, draft, onDraftChange, on
   const timeDisplay = capturedAt
     ? capturedAt.toLocaleTimeString(lang === "sw" ? "sw-TZ" : "en-US", { hour:"2-digit", minute:"2-digit" })
     : null
-  const note = (sale?.note || "").trim()
+  // Description (sales.description, else the historical sales.note) is shown
+  // as the main line; the note is only repeated when it adds something new.
+  const note = saleExtraNote(sale)
   const trimmedName = customerName.trim()
   const trimmedContact = customerContact.trim()
   const paymentLabel = { cash:t("paymentCash"), mobile:t("paymentMobileMoney"), card:t("paymentCard") }[paymentMethod] || null
@@ -1646,7 +1648,7 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, member
                       <td style={tS}><ServiceBadge name={s.service} services={services} /></td>
                       <td style={{ ...tS, maxWidth:280, color: saleDescription(s) ? C.text : C.textFaint }}>{saleDescription(s) || "—"}</td>
                       <td style={{ ...tS, fontWeight:600, whiteSpace:"nowrap" }}>{TZS(s.amount)}</td>
-                      <td style={{ ...tS, color:C.textFaint }}>{s.note || "—"}</td>
+                      <td style={{ ...tS, color:C.textFaint }}>{saleExtraNote(s) || "—"}</td>
                       {/* A Worker only ever receives their own rows (RLS), so
                           their own name is the correct recorder for each one. */}
                       <td style={{ ...tS, color:C.textSub }}>{isOwner ? (memberNames[s.user_id] || "—") : displayName}</td>
@@ -8803,6 +8805,23 @@ function WeeklyReportEditor({ initialReport, readOnly, sales, expenses, memberNa
     showToast("Sales and expense figures refreshed from the POS for this period.")
   }
 
+  // Non-destructive alternative to refetchFromPos(): only blank Sales
+  // Breakdown descriptions are filled (from sales.description, else
+  // sales.note). Amounts, dates, services, expenses, totals and every
+  // description already present -- including manual edits -- stay exactly
+  // as they are. Takes effect when the report is saved, like any other edit.
+  function fillEmptyDescriptions() {
+    if (!report.report_from || !report.report_to) { showToast("Choose both a From and To date first.", "error"); return }
+    const result = fillEmptySaleDescriptions(report.sales_breakdown || [], sales, report.report_from, report.report_to)
+    if (result.filled === 0) {
+      showToast(`No empty descriptions could be filled (${result.preserved} already filled, ${result.unmatched + result.noPosDescription} without a POS note, ${result.ambiguous} ambiguous).`)
+      return
+    }
+    updateArray("sales_breakdown", result.rows)
+    const skipped = result.unmatched + result.noPosDescription + result.ambiguous
+    showToast(`Filled ${result.filled} empty description${result.filled === 1 ? "" : "s"}; ${result.preserved} existing kept${skipped ? `, ${skipped} left blank` : ""}. Save the report to keep the changes.`)
+  }
+
   const grossSales = Number(report.gross_sales) || 0
   const operatingExpenses = Number(report.operating_expenses) || 0
   const netProfit = computeNetProfit(grossSales, operatingExpenses)
@@ -8997,7 +9016,15 @@ function WeeklyReportEditor({ initialReport, readOnly, sales, expenses, memberNa
 
       {/* Sales breakdown */}
       <div style={{ ...panelS, marginBottom:16, background:C.accentSoft }}>
-        <h2 style={fTi}>Sales Breakdown</h2>
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:10, flexWrap:"wrap", marginBottom:12 }}>
+          <h2 style={{ ...fTi, marginBottom:0 }}>Sales Breakdown</h2>
+          {!disabled && (
+            <button type="button" onClick={fillEmptyDescriptions} className="stv-btn stv-btn-secondary" style={wrGhostBtnS}
+              title="Fills only blank descriptions from the POS sales notes. Existing descriptions, amounts and totals are not changed.">
+              ✎ Fill empty descriptions only
+            </button>
+          )}
+        </div>
         <WrRowsEditor
           idPrefix="wr-sales"
           rows={report.sales_breakdown || []}
@@ -9008,7 +9035,7 @@ function WeeklyReportEditor({ initialReport, readOnly, sales, expenses, memberNa
           columns={[
             { key:"date", label:"Date", type:"date" },
             { key:"item", label:"Item / Service", type:"text", placeholder:"e.g. Restaurant" },
-            { key:"description", label:"Description", type:"text", placeholder:"e.g. Two rides for two guests" },
+            { key:"description", label:"Description", type:"text" },
             { key:"amount", label:"Amount (TZS)", type:"number" },
             { key:"recorded_by", label:"Recorded By", type:"text" },
           ]}

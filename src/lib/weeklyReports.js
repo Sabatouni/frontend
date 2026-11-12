@@ -1,4 +1,5 @@
 import { supabase } from "../api/supabaseClient"
+import { saleDescription } from "./saleText"
 
 /**
  * Data-access + calculation layer for the Weekly Manager's Report module.
@@ -89,18 +90,68 @@ function inRange(dateStr, from, to) {
  * names, not anything invented for this report. */
 export function buildSalesSnapshot(sales, from, to, memberNames = {}) {
   // `description` / `recorded_by` were added with the Sales Description
-  // upgrade. Reports saved before then simply don't have these keys and
-  // render them blank -- nothing about an old snapshot is rewritten.
+  // upgrade. Description comes from sales.description, falling back to the
+  // existing sales.note, where historical sales already hold it. Reports
+  // saved before then keep their stored snapshot until "Re-fetch from POS".
   return (sales || [])
     .filter(s => inRange(s.date, from, to))
     .map(s => ({
       date: (s.date || "").slice(0, 10),
       item: s.service || "",
-      description: String(s.description ?? "").trim(),
+      description: saleDescription(s),
       amount: Number(s.amount || 0),
       recorded_by: memberNames[s.user_id] || "",
     }))
     .sort((a, b) => a.date.localeCompare(b.date))
+}
+
+/**
+ * "Fill empty descriptions only" for an existing (saved) report's
+ * sales_breakdown. Pure -- returns a new array, never mutates the input.
+ *
+ * Guarantees:
+ *   * Only rows whose `description` is blank are touched, and on those rows
+ *     ONLY the `description` field is set. date / item / amount / recorded_by
+ *     and every other key are copied through untouched, so totals, Gross
+ *     Sales and Net Profit cannot change.
+ *   * A row that already has a description (POS-generated or typed by the
+ *     manager) is never modified.
+ *   * Matching is exact on (date, service, amount) against the current POS
+ *     sales for the report period, using the same description rule as
+ *     everywhere else (sales.description, else sales.note).
+ *   * Ambiguity is never guessed: if the matching POS sales for a blank row
+ *     carry DIFFERENT descriptions (e.g. two 1,000 Restaurant sales on the
+ *     same day, one "soda", one "water"), the row is left blank and counted
+ *     as `ambiguous`. Rows with no matching POS sale (manually added rows,
+ *     deleted/edited sales) are left blank and counted as `unmatched`.
+ *
+ * @returns {{ rows: object[], filled: number, preserved: number, ambiguous: number, unmatched: number, noPosDescription: number }}
+ */
+export function fillEmptySaleDescriptions(rows, sales, from, to) {
+  const keyOf = (date, item, amount) =>
+    `${String(date || "").slice(0, 10)}|${String(item || "").trim().toLowerCase()}|${Number(amount) || 0}`
+
+  // Distinct non-empty descriptions available per (date, service, amount).
+  const byKey = new Map()
+  for (const s of buildSalesSnapshot(sales, from, to)) {
+    const k = keyOf(s.date, s.item, s.amount)
+    if (!byKey.has(k)) byKey.set(k, { count: 0, descriptions: new Set() })
+    const entry = byKey.get(k)
+    entry.count += 1
+    if (s.description) entry.descriptions.add(s.description)
+  }
+
+  const stats = { filled: 0, preserved: 0, ambiguous: 0, unmatched: 0, noPosDescription: 0 }
+  const out = (rows || []).map(r => {
+    if (String(r?.description ?? "").trim()) { stats.preserved += 1; return { ...r } }
+    const entry = byKey.get(keyOf(r?.date, r?.item, r?.amount))
+    if (!entry) { stats.unmatched += 1; return { ...r } }
+    if (entry.descriptions.size === 0) { stats.noPosDescription += 1; return { ...r } }
+    if (entry.descriptions.size > 1) { stats.ambiguous += 1; return { ...r } }
+    stats.filled += 1
+    return { ...r, description: [...entry.descriptions][0] }
+  })
+  return { rows: out, ...stats }
 }
 
 /** Expense rows for the period, shaped for expense_breakdown: { date,

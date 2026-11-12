@@ -61,17 +61,40 @@ try {
     assert.equal(sr.csvCell(null), "")
     assert.ok(sr.toCsv([["a","b"],[1,2]]).startsWith("\uFEFFa,b\r\n1,2"))
   })
-  ok("saleDescription handles historical NULL", () => {
+  ok("saleDescription: description first, then the historical note", () => {
     assert.equal(sr.saleDescription({ description: null }), "")
     assert.equal(sr.saleDescription({}), "")
     assert.equal(sr.saleDescription({ description: "  Two rides  " }), "Two rides")
+    // historical sales keep their description in sales.note
+    assert.equal(sr.saleDescription({ description: null, note: " Sample meal note " }), "Sample meal note")
+    assert.equal(sr.saleDescription({ description: "", note: "Sample rounds note" }), "Sample rounds note")
+    assert.equal(sr.saleDescription({ description: "   ", note: "Sample tent note" }), "Sample tent note")
+    // a real description always wins over the note
+    assert.equal(sr.saleDescription({ description: "Two rides for two guests", note: "paid cash" }), "Two rides for two guests")
+    assert.equal(sr.saleDescription({ description: null, note: null }), "")
+  })
+  ok("saleExtraNote: never repeats the note already shown as the description", () => {
+    assert.equal(sr.saleExtraNote({ description: null, note: "Sample meal note" }), "")          // historical: note IS the description
+    assert.equal(sr.saleExtraNote({ description: "Two rides", note: "paid cash" }), "paid cash")
+    assert.equal(sr.saleExtraNote({ description: "Two rides", note: "Two rides" }), "")
+    assert.equal(sr.saleExtraNote({ description: "Two rides", note: "" }), "")
   })
   ok("transaction rows: Date|Service|Description|Amount|Recorded By, sorted", () => {
     const rows = sr.buildSalesTransactionRows([
       { id: 2, date: "2026-11-12T09:00:00+00:00", service: "Go Kart", description: "Two rides purchased by two guests", amount: "40000", user_id: "u1" },
       { id: 1, date: "2026-11-10T09:00:00+00:00", service: "Restaurant", description: null, amount: 15000, user_id: "u2", note: "old" } ], { u1: "Asha" })
-    assert.deepEqual(rows.map(r => [r.date, r.service, r.description, r.amount, r.recordedBy]),
-      [["2026-11-10", "Restaurant", "", 15000, ""], ["2026-11-12", "Go Kart", "Two rides purchased by two guests", 40000, "Asha"]])
+    assert.deepEqual(rows.map(r => [r.date, r.service, r.description, r.amount, r.recordedBy, r.note]),
+      [["2026-11-10", "Restaurant", "old", 15000, "", ""], ["2026-11-12", "Go Kart", "Two rides purchased by two guests", 40000, "Asha", ""]])
+  })
+  ok("transaction rows: historical notes populate Description; expense rows unchanged", () => {
+    const rows = sr.buildSalesTransactionRows([
+      { id: "a", date: "2030-01-17T09:00:00+00:00", service: "Tent", description: null, note: "Sample tent note", amount: 123000 },
+      { id: "b", date: "2030-01-18T09:00:00+00:00", service: "Restaurant", description: null, note: null, amount: 1000 },
+      { id: "c", date: "2030-01-19T09:00:00+00:00", service: "Go Kart", description: "Two rides", note: "group booking", amount: 20000 } ])
+    assert.deepEqual(rows.map(r => [r.description, r.note]), [["Sample tent note", ""], ["", ""], ["Two rides", "group booking"]])
+    assert.equal(rows.reduce((a, r) => a + r.amount, 0), 144000) // totals untouched
+    const ex = sr.buildExpenseTransactionRows([{ id: 1, date: "2030-01-10T09:00:00Z", category: "Restaurant", item: "Sample supplies", cost: 30000, note: null }])
+    assert.deepEqual([ex[0].item, ex[0].amount, ex[0].note], ["Sample supplies", 30000, ""])
   })
   ok("search matches description / service / note / recorder", () => {
     const s = { service: "Paintball", description: "Group session for five participants", note: "", user_id: "u1" }
@@ -98,6 +121,82 @@ try {
     assert.equal(snap[1].description, "")
     assert.equal(wr.sumAmounts(snap), 25000)
   })
+  ok("weekly snapshot: historical sales.note auto-populates Description; expenses keep item mapping", () => {
+    const sales = [
+      { date: "2030-01-17T09:00:00Z", service: "Tent", description: null, note: "Sample tent note", amount: 123000, user_id: "u1" },
+      { date: "2030-01-18T09:00:00Z", service: "Go Kart", description: null, note: " Sample kart note ", amount: 30000 },
+      { date: "2030-01-19T09:00:00Z", service: "Restaurant", description: "Two biryani meals", note: "Sample table note", amount: 24000 },
+    ]
+    const snap = wr.buildSalesSnapshot(sales, "2030-01-13", "2030-01-19", { u1: "Juma" })
+    assert.deepEqual(snap.map(r => r.description), ["Sample tent note", "Sample kart note", "Two biryani meals"])
+    assert.equal(wr.sumAmounts(snap), 177000)
+    const exp = wr.buildExpenseSnapshot([{ date: "2030-01-18T09:00:00Z", item: "Sample fuel expense", cost: 50000, note: null }], "2030-01-13", "2030-01-19")
+    assert.deepEqual(exp, [{ date: "2030-01-18", note: "Sample fuel expense", amount: 50000 }])
+    const draft = wr.draftReportFromPeriod({ from: "2030-01-13", to: "2030-01-19", sales, expenses: [], preparedBy: "M" })
+    assert.deepEqual(draft.sales_breakdown.map(r => r.description), ["Sample tent note", "Sample kart note", "Two biryani meals"])
+    assert.equal(draft.gross_sales, 177000)
+  })
+  // ── "Fill empty descriptions only" (saved Weekly Manager's Reports) ─
+  {
+    const posSales = [
+      { date: "2030-01-17T09:00:00Z", service: "Tent", description: null, note: "Sample tent note", amount: 123000 },
+      { date: "2030-01-17T09:00:00Z", service: "Go Kart", description: null, note: "Sample rounds note", amount: 20000 },
+      { date: "2030-01-18T09:00:00Z", service: "Restaurant", description: "Two biryani meals", note: "Sample table note", amount: 24000 },
+      // two identical (date, service, amount) sales with DIFFERENT notes -> ambiguous
+      { date: "2030-01-18T09:00:00Z", service: "Restaurant", description: null, note: "Sample drink A", amount: 1000 },
+      { date: "2030-01-18T09:00:00Z", service: "Restaurant", description: null, note: "Sample drink B", amount: 1000 },
+      // two identical sales with the SAME note -> safe to fill
+      { date: "2030-01-19T09:00:00Z", service: "Games", description: null, note: "Sample game note", amount: 2000 },
+      { date: "2030-01-19T09:00:00Z", service: "Games", description: null, note: "Sample game note", amount: 2000 },
+      // a sale with no note at all
+      { date: "2030-01-19T09:00:00Z", service: "Restaurant", description: null, note: null, amount: 3000 },
+    ]
+    // A saved report (pre-fix snapshot: no description key) with manual edits.
+    const saved = [
+      { date: "2030-01-17", item: "Tent", amount: 123000 },                                        // blank -> fill
+      { date: "2030-01-17", item: "Go Kart", amount: 20000, description: "Manager typed: group of 2" }, // manual -> keep
+      { date: "2030-01-18", item: "Restaurant", amount: 24000, description: "" },                  // blank -> fill (description wins)
+      { date: "2030-01-18", item: "Restaurant", amount: 1000 },                                    // ambiguous -> blank
+      { date: "2030-01-19", item: "Games", amount: 2000, recorded_by: "Juma" },                    // same note twice -> fill
+      { date: "2030-01-19", item: "Restaurant", amount: 3000, description: "   " },                // POS has no note -> blank
+      { date: "2030-01-20", item: "Manual adjustment", amount: 5000 },                             // not in POS -> blank
+      { date: "2030-01-17", item: "tent ", amount: "123000", description: "Kept: edited text" },   // manual, also matchable -> keep
+    ]
+    const before = JSON.parse(JSON.stringify(saved))
+    const res = wr.fillEmptySaleDescriptions(saved, posSales, "2030-01-13", "2030-01-20")
+
+    ok("fill-empty: fills only blank descriptions from POS note/description", () => {
+      assert.deepEqual(res.rows.map(r => r.description ?? null),
+        ["Sample tent note", "Manager typed: group of 2", "Two biryani meals", null, "Sample game note", "   ", null, "Kept: edited text"])
+      assert.deepEqual({ filled: res.filled, preserved: res.preserved, ambiguous: res.ambiguous, unmatched: res.unmatched, noPosDescription: res.noPosDescription },
+        { filled: 3, preserved: 2, ambiguous: 1, unmatched: 1, noPosDescription: 1 })
+    })
+    ok("fill-empty: every existing manual description is preserved exactly", () => {
+      for (const [i, r] of before.entries()) {
+        if (String(r.description ?? "").trim()) assert.equal(res.rows[i].description, r.description, `row ${i} changed`)
+      }
+    })
+    ok("fill-empty: amounts, dates, services, other fields and totals are unchanged", () => {
+      res.rows.forEach((r, i) => {
+        const { description: _a, ...restAfter } = r
+        const { description: _b, ...restBefore } = before[i]
+        assert.deepEqual(restAfter, restBefore, `row ${i} non-description fields changed`)
+      })
+      assert.equal(wr.sumAmounts(res.rows), wr.sumAmounts(before))
+      assert.equal(res.rows.length, before.length)
+    })
+    ok("fill-empty: input is not mutated and a second run changes nothing", () => {
+      assert.deepEqual(saved, before)
+      const again = wr.fillEmptySaleDescriptions(res.rows, posSales, "2030-01-13", "2030-01-20")
+      assert.deepEqual(again.rows, res.rows)
+      assert.equal(again.filled, 0)
+    })
+    ok("fill-empty: sales outside the report period are never used", () => {
+      const r = wr.fillEmptySaleDescriptions([{ date: "2030-01-17", item: "Tent", amount: 123000 }], posSales, "2030-01-18", "2030-01-20")
+      assert.equal(r.rows[0].description, undefined); assert.equal(r.unmatched, 1)
+    })
+  }
+
   // ── Corrections (review round 2) ──────────────────────────────────
   ok("effectiveSummary recomputes checklist totals and ignores a tampered stored summary", () => {
     const doc = { doc_type: "inventory_checklist", summary: { total_items: 99, good: 99, needing_repair: 0, missing: 0 },
