@@ -4,8 +4,12 @@
   "private": true,
   "scripts": {
     "dev": "vite",
+    "dev:staging": "vite --mode staging",
     "build": "vite build",
-    "preview": "vite preview"
+    "build:staging": "vite build --mode staging --outDir dist-staging",
+    "preview": "vite preview",
+    "preview:staging": "vite preview --mode staging --outDir dist-staging",
+    "test": "node tests/unit.test.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.105.1",

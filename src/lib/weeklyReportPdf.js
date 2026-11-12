@@ -1,6 +1,7 @@
 import { jsPDF } from "jspdf"
 import autoTable from "jspdf-autotable"
 import { BRAND } from "./invoicePdf"
+import { imageToJpeg } from "./pdfBrand"
 import { formatOrdinalDate } from "./weeklyReports"
 
 /**
@@ -10,7 +11,9 @@ import { formatOrdinalDate } from "./weeklyReports"
  * those two already set for each other: only the read-only BRAND constant
  * is imported from invoicePdf.js, and the logo loader is a deliberate
  * small duplicate rather than a shared import, so nothing here can ever
- * affect either existing PDF.
+ * affect either existing PDF. (The only shared piece is pdfBrand.js's pure
+ * imageToJpeg helper, used to trim the logo's transparent margins; the
+ * invoice / debt-credit / itinerary PDFs do not use it.)
  *
  * This is the one PDF in this app that can legitimately run to several
  * pages (a long memo, a big sales table, a busy action plan), so unlike
@@ -69,17 +72,10 @@ async function loadLogo() {
       el.onerror = reject
       el.src = sourceUrl
     })
-    const ratio = img.naturalWidth && img.naturalHeight ? img.naturalWidth / img.naturalHeight : 1
-    const targetH = 320
-    const targetW = Math.round(targetH * ratio)
-    const canvas = document.createElement("canvas")
-    canvas.width = targetW
-    canvas.height = targetH
-    const ctx = canvas.getContext("2d")
-    ctx.fillStyle = "#FFFFFF"
-    ctx.fillRect(0, 0, targetW, targetH)
-    ctx.drawImage(img, 0, 0, targetW, targetH)
-    const dataUrl = canvas.toDataURL("image/jpeg", 0.92)
+    // Transparent margins are trimmed in memory (the official logo file is
+    // never modified), so the artwork fills the header slot instead of
+    // printing at ~40% size inside a mostly empty box.
+    const { dataUrl, ratio } = imageToJpeg(img, { maxDim: 720, trim: true, quality: 0.92 })
     cachedLogo = { dataUrl, ratio, format: "JPEG" }
   } catch (err) {
     console.warn("Weekly Report PDF: logo failed to load:", err.message)
@@ -295,18 +291,20 @@ export async function buildWeeklyReportPdf(report) {
   // Sales Breakdown -- green
   y = ensureSpace(doc, y, 20, logo, report)
   y = sectionHeading(doc, y, "Sales Breakdown", GREEN)
-  const salesRows = (report.sales_breakdown || []).map(r => [formatOrdinalDate(r.date), r.item || "", money(r.amount)])
+  // Date | Service | Description | Amount | Recorded By. Reports saved before
+  // descriptions existed have no description/recorded_by keys -> blank cells.
+  const salesRows = (report.sales_breakdown || []).map(r => [formatOrdinalDate(r.date), r.item || "", r.description || "", money(r.amount), r.recorded_by || ""])
   if (salesRows.length) {
     autoTable(doc, {
       startY: y,
       margin: { left: MARGIN, right: MARGIN, top: HEADER_RESERVE, bottom: FOOTER_RESERVE },
-      head: [["Date", "Item / Service", "Amount (TZS)"]],
+      head: [["Date", "Service", "Description", "Amount (TZS)", "Recorded By"]],
       body: salesRows,
       theme: "grid",
-      styles: { font: "helvetica", fontSize: 9, textColor: hexToRgb(TEXT_DARK), lineColor: hexToRgb(BORDER), lineWidth: 0.2, cellPadding: 3 },
+      styles: { font: "helvetica", fontSize: 8.5, textColor: hexToRgb(TEXT_DARK), lineColor: hexToRgb(BORDER), lineWidth: 0.2, cellPadding: 2.6, overflow: "linebreak" },
       headStyles: { fillColor: hexToRgb(GREEN), textColor: [255, 255, 255], fontStyle: "bold" },
       alternateRowStyles: { fillColor: hexToRgb(GREEN_BG) },
-      columnStyles: { 2: { halign: "right" } },
+      columnStyles: { 0: { cellWidth: 30 }, 1: { cellWidth: 26 }, 2: { cellWidth: "auto" }, 3: { halign: "right", cellWidth: 26 }, 4: { cellWidth: 28 } },
       didDrawPage: () => didDrawPageDecoration(doc, logo, report),
     })
     y = doc.lastAutoTable.finalY + 8

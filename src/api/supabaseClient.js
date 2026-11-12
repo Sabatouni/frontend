@@ -1,31 +1,24 @@
 import { createClient } from "@supabase/supabase-js";
+import { ENV_STATUS } from "../config/environment";
 
-const url = import.meta.env.VITE_SUPABASE_URL;
-const key = import.meta.env.VITE_SUPABASE_ANON_KEY;
-
-const isValidHttpUrl = (s) => {
-  if (!s || typeof s !== "string") return false;
-  try {
-    const u = new URL(s);
-    return u.protocol === "http:" || u.protocol === "https:";
-  } catch {
-    return false;
-  }
-};
-
+// Connection details come ONLY from the environment guard (see
+// src/config/envGuard.js). If the guard rejected the configuration -- e.g.
+// staging pointing at the production database, production pointing at the
+// staging database, or a staging variable silently inherited from the
+// production .env -- no client is created at all, so no request can leave
+// this browser. main.jsx shows the configuration error screen instead of the
+// app in that case; this check is the second layer.
 let supabase = null;
 
-if (isValidHttpUrl(url) && key) {
+if (ENV_STATUS.ok) {
   try {
-    supabase = createClient(url, key);
+    supabase = createClient(ENV_STATUS.supabaseUrl, ENV_STATUS.supabaseAnonKey);
   } catch (err) {
     console.error("[Supabase] init failed:", err);
     supabase = null;
   }
 } else {
-  console.warn(
-    "[Supabase] Missing or invalid env vars. Check VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in Vercel."
-  );
+  console.error("[Supabase] Not initialised: environment configuration was rejected.");
 }
 
 export { supabase };

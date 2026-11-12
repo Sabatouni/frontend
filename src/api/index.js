@@ -1,14 +1,19 @@
-const API = import.meta.env.VITE_API_URL;
+import { ENV_STATUS } from "../config/environment";
 
-// 🚨 Hard fail if missing
-if (!API) {
+// The admin backend holds the production service-role key, so its URL is
+// only taken from the environment guard: staging is only ever allowed a
+// local or explicitly "staging" admin backend (see src/config/envGuard.js).
+// 🚨 Hard fail if the configuration was rejected or the URL is missing.
+if (!ENV_STATUS.ok || !ENV_STATUS.apiUrl) {
   throw new Error(
-    "VITE_API_URL is not set. Fix it in Vercel environment variables."
+    ENV_STATUS.ok
+      ? "VITE_API_URL is not set. Fix it in Vercel environment variables."
+      : `Admin API disabled: ${ENV_STATUS.appEnv} environment configuration was rejected.`
   );
 }
 
-// 🧹 Clean trailing slash
-const BASE = API.replace(/\/+$/, "");
+// 🧹 Trailing slash already stripped by the guard
+const BASE = ENV_STATUS.apiUrl;
 
 console.log("✅ API BASE:", BASE);
 

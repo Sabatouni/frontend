@@ -20,6 +20,7 @@ import * as XLSX from "xlsx"
 // which is fine for a raw data dump but not for an accountant-facing report.
 // xlsx-js-style is an API-compatible fork that writes styling correctly.
 import XLSXStyle from "xlsx-js-style"
+import { FONT, RADIUS, SPACE, C, SHADOW, iS, seS, lS, fC, fTi, sB, tS, pT, panelS } from "./ui/theme"
 import { ADMIN_API } from "./api"
 import { supabase } from "./api/supabaseClient"
 import { useAuth } from "./context/AuthContext"
@@ -40,6 +41,13 @@ import {
   draftReportFromPeriod,
 } from "./lib/weeklyReports"
 import { getWeeklyReportPdfBlobUrl } from "./lib/weeklyReportPdf"
+import OperationsDocumentsPage from "./OperationsDocuments"
+import { FEATURES } from "./config/features"
+import {
+  SALE_DESCRIPTION_MAX, saleDescription, saleMatchesSearch,
+  buildSalesTransactionRows, buildExpenseTransactionRows, toCsv, downloadBlob,
+  presetRange, periodLabel, getSalesReportPdfBlobUrl,
+} from "./lib/salesReporting"
 import {
   GUEST_TYPES as ITIN_GUEST_TYPES,
   emptyItineraryContent,
@@ -65,41 +73,6 @@ const PALETTE = ["#E07A5F","#3D405B","#81B29A","#F2CC8F","#9C89B8","#F0A500","#0
 const EMOJI_LIST  = ["🍽️","🏎️","🎯","🎟️","🏊","🎪","🎭","⚽","🎸","🧗","🏄","🎡","🛶","🎠","🏋️","🎳","🤸","🧩","🎨","🎮","🧘","🎲","🚀","💆","🎉"]
 const EXPENSE_CATS = ["Restaurant","Go Kart","Paintball","Park Entry","Utilities","Staff","Maintenance","Other"]
 
-/* ── DESIGN TOKENS ──────────────────────────────────────────
-   A small, consistent scale so spacing/radius/shadow/color
-   stop being ad hoc per element. Brand accents (sage + terracotta)
-   are kept, just used with more restraint — neutral surfaces,
-   color reserved for meaning (brand action, money in/out, status). */
-const FONT = "'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif"
-const RADIUS = { sm: 8, md: 12, lg: 16, pill: 999 }
-const SPACE  = { xs:8, sm:12, md:16, lg:20, xl:24, xxl:32 }
-const C = {
-  bg:        "#F7F7F6",
-  surface:   "#FFFFFF",
-  border:    "#EBE8E3",
-  borderStrong: "#DCD8D1",
-  text:      "#1F2233",
-  textSub:   "#4B5163",   // ~7.9:1 on white — WCAG AAA
-  textFaint: "#6B7080",   // ~4.9:1 on white — WCAG AA (was #9A9FAE at 2.6:1, failed)
-  accent:      "#6FA88E",   // sage — badges/icons/borders (not for white-on-fill text)
-  accentHover: "#5F9680",
-  accentSoft:  "#EDF4F0",
-  accentStrong:      "#3F7259", // ~5.6:1 with white text — use for solid buttons/CTAs
-  accentStrongHover: "#345F49",
-  warn:        "#E07A5F",   // terracotta — money-out / destructive / errors (badges, icons)
-  warnHover:   "#C96A50",
-  warnSoft:    "#FBEEE9",
-  warnStrong:      "#A34E33",  // ~5.7:1 with white text, ~5:1 as text on warnSoft
-  warnStrongHover: "#8A4129",
-  sidebar:     "#20222E",
-  sidebarBorder: "rgba(255,255,255,0.08)",
-  sidebarText:   "#9CA0B4",
-}
-const SHADOW = {
-  card:  "0 1px 2px rgba(20,20,30,0.04), 0 1px 3px rgba(20,20,30,0.05)",
-  hover: "0 6px 20px rgba(20,20,30,0.08)",
-  modal: "0 24px 48px rgba(20,20,30,0.16)",
-}
 
 /* Admin backend helper — uses VITE_API_URL via src/api/index.js.
    Takes the access token as a parameter (read from AuthContext by the
@@ -135,6 +108,7 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen]   = useState(true)
   const [toast,    setToast]    = useState(null)
   const [showAddService, setShowAddService] = useState(false)
+  const [docsTab, setDocsTab] = useState(undefined)
 
   // Start with the sidebar closed on phones/small tablets so it behaves
   // as an off-canvas drawer instead of covering the screen on first load.
@@ -292,7 +266,7 @@ export default function App() {
         </div>
 
         <div style={{ padding:"18px clamp(14px,4vw,28px) 32px" }}>
-          {page === "dashboard" && isOwner  && <OwnerDashboard sales={sales} expenses={expenses} services={services} />}
+          {page === "dashboard" && isOwner  && <OwnerDashboard sales={sales} expenses={expenses} services={services} memberNames={memberNames} />}
           {page === "dashboard" && !isOwner && <WorkerHome sales={sales} expenses={expenses} displayName={displayName} setPage={setPage} />}
           {page === "sales"     && (
             <SalesPage
@@ -317,7 +291,16 @@ export default function App() {
             <TakeOrdersPage user={user} isOwner={isOwner} displayName={displayName} showToast={showToast} />
           )}
           {page === "inventory" && (
-            <InventoryPage user={user} isOwner={isOwner} showToast={showToast} />
+            <InventoryPage user={user} isOwner={isOwner} showToast={showToast}
+              onOpenDocuments={FEATURES.operationsDocuments ? () => { setDocsTab("Inventory & Stock"); setPage("documents") } : undefined} />
+          )}
+          {/* Operations Documents -- open to workers AND owner/admin. What
+              each role may create/see/approve is enforced by RLS + triggers
+              on operational_documents (see migration 20261112090100).
+              Hidden for this release via FEATURES.operationsDocuments
+              (src/config/features.js) until that migration is applied. */}
+          {page === "documents" && FEATURES.operationsDocuments && (
+            <OperationsDocumentsPage user={user} isOwner={isOwner} displayName={displayName} showToast={showToast} initialTab={docsTab} />
           )}
           {page === "invoices" && (
             <InvoicesPage user={user} isOwner={isOwner} displayName={displayName} showToast={showToast} />
@@ -340,7 +323,7 @@ export default function App() {
             <DebtCreditPage user={user} isOwner={isOwner} displayName={displayName} showToast={showToast} />
           )}
           {page === "reports" && isOwner && (
-            <ReportsPage sales={sales} expenses={expenses} services={services} user={user} isOwner={isOwner} displayName={displayName} showToast={showToast} />
+            <ReportsPage sales={sales} expenses={expenses} services={services} user={user} isOwner={isOwner} displayName={displayName} showToast={showToast} memberNames={memberNames} />
           )}
           {page === "users" && isOwner && <UsersPage showToast={showToast} />}
         </div>
@@ -635,6 +618,7 @@ function Sidebar({ page, setPage, isOwner, displayName, onLogout, open, onClose 
     { id:"takeOrders", label:"Take Orders",      icon:"🍽️" },
     { id:"expenses",   label:t("navExpenses"),   icon:"🧾" },
     { id:"inventory",  label:t("navInventory"),  icon:"📦" },
+    ...(FEATURES.operationsDocuments ? [{ id:"documents", label:"Documents", icon:"🗂️" }] : []),
     { id:"invoices",   label:t("navInvoices"),   icon:"📑" },
     { id:"itinerary",  label:t("navItinerary"),  icon:"🧳" },
     { id:"debtCredit", label:"Debt & Credit",    icon:"💳" },
@@ -647,6 +631,7 @@ function Sidebar({ page, setPage, isOwner, displayName, onLogout, open, onClose 
     { id:"takeOrders", label:"Take Orders",      icon:"🍽️" },
     { id:"expenses",   label:t("navExpenses"),   icon:"🧾" },
     { id:"inventory",  label:t("navInventory"),  icon:"📦" },
+    ...(FEATURES.operationsDocuments ? [{ id:"documents", label:"Documents", icon:"🗂️" }] : []),
     { id:"invoices",   label:t("navInvoices"),   icon:"📑" },
   ]
   const nav = isOwner ? ownerNav : workerNav
@@ -1113,6 +1098,7 @@ function ReceiptModal({ sale, servedByName, capturedAt, draft, onDraftChange, on
           {divider}
           <div style={{ fontSize:10.5, fontWeight:700, color:C.textFaint, textTransform:"uppercase", letterSpacing:0.5, marginBottom:6 }}>{t("receiptServiceProvided")}</div>
           <div style={{ fontSize:14, fontWeight:700, color:C.text }}>{sale?.service || "—"}</div>
+          {saleDescription(sale) && <div style={{ fontSize:12.5, color:C.text, marginTop:4 }}>{saleDescription(sale)}</div>}
           {note && <div style={{ fontSize:12, color:C.textSub, marginTop:4 }}>{note}</div>}
 
           {divider}
@@ -1170,7 +1156,7 @@ function ReceiptModal({ sale, servedByName, capturedAt, draft, onDraftChange, on
 }
 
 /* ── OWNER DASHBOARD ─────────────────────────────────────── */
-function OwnerDashboard({ sales, expenses, services }) {
+function OwnerDashboard({ sales, expenses, services, memberNames = {} }) {
   const { t, lang } = useLanguage()
   const today  = todayStr()
   const month  = thisMonth()
@@ -1262,10 +1248,10 @@ function OwnerDashboard({ sales, expenses, services }) {
       <div style={panelS}>
         <h2 style={{ margin:"0 0 14px", fontSize:14, fontWeight:600, color:C.text }}>{t("recentTransactions")}</h2>
         <div style={{ overflowX:"auto", WebkitOverflowScrolling:"touch" }}>
-        <table className="stv-table" style={{ width:"100%", minWidth:480, borderCollapse:"collapse" }}>
+        <table className="stv-table" style={{ width:"100%", minWidth:640, borderCollapse:"collapse" }}>
           <thead>
             <tr style={{ borderBottom:`1.5px solid ${C.border}` }}>
-              {[t("colDate"),t("colService"),t("colAmount"),t("colNote")].map(h => (
+              {[t("colDate"),t("colService"),"Description",t("colAmount"),t("colRecordedBy")].map(h => (
                 <th key={h} scope="col" style={{ textAlign:"left", padding:"0 0 10px", fontSize:10.5, color:C.textFaint, fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
               ))}
             </tr>
@@ -1273,14 +1259,15 @@ function OwnerDashboard({ sales, expenses, services }) {
           <tbody>
             {recent.map(s => (
               <tr key={s.id} style={{ borderBottom:`1px solid ${C.bg}` }}>
-                <td style={tS}>{s.date?.slice(0, 10)}</td>
+                <td style={{ ...tS, whiteSpace:"nowrap" }}>{s.date?.slice(0, 10)}</td>
                 <td style={tS}><ServiceBadge name={s.service} services={services} /></td>
-                <td style={{ ...tS, fontWeight:600 }}>{TZS(s.amount)}</td>
-                <td style={{ ...tS, color:C.textFaint }}>{s.note || "—"}</td>
+                <td style={{ ...tS, color: saleDescription(s) ? C.text : C.textFaint }}>{saleDescription(s) || s.note || "—"}</td>
+                <td style={{ ...tS, fontWeight:600, whiteSpace:"nowrap" }}>{TZS(s.amount)}</td>
+                <td style={{ ...tS, color:C.textSub }}>{memberNames[s.user_id] || "—"}</td>
               </tr>
             ))}
             {recent.length === 0 && (
-              <tr><td colSpan={4} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>{t("noSalesYet")}</td></tr>
+              <tr><td colSpan={5} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>{t("noSalesYet")}</td></tr>
             )}
           </tbody>
         </table>
@@ -1360,6 +1347,7 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, member
   const { t, lang } = useLanguage()
   const [form, setForm] = useState({
     service: services[0]?.name || "",
+    description: "",
     amount:  "",
     note:    "",
     date:    todayStr(),
@@ -1371,8 +1359,11 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, member
     paymentStatus: "paid", // "paid" | "credit"
     creditPerson:  null,
   })
-  const [filter, setFilter] = useState({ service:"All", from:"", to:"" })
+  const [filter, setFilter] = useState({ service:"All", from:"", to:"", search:"" })
   const [busy, setBusy]     = useState(false)
+  // Owner/Admin only -- RLS gives Workers no UPDATE on sales, so the Edit
+  // button is never shown to them (and would be rejected if forced).
+  const [editingSale, setEditingSale] = useState(null)
 
   // Post-save "Sale saved ✓ [Print Receipt]" prompt -- the just-recorded
   // row plus the current moment (real wall-clock time, unlike the sale's
@@ -1401,10 +1392,15 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, member
     if (!user?.id) { showToast(t("notAuthenticated"), "error"); return }
     if (!form.amount || Number(form.amount) <= 0) { showToast(t("enterValidAmount"), "error"); return }
     if (!safeService) { showToast(t("selectService"), "error"); return }
+    const description = form.description.trim()
+    if (description.length < 3) { showToast("Please describe the sale (e.g. \"Two rides purchased by two guests\").", "error"); return }
+    if (description.length > SALE_DESCRIPTION_MAX) { showToast(`Description is too long (max ${SALE_DESCRIPTION_MAX} characters).`, "error"); return }
     if (form.paymentStatus === "credit" && !form.creditPerson) { showToast("Select or create a person for this credit sale", "error"); return }
+    if (busy) return
     setBusy(true)
     const payload = {
       service: safeService,
+      description,
       amount:  Number(form.amount),
       note:    form.note,
       date:    new Date(form.date + "T12:00:00").toISOString(),
@@ -1430,7 +1426,7 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, member
         person_id: form.creditPerson.id,
         direction: "RECEIVABLE",
         category: safeService,
-        description: form.note || null,
+        description: description || form.note || null,
         original_amount: Number(form.amount),
         source_type: "sale",
         source_id: saved.id,
@@ -1445,7 +1441,7 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, member
     }
 
     setBusy(false)
-    setForm(f => ({ ...f, amount:"", note:"", paymentStatus:"paid", creditPerson:null }))
+    setForm(f => ({ ...f, description:"", amount:"", note:"", paymentStatus:"paid", creditPerson:null }))
     fetchAll()
     showToast(t("saleRecorded"))
     setLastSaved({ sale: saved, capturedAt: new Date() })
@@ -1464,6 +1460,7 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, member
     .filter(s => filter.service === "All" || s.service === filter.service)
     .filter(s => !filter.from || s.date >= filter.from)
     .filter(s => !filter.to   || s.date <= filter.to + "T99")
+    .filter(s => saleMatchesSearch(s, filter.search, memberNames))
     .sort((a, b) => b.date?.localeCompare(a.date))
 
   const total = filtered.reduce((a, b) => a + Number(b.amount || 0), 0)
@@ -1515,6 +1512,23 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, member
           )}
           {!isOwner && <div style={{ marginBottom:16 }} />}
 
+          <label style={lS} htmlFor="sale-description">Sales Description</label>
+          <textarea
+            id="sale-description"
+            rows={2}
+            maxLength={SALE_DESCRIPTION_MAX}
+            placeholder={{
+              Restaurant: "e.g. Two chicken biryani meals and two fresh juices",
+              "Go Kart": "e.g. Two rides purchased by two guests",
+              Paintball: "e.g. Group session for five participants",
+              "Park Entry": "e.g. Family entry tickets for four guests",
+            }[safeService] || "What was sold? e.g. Two rides purchased by two guests"}
+            value={form.description}
+            onChange={e => setForm(f => ({ ...f, description:e.target.value }))}
+            style={{ ...iS, resize:"vertical", marginBottom:4 }}
+          />
+          <div style={{ fontSize:10.5, color:C.textFaint, textAlign:"right", marginBottom:12 }}>{form.description.length}/{SALE_DESCRIPTION_MAX}</div>
+
           <label style={lS} htmlFor="sale-amount">{t("amountTzs")}</label>
           <input id="sale-amount" type="number" placeholder={t("amountPlaceholder")} value={form.amount} onChange={e => setForm(f => ({ ...f, amount:e.target.value }))} style={{ ...iS, fontSize:21, fontWeight:700, marginBottom:14 }} />
 
@@ -1558,6 +1572,10 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, member
               )}
             </div>
           )}
+
+          <div style={{ fontSize:12, color:C.textSub, marginBottom:12 }}>
+            <span style={{ ...lS, display:"inline", marginRight:6 }}>{t("colRecordedBy")}:</span>{displayName}
+          </div>
 
           <button type="button" onClick={submit} disabled={busy} className="stv-btn stv-btn-primary" style={{ ...sB, opacity: busy ? 0.7 : 1 }}>
             {busy ? t("saving") : t("recordSaleBtn")}
@@ -1607,15 +1625,16 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, member
                 </select>
                 <input aria-label={t("fromDate")} type="date" value={filter.from} onChange={e => setFilter(f => ({ ...f, from:e.target.value }))} style={seS} />
                 <input aria-label={t("toDate")} type="date" value={filter.to}   onChange={e => setFilter(f => ({ ...f, to:e.target.value }))}   style={seS} />
-                <button type="button" onClick={() => setFilter({ service:"All", from:"", to:"" })} className="stv-btn stv-btn-ghost" aria-label={t("reset")} style={{ ...seS, background:C.bg, border:"none", cursor:"pointer" }}>{t("reset")}</button>
+                <input aria-label="Search sales descriptions" type="search" placeholder="Search description, service, note…" value={filter.search} onChange={e => setFilter(f => ({ ...f, search:e.target.value }))} style={{ ...seS, flex:"1 1 180px", minWidth:0 }} />
+                <button type="button" onClick={() => setFilter({ service:"All", from:"", to:"", search:"" })} className="stv-btn stv-btn-ghost" aria-label={t("reset")} style={{ ...seS, background:C.bg, border:"none", cursor:"pointer" }}>{t("reset")}</button>
                 <div style={{ marginLeft:"auto", fontWeight:700, color:C.text, fontSize:13 }}>{t("total")}: {TZS(total)}</div>
               </div>
 
               <div style={{ overflowX:"auto", WebkitOverflowScrolling:"touch" }}>
-              <table className="stv-table" style={{ width:"100%", minWidth:560, borderCollapse:"collapse" }}>
+              <table className="stv-table" style={{ width:"100%", minWidth:760, borderCollapse:"collapse" }}>
                 <thead>
                   <tr style={{ borderBottom:`1.5px solid ${C.border}` }}>
-                    {[t("colDate"),t("colService"),t("colAmount"),t("colNote"),...(isOwner ? [t("colRecordedBy")] : []),""].map(h => (
+                    {[t("colDate"),t("colService"),"Description",t("colAmount"),t("colNote"),t("colRecordedBy"),""].map(h => (
                       <th key={h} scope="col" style={{ textAlign:"left", padding:"0 0 10px", fontSize:10.5, color:C.textFaint, fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
                     ))}
                   </tr>
@@ -1623,13 +1642,28 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, member
                 <tbody>
                   {filtered.slice(0, 50).map(s => (
                     <tr key={s.id} style={{ borderBottom:`1px solid ${C.bg}` }}>
-                      <td style={tS}>{s.date?.slice(0, 10)}</td>
+                      <td style={{ ...tS, whiteSpace:"nowrap" }}>{s.date?.slice(0, 10)}</td>
                       <td style={tS}><ServiceBadge name={s.service} services={services} /></td>
-                      <td style={{ ...tS, fontWeight:600 }}>{TZS(s.amount)}</td>
+                      <td style={{ ...tS, maxWidth:280, color: saleDescription(s) ? C.text : C.textFaint }}>{saleDescription(s) || "—"}</td>
+                      <td style={{ ...tS, fontWeight:600, whiteSpace:"nowrap" }}>{TZS(s.amount)}</td>
                       <td style={{ ...tS, color:C.textFaint }}>{s.note || "—"}</td>
-                      {isOwner && <td style={{ ...tS, color:C.textSub }}>{memberNames[s.user_id] || "—"}</td>}
+                      {/* A Worker only ever receives their own rows (RLS), so
+                          their own name is the correct recorder for each one. */}
+                      <td style={{ ...tS, color:C.textSub }}>{isOwner ? (memberNames[s.user_id] || "—") : displayName}</td>
                       <td style={tS}>
                         <div style={{ display:"flex", gap:6 }}>
+                          {isOwner && (
+                            <button
+                              type="button"
+                              onClick={() => setEditingSale(s)}
+                              className="stv-btn stv-btn-secondary"
+                              aria-label="Edit sale"
+                              title="Edit sale"
+                              style={{ background:C.surface, color:C.textSub, border:`1px solid ${C.border}`, padding:"5px 9px", borderRadius:RADIUS.sm, fontSize:11.5, cursor:"pointer", fontWeight:600 }}
+                            >
+                              Edit
+                            </button>
+                          )}
                           <button
                             type="button"
                             onClick={() => setReceiptTarget({ sale: s })}
@@ -1656,7 +1690,7 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, member
                     </tr>
                   ))}
                   {filtered.length === 0 && (
-                    <tr><td colSpan={isOwner ? 6 : 5} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>{t("noSalesYet")}</td></tr>
+                    <tr><td colSpan={7} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>{t("noSalesYet")}</td></tr>
                   )}
                 </tbody>
               </table>
@@ -1676,6 +1710,80 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, member
           onClose={() => setReceiptTarget(null)}
         />
       )}
+
+      {editingSale && (
+        <EditSaleModal
+          sale={editingSale} services={services} showToast={showToast}
+          onClose={() => setEditingSale(null)}
+          onSaved={() => { setEditingSale(null); fetchAll() }}
+        />
+      )}
+    </div>
+  )
+}
+
+/* ── EDIT SALE (Owner/Admin) ─────────────────────────────────
+   Only service / description / amount / date / note are editable.
+   user_id (Recorded By), payment status and any Debt & Credit link are
+   deliberately left as they are. RLS (sales_stvpos_admin_all) is the real
+   gate -- Workers have no UPDATE policy on sales. */
+function EditSaleModal({ sale, services, showToast, onClose, onSaved }) {
+  const [form, setForm] = useState({
+    service: sale.service || "",
+    description: sale.description || "",
+    amount: String(sale.amount ?? ""),
+    date: (sale.date || "").slice(0, 10),
+    note: sale.note || "",
+  })
+  const [busy, setBusy] = useState(false)
+  const serviceNames = Array.from(new Set([...services.map(s => s.name), sale.service].filter(Boolean)))
+
+  const save = async () => {
+    const description = form.description.trim()
+    if (!form.service) { showToast("Select a service.", "error"); return }
+    if (!form.amount || Number(form.amount) <= 0) { showToast("Enter a valid amount.", "error"); return }
+    if (!form.date) { showToast("Choose a date.", "error"); return }
+    if (description.length > SALE_DESCRIPTION_MAX) { showToast(`Description is too long (max ${SALE_DESCRIPTION_MAX} characters).`, "error"); return }
+    setBusy(true)
+    const patch = {
+      service: form.service,
+      description: description || null,
+      note: form.note,
+    }
+    if (!sale.debt_credit_record_id) patch.amount = Number(form.amount)
+    // Only rewrite the timestamp if the calendar date actually changed, so
+    // an untouched historical row keeps its original stored value.
+    if (form.date !== (sale.date || "").slice(0, 10)) patch.date = new Date(form.date + "T12:00:00").toISOString()
+    const { error } = await supabase.from("sales").update(patch).eq("id", sale.id)
+    setBusy(false)
+    if (error) { showToast(error.message, "error"); return }
+    showToast("Sale updated ✓")
+    onSaved()
+  }
+
+  return (
+    <div onClick={onClose} style={{ position:"fixed", inset:0, background:"rgba(20,20,30,0.5)", zIndex:1000, display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}>
+      <div onClick={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="edit-sale-title"
+        style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:RADIUS.lg, padding:"clamp(20px,5vw,28px)", width:"min(94vw, 440px)", maxHeight:"92vh", overflowY:"auto", boxShadow:SHADOW.modal }}>
+        <h2 id="edit-sale-title" style={{ margin:"0 0 16px", fontFamily:FONT, fontWeight:700, fontSize:16, color:C.text }}>Edit sale</h2>
+        <label style={lS} htmlFor="es-service">Service</label>
+        <select id="es-service" value={form.service} onChange={e => setForm(f => ({ ...f, service:e.target.value }))} style={{ ...iS, marginBottom:12 }}>
+          {serviceNames.map(n => <option key={n} value={n}>{n}</option>)}
+        </select>
+        <label style={lS} htmlFor="es-description">Sales Description</label>
+        <textarea id="es-description" rows={3} maxLength={SALE_DESCRIPTION_MAX} value={form.description} onChange={e => setForm(f => ({ ...f, description:e.target.value }))} style={{ ...iS, resize:"vertical", marginBottom:12 }} />
+        <label style={lS} htmlFor="es-amount">Amount (TZS)</label>
+        <input id="es-amount" type="number" min="0" value={form.amount} disabled={!!sale.debt_credit_record_id} onChange={e => setForm(f => ({ ...f, amount:e.target.value }))} style={{ ...iS, marginBottom: sale.debt_credit_record_id ? 4 : 12 }} />
+        {sale.debt_credit_record_id && <p style={{ fontSize:11.5, color:C.textFaint, margin:"0 0 12px" }}>Amount is locked because this credit sale is linked to a Debt &amp; Credit record.</p>}
+        <label style={lS} htmlFor="es-date">Date</label>
+        <input id="es-date" type="date" value={form.date} onChange={e => setForm(f => ({ ...f, date:e.target.value }))} style={{ ...iS, marginBottom:12 }} />
+        <label style={lS} htmlFor="es-note">Note</label>
+        <input id="es-note" value={form.note} onChange={e => setForm(f => ({ ...f, note:e.target.value }))} style={{ ...iS, marginBottom:18 }} />
+        <div style={{ display:"flex", gap:10 }}>
+          <button type="button" onClick={onClose} className="stv-btn stv-btn-secondary" style={{ flex:1, padding:"12px", borderRadius:RADIUS.sm, border:`1px solid ${C.border}`, background:C.surface, color:C.text, cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5 }}>Cancel</button>
+          <button type="button" onClick={save} disabled={busy} className="stv-btn stv-btn-primary" style={{ flex:1, padding:"12px", borderRadius:RADIUS.sm, border:"none", background:C.accentStrong, color:"#fff", cursor:"pointer", fontFamily:FONT, fontWeight:600, fontSize:13.5, opacity: busy ? 0.7 : 1 }}>{busy ? "Saving…" : "Save changes"}</button>
+        </div>
+      </div>
     </div>
   )
 }
@@ -2029,7 +2137,7 @@ function StatusBadge({ status }) {
 }
 
 /* ── INVENTORY DASHBOARD ─────────────────────────────────── */
-function InventoryPage({ user, isOwner, showToast }) {
+function InventoryPage({ user, isOwner, showToast, onOpenDocuments }) {
   const { t } = useLanguage()
   const [categories, setCategories] = useState([])
   const [items,      setItems]      = useState([])
@@ -2085,8 +2193,18 @@ function InventoryPage({ user, isOwner, showToast }) {
 
   return (
     <div>
-      <h1 style={pT}>{t("inventoryTitle")}</h1>
-      <p style={{ margin:"0 0 24px", color:C.textFaint, fontSize:13 }}>{t("inventoryDashboardSubtitle")}</p>
+      <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", gap:12, flexWrap:"wrap", marginBottom:24 }}>
+        <div>
+          <h1 style={pT}>{t("inventoryTitle")}</h1>
+          <p style={{ margin:0, color:C.textFaint, fontSize:13 }}>{t("inventoryDashboardSubtitle")}</p>
+        </div>
+        {onOpenDocuments && (
+          <button type="button" onClick={onOpenDocuments} className="stv-btn stv-btn-secondary"
+            style={{ background:C.surface, color:C.text, border:`1.5px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"10px 16px", fontSize:13, fontWeight:600, cursor:"pointer", fontFamily:FONT }}>
+            📄 Restock Requests &amp; Inventory Checklists
+          </button>
+        )}
+      </div>
 
       <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(220px, 1fr))", gap:16 }}>
         {categories.map(cat => {
@@ -3143,14 +3261,21 @@ function formatDMY(dateStr) {
 // sorting deterministically keeps "sales before expenses" for same-day
 // records without any extra tie-break bookkeeping.
 function buildTaxReportRows(filtSales, filtExp) {
-  const saleRows = filtSales.map((s) => ({
-    sortKey:  (s.date || "").slice(0, 10),
-    date:     formatDMY(s.date),
-    amount:   Number(s.amount) || 0,
-    sales:    Number(s.amount) || 0,
-    expenses: null,
-    note:     s.service || "Sale",
-  }))
+  // Sales note mirrors the expense "Category — Item" style below:
+  // "Service — Description" (just the service for historical sales that
+  // have no description).
+  const saleRows = filtSales.map((s) => {
+    const service = (s.service || "").trim()
+    const description = saleDescription(s)
+    return {
+      sortKey:  (s.date || "").slice(0, 10),
+      date:     formatDMY(s.date),
+      amount:   Number(s.amount) || 0,
+      sales:    Number(s.amount) || 0,
+      expenses: null,
+      note:     service && description ? `${service} — ${description}` : (service || description || "Sale"),
+    }
+  })
   const expenseRows = filtExp.map((e) => {
     const category = (e.category || "").trim()
     const item      = (e.item || "").trim()
@@ -3349,7 +3474,7 @@ function buildTaxReportWorkbook({ rows, totalSales, totalExpenses, fromDisplay, 
    panel below) stays exactly as it was, and a brand-new "Weekly Manager's
    Report" builder is added alongside it via a simple tab switch. Neither
    area's code reaches into the other's state. */
-function ReportsPage({ sales, expenses, services, user, isOwner, displayName, showToast }) {
+function ReportsPage({ sales, expenses, services, user, isOwner, displayName, showToast, memberNames = {} }) {
   const [reportsTab, setReportsTab] = useState("analytics") // "analytics" | "weekly"
 
   const tabBtnS = (active) => ({
@@ -3371,18 +3496,23 @@ function ReportsPage({ sales, expenses, services, user, isOwner, displayName, sh
         <button type="button" onClick={() => setReportsTab("weekly")} style={tabBtnS(reportsTab === "weekly")}>📋 Weekly Manager's Report</button>
       </div>
       {reportsTab === "analytics" ? (
-        <ReportsAnalyticsPanel sales={sales} expenses={expenses} services={services} showToast={showToast} />
+        <ReportsAnalyticsPanel sales={sales} expenses={expenses} services={services} showToast={showToast} memberNames={memberNames} displayName={displayName} />
       ) : (
-        <WeeklyReportsPanel sales={sales} expenses={expenses} user={user} isOwner={isOwner} displayName={displayName} showToast={showToast} />
+        <WeeklyReportsPanel sales={sales} expenses={expenses} user={user} isOwner={isOwner} displayName={displayName} showToast={showToast} memberNames={memberNames} />
       )}
     </div>
   )
 }
 
-function ReportsAnalyticsPanel({ sales, expenses, services, showToast }) {
+function ReportsAnalyticsPanel({ sales, expenses, services, showToast, memberNames = {}, displayName }) {
   const { t } = useLanguage()
   const [range, setRange]     = useState({ from:"", to:"" })
   const [service, setService] = useState("All")
+  const [preset, setPreset]   = useState("")
+  const [txSearch, setTxSearch] = useState("")
+  const [txLimit, setTxLimit] = useState(100)
+  const [pdfBusy, setPdfBusy] = useState(false)
+  const applyPreset = (p) => { setPreset(p); setRange(presetRange(p)) }
 
   const getColor = (name) => services.find(s => s.name === name)?.color || "#aaa"
 
@@ -3419,28 +3549,73 @@ function ReportsAnalyticsPanel({ sales, expenses, services, showToast }) {
   const totalSales = filtSales.reduce((a, b) => a + Number(b.amount || 0), 0)
   const totalExp   = filtExp.reduce((a, b) => a + Number(b.cost || 0), 0)
 
+  // Transaction-level rows shared by the on-screen table and every export,
+  // so Date | Service | Description | Amount | Recorded By is identical
+  // everywhere.
+  const salesTx = buildSalesTransactionRows(filtSales, memberNames)
+  const expenseTx = buildExpenseTransactionRows(filtExp, memberNames)
+  const fileSuffix = range.from || range.to ? `_${range.from || "start"}_to_${range.to || "today"}` : ""
+
   const exportCSV = () => {
     if (!filtSales.length && !filtExp.length) { showToast(t("noDataToExport"), "error"); return }
+    // Properly escaped (descriptions can contain commas, quotes and line
+    // breaks), and guarded against spreadsheet formula injection.
     const rows = [
-      ["Date","Service","Amount","Note"],
-      ...filtSales.map(s => [s.date?.slice(0, 10), s.service, s.amount, s.note || ""])
+      ["Date","Service","Description","Amount (TZS)","Recorded By","Payment","Note"],
+      ...salesTx.map(r => [r.date, r.service, r.description, r.amount, r.recordedBy, r.paymentStatus, r.note]),
     ]
-    const blob = new Blob([rows.map(r => r.join(",")).join("\n")], { type:"text/csv" })
-    const a = document.createElement("a")
-    a.href = URL.createObjectURL(blob)
-    a.download = "swahili_sales.csv"
-    a.click()
+    downloadBlob(new Blob([toCsv(rows)], { type:"text/csv;charset=utf-8" }), `swahili_sales${fileSuffix}.csv`)
     showToast(t("csvExportedToast"))
   }
 
   const exportExcel = () => {
     if (!filtSales.length && !filtExp.length) { showToast(t("noDataToExport"), "error"); return }
     const wb = XLSX.utils.book_new()
-    if (filtSales.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(filtSales), "Sales")
-    if (filtExp.length)   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(filtExp),   "Expenses")
-    XLSX.writeFile(wb, "report.xlsx")
+    if (salesTx.length) {
+      const ws = XLSX.utils.aoa_to_sheet([
+        ["Date","Service","Description","Amount (TZS)","Recorded By","Payment","Note"],
+        ...salesTx.map(r => [r.date, r.service, r.description, r.amount, r.recordedBy, r.paymentStatus, r.note]),
+        [],
+        ["","","TOTAL", salesTx.reduce((a, r) => a + r.amount, 0)],
+      ])
+      ws["!cols"] = [{ wch: 12 }, { wch: 16 }, { wch: 48 }, { wch: 14 }, { wch: 20 }, { wch: 10 }, { wch: 28 }]
+      XLSX.utils.book_append_sheet(wb, ws, "Sales")
+    }
+    if (expenseTx.length) {
+      const ws = XLSX.utils.aoa_to_sheet([
+        ["Date","Category","Item / Description","Cost (TZS)","Recorded By","Payment","Note"],
+        ...expenseTx.map(r => [r.date, r.category, r.item, r.amount, r.recordedBy, r.paymentStatus, r.note]),
+        [],
+        ["","","TOTAL", expenseTx.reduce((a, r) => a + r.amount, 0)],
+      ])
+      ws["!cols"] = [{ wch: 12 }, { wch: 16 }, { wch: 40 }, { wch: 14 }, { wch: 20 }, { wch: 10 }, { wch: 28 }]
+      XLSX.utils.book_append_sheet(wb, ws, "Expenses")
+    }
+    XLSX.writeFile(wb, `report${fileSuffix}.xlsx`)
     showToast(t("excelExportedToast"))
   }
+
+  const exportPdf = async () => {
+    if (!filtSales.length && !filtExp.length) { showToast(t("noDataToExport"), "error"); return }
+    setPdfBusy(true)
+    try {
+      const title = preset === "today" ? "Daily Sales Report" : preset === "week" ? "Weekly Sales Report" : preset === "month" ? "Monthly Sales Report" : "Sales Report"
+      const { blob, url } = await getSalesReportPdfBlobUrl({
+        title, from: range.from, to: range.to, serviceFilter: service,
+        salesRows: salesTx, expenseRows: expenseTx, generatedBy: displayName,
+      })
+      downloadBlob(blob, `Swahili_Tent_Village_${title.replace(/\s+/g, "_")}${fileSuffix}.pdf`)
+      URL.revokeObjectURL(url)
+      showToast("PDF report downloaded ✓")
+    } catch (e) {
+      showToast(e.message || "Could not generate the PDF.", "error")
+    } finally {
+      setPdfBusy(false)
+    }
+  }
+
+  const txNeedle = txSearch.trim().toLowerCase()
+  const visibleTx = [...salesTx].reverse().filter(r => !txNeedle || [r.service, r.description, r.note, r.recordedBy].some(v => String(v).toLowerCase().includes(txNeedle)))
 
   // Clean, accountant-facing export for ZRA tax return preparation -- not
   // an official ZRA filing format, just a readable Date/Amount/Sales/
@@ -3470,6 +3645,7 @@ function ReportsAnalyticsPanel({ sales, expenses, services, showToast }) {
         <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
           <button type="button" onClick={exportCSV}   className="stv-btn stv-btn-secondary" style={{ background:C.surface, color:C.text, border:`1.5px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"10px 16px", fontSize:13, fontWeight:600, cursor:"pointer", fontFamily:FONT }}>{t("exportCsv")}</button>
           <button type="button" onClick={exportExcel} className="stv-btn stv-btn-secondary" style={{ background:C.surface, color:C.text, border:`1.5px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"10px 16px", fontSize:13, fontWeight:600, cursor:"pointer", fontFamily:FONT }}>{t("exportExcel")}</button>
+          <button type="button" onClick={exportPdf} disabled={pdfBusy} className="stv-btn stv-btn-secondary" style={{ background:C.surface, color:C.text, border:`1.5px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"10px 16px", fontSize:13, fontWeight:600, cursor:"pointer", fontFamily:FONT, opacity: pdfBusy ? 0.6 : 1 }}>{pdfBusy ? "Generating…" : "↓ PDF"}</button>
           <button
             type="button"
             onClick={exportTaxExcel}
@@ -3488,10 +3664,17 @@ function ReportsAnalyticsPanel({ sales, expenses, services, showToast }) {
           <option value="All">{t("allServices")}</option>
           {services.map(s => <option key={s.id} value={s.name}>{s.name}</option>)}
         </select>
-        <input aria-label={t("fromDate")} type="date" value={range.from} onChange={e => setRange(r => ({ ...r, from:e.target.value }))} style={seS} />
-        <input aria-label={t("toDate")} type="date" value={range.to}   onChange={e => setRange(r => ({ ...r, to:e.target.value }))}   style={seS} />
-        <button type="button" onClick={() => setRange({ from:"", to:"" })} className="stv-btn stv-btn-ghost" aria-label={t("resetFilters")} style={{ ...seS, background:C.bg, border:"none", cursor:"pointer" }}>{t("reset")}</button>
+        {[["today","Today"],["week","This Week"],["month","This Month"]].map(([p, label]) => (
+          <button key={p} type="button" aria-pressed={preset === p} onClick={() => applyPreset(p)}
+            style={{ ...seS, cursor:"pointer", fontWeight:600, background: preset === p ? C.accentStrong : C.surface, color: preset === p ? "#fff" : C.textSub, borderColor: preset === p ? C.accentStrong : C.border }}>
+            {label}
+          </button>
+        ))}
+        <input aria-label={t("fromDate")} type="date" value={range.from} onChange={e => { setPreset(""); setRange(r => ({ ...r, from:e.target.value })) }} style={seS} />
+        <input aria-label={t("toDate")} type="date" value={range.to}   onChange={e => { setPreset(""); setRange(r => ({ ...r, to:e.target.value })) }}   style={seS} />
+        <button type="button" onClick={() => { setPreset(""); setRange({ from:"", to:"" }) }} className="stv-btn stv-btn-ghost" aria-label={t("resetFilters")} style={{ ...seS, background:C.bg, border:"none", cursor:"pointer" }}>{t("reset")}</button>
       </div>
+      <p style={{ margin:`-${SPACE.sm}px 0 ${SPACE.lg}px`, fontSize:12, color:C.textFaint }}>Period: {periodLabel(range.from, range.to)}</p>
 
       {/* Stat cards */}
       <div style={{ display:"grid", gap:SPACE.md, marginBottom:SPACE.xl, gridTemplateColumns:"repeat(auto-fit, minmax(200px, 1fr))" }}>
@@ -3565,6 +3748,52 @@ function ReportsAnalyticsPanel({ sales, expenses, services, showToast }) {
             <div style={{ textAlign:"center", color:C.textFaint, fontSize:13, paddingTop:40 }}>{t("noData")}</div>
           )}
         </div>
+      </div>
+
+      {/* Supporting transaction detail -- charts above stay aggregate-only;
+          individual sales (with descriptions) live here and in the exports. */}
+      <div style={{ ...panelS, marginTop:SPACE.md }}>
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:10, flexWrap:"wrap", marginBottom:12 }}>
+          <h2 style={{ margin:0, fontSize:14, fontWeight:600, color:C.text }}>Sales Transactions ({salesTx.length})</h2>
+          <input type="search" aria-label="Search transactions" placeholder="Search description, service, recorder…" value={txSearch} onChange={e => setTxSearch(e.target.value)} style={{ ...seS, flex:"0 1 280px", minWidth:0 }} />
+        </div>
+        <div style={{ overflowX:"auto", WebkitOverflowScrolling:"touch" }}>
+          <table className="stv-table" style={{ width:"100%", minWidth:680, borderCollapse:"collapse" }}>
+            <thead>
+              <tr style={{ borderBottom:`1.5px solid ${C.border}` }}>
+                {["Date","Service","Description","Amount","Recorded By"].map(h => (
+                  <th key={h} scope="col" style={{ textAlign: h === "Amount" ? "right" : "left", padding:"0 12px 10px 0", fontSize:10.5, color:C.textFaint, fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {visibleTx.slice(0, txLimit).map(r => (
+                <tr key={r.id} style={{ borderBottom:`1px solid ${C.bg}` }}>
+                  <td style={{ ...tS, whiteSpace:"nowrap" }}>{r.date}</td>
+                  <td style={tS}><ServiceBadge name={r.service} services={services} /></td>
+                  <td style={{ ...tS, color: r.description ? C.text : C.textFaint }}>{r.description || "—"}</td>
+                  <td style={{ ...tS, textAlign:"right", fontWeight:600, whiteSpace:"nowrap" }}>{TZS(r.amount)}</td>
+                  <td style={{ ...tS, color:C.textSub }}>{r.recordedBy || "—"}</td>
+                </tr>
+              ))}
+              {visibleTx.length === 0 && (
+                <tr><td colSpan={5} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:20 }}>{t("noData")}</td></tr>
+              )}
+            </tbody>
+            {visibleTx.length > 0 && (
+              <tfoot>
+                <tr style={{ borderTop:`1.5px solid ${C.border}` }}>
+                  <td colSpan={3} style={{ ...tS, fontWeight:700 }}>Total{txNeedle ? " (matching search)" : ""}</td>
+                  <td style={{ ...tS, textAlign:"right", fontWeight:800 }}>{TZS(visibleTx.reduce((a, r) => a + r.amount, 0))}</td>
+                  <td />
+                </tr>
+              </tfoot>
+            )}
+          </table>
+        </div>
+        {visibleTx.length > txLimit && (
+          <button type="button" onClick={() => setTxLimit(l => l + 200)} style={{ marginTop:10, ...seS, cursor:"pointer" }}>Show more ({visibleTx.length - txLimit} remaining)</button>
+        )}
       </div>
     </div>
   )
@@ -4395,16 +4624,6 @@ function InvoicesPage({ user, isOwner, displayName, showToast }) {
   )
 }
 
-/* ── SHARED STYLE CONSTANTS ──────────────────────────────── */
-const iS    = { width:"100%", padding:"11px 14px", border:`1.5px solid ${C.border}`, borderRadius:RADIUS.sm, fontSize:14, outline:"none", background:C.surface, fontFamily:FONT, color:C.text }
-const seS   = { padding:"9px 12px", border:`1.5px solid ${C.border}`, borderRadius:RADIUS.sm, fontSize:12.5, background:C.surface, fontFamily:FONT, color:C.textSub, fontWeight:500 }
-const lS    = { display:"block", fontSize:11, fontWeight:600, color:C.textSub, marginBottom:6, textTransform:"uppercase", letterSpacing:.5 }
-const fC    = { background:C.surface, borderRadius:RADIUS.md, padding:SPACE.xl, flexShrink:0, border:`1px solid ${C.border}`, boxShadow:SHADOW.card }
-const fTi   = { margin:"0 0 20px", fontFamily:FONT, fontWeight:700, fontSize:"clamp(15px, 2.2vw, 17px)", color:C.text, letterSpacing:"-0.01em" }
-const sB    = { width:"100%", padding:"13px", background:C.accentStrong, color:"#fff", border:"none", borderRadius:RADIUS.sm, fontSize:14.5, fontWeight:600, cursor:"pointer", fontFamily:FONT }
-const tS    = { padding:"12px 0", paddingRight:12, fontSize:13, color:C.text, verticalAlign:"middle" }
-const pT    = { margin:"0 0 6px", fontFamily:FONT, fontWeight:700, fontSize:"clamp(19px, 3.4vw, 24px)", color:C.text, letterSpacing:"-0.01em" }
-const panelS = { background:C.surface, borderRadius:RADIUS.md, padding:SPACE.xl, border:`1px solid ${C.border}`, boxShadow:SHADOW.card }
 
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -8347,7 +8566,7 @@ const WR_COMPLIANCE_STATUSES = ["Compliant", "Pending", "Overdue", "N/A"]
 const WR_ACTION_STATUSES = ["Pending", "In Progress", "Completed", "Delayed"]
 
 /* ── Weekly Reports: list/history + entry point for the editor ────────── */
-function WeeklyReportsPanel({ sales, expenses, user, isOwner, displayName, showToast }) {
+function WeeklyReportsPanel({ sales, expenses, user, isOwner, displayName, showToast, memberNames = {} }) {
   const [view, setView] = useState("history") // "history" | "editor"
   const [reports, setReports] = useState([])
   const [loading, setLoading] = useState(true)
@@ -8393,7 +8612,7 @@ function WeeklyReportsPanel({ sales, expenses, user, isOwner, displayName, showT
   function createDraftAndEdit() {
     if (!newFrom || !newTo) { showToast("Choose both a From and To date.", "error"); return }
     if (newFrom > newTo) { showToast("The From date must be before the To date.", "error"); return }
-    const draft = draftReportFromPeriod({ from: newFrom, to: newTo, sales, expenses, preparedBy: displayName || "" })
+    const draft = draftReportFromPeriod({ from: newFrom, to: newTo, sales, expenses, preparedBy: displayName || "", memberNames })
     setActiveReport(draft)
     setActiveReadOnly(false)
     setShowNewForm(false)
@@ -8451,6 +8670,7 @@ function WeeklyReportsPanel({ sales, expenses, user, isOwner, displayName, showT
         readOnly={activeReadOnly}
         sales={sales}
         expenses={expenses}
+        memberNames={memberNames}
         user={user}
         displayName={displayName}
         showToast={showToast}
@@ -8546,7 +8766,7 @@ function WeeklyReportsPanel({ sales, expenses, user, isOwner, displayName, showT
 const wrGhostBtnS = { background:C.surface, border:`1.5px solid ${C.border}`, borderRadius:RADIUS.sm, padding:"7px 13px", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:FONT, color:C.text }
 
 /* ── Weekly Report editor: the big multi-section form ──────────────────── */
-function WeeklyReportEditor({ initialReport, readOnly, sales, expenses, user, displayName, showToast, onBack, onSaved }) {
+function WeeklyReportEditor({ initialReport, readOnly, sales, expenses, memberNames = {}, user, displayName, showToast, onBack, onSaved }) {
   const [report, setReport] = useState(initialReport)
   const [titleTouched, setTitleTouched] = useState(!!initialReport.id)
   const [saving, setSaving] = useState(false)
@@ -8571,7 +8791,7 @@ function WeeklyReportEditor({ initialReport, readOnly, sales, expenses, user, di
   function refetchFromPos() {
     if (!report.report_from || !report.report_to) { showToast("Choose both a From and To date first.", "error"); return }
     if (!confirm("This replaces the current Sales Breakdown and Expense Breakdown with fresh data from the POS for the selected period, and recalculates Gross Sales / Operating Expenses. Continue?")) return
-    const salesBreakdown = buildSalesSnapshot(sales, report.report_from, report.report_to)
+    const salesBreakdown = buildSalesSnapshot(sales, report.report_from, report.report_to, memberNames)
     const expenseBreakdown = buildExpenseSnapshot(expenses, report.report_from, report.report_to)
     const gross = sumAmounts(salesBreakdown)
     const opex = sumAmounts(expenseBreakdown)
@@ -8618,7 +8838,7 @@ function WeeklyReportEditor({ initialReport, readOnly, sales, expenses, user, di
       compliance: report.compliance || "",
       challenges: report.challenges || "",
       manager_comments: report.manager_comments || "",
-      sales_breakdown: wrCleanMoneyRows(report.sales_breakdown, ["date", "item"]),
+      sales_breakdown: wrCleanMoneyRows(report.sales_breakdown, ["date", "item", "description"]),
       expense_breakdown: wrCleanMoneyRows(report.expense_breakdown, ["date", "note"]),
       capital_movements: capitalMovements,
       other_cash_movements: otherCashMovements,
@@ -8784,11 +9004,13 @@ function WeeklyReportEditor({ initialReport, readOnly, sales, expenses, user, di
           onChange={rows => updateArray("sales_breakdown", rows)}
           disabled={disabled}
           addLabel="+ Add Sale Row"
-          emptyRow={{ date: report.report_to || todayStr(), item: "", amount: "" }}
+          emptyRow={{ date: report.report_to || todayStr(), item: "", description: "", amount: "", recorded_by: displayName || "" }}
           columns={[
             { key:"date", label:"Date", type:"date" },
             { key:"item", label:"Item / Service", type:"text", placeholder:"e.g. Restaurant" },
+            { key:"description", label:"Description", type:"text", placeholder:"e.g. Two rides for two guests" },
             { key:"amount", label:"Amount (TZS)", type:"number" },
+            { key:"recorded_by", label:"Recorded By", type:"text" },
           ]}
         />
       </div>
