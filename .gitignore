@@ -1,5 +1,12 @@
 node_modules
 dist
-.env
-.env.local
 .DS_Store
+
+# Environment files -- NEVER commit. Covers .env, .env.local, .env.staging,
+# .env.production, .env.staging.local, etc. Only the placeholder templates
+# (*.example) may be committed.
+.env
+.env.*
+!.env.example
+!.env.staging.example
+dist-staging

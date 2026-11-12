@@ -87,10 +87,19 @@ function inRange(dateStr, from, to) {
  * snapshot: { date, item, amount }. `item` here is the sale's `service`
  * (e.g. "Restaurant", "Go Kart") -- the actual existing POS service
  * names, not anything invented for this report. */
-export function buildSalesSnapshot(sales, from, to) {
+export function buildSalesSnapshot(sales, from, to, memberNames = {}) {
+  // `description` / `recorded_by` were added with the Sales Description
+  // upgrade. Reports saved before then simply don't have these keys and
+  // render them blank -- nothing about an old snapshot is rewritten.
   return (sales || [])
     .filter(s => inRange(s.date, from, to))
-    .map(s => ({ date: (s.date || "").slice(0, 10), item: s.service || "", amount: Number(s.amount || 0) }))
+    .map(s => ({
+      date: (s.date || "").slice(0, 10),
+      item: s.service || "",
+      description: String(s.description ?? "").trim(),
+      amount: Number(s.amount || 0),
+      recorded_by: memberNames[s.user_id] || "",
+    }))
     .sort((a, b) => a.date.localeCompare(b.date))
 }
 
@@ -173,8 +182,8 @@ export async function deleteReport(id) {
  * reporting period and the already-fetched POS sales/expenses arrays
  * (see step-by-step auto-population order in the module's brief). Nothing
  * here is written to Supabase yet -- the caller reviews/edits, then saves. */
-export function draftReportFromPeriod({ from, to, sales, expenses, preparedBy }) {
-  const salesBreakdown = buildSalesSnapshot(sales, from, to)
+export function draftReportFromPeriod({ from, to, sales, expenses, preparedBy, memberNames = {} }) {
+  const salesBreakdown = buildSalesSnapshot(sales, from, to, memberNames)
   const expenseBreakdown = buildExpenseSnapshot(expenses, from, to)
   const grossSales = sumAmounts(salesBreakdown)
   const operatingExpenses = sumAmounts(expenseBreakdown)
