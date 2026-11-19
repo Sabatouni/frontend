@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { FONT, RADIUS, SPACE, C, SHADOW, iS, seS, lS, fTi, tS, pT, panelS } from "./ui/theme"
 import {
   MARINE_BRAND, DOC_TYPES, DOC_TYPE_ORDER, STATUSES, CONVERSION_TARGETS, UNITS, CATALOG_CATEGORIES, CUSTOMER_FIELDS,
-  CONTACT_TYPES, DEFAULT_SETTINGS, computeMarineTotals, lineAmount, formatAmount, formatTZS, formatQty,
+  CONTACT_TYPES, DEFAULT_SETTINGS, canAccessMarine, computeMarineTotals, lineAmount, formatAmount, formatTZS, formatQty,
   emptyItem, emptyScope, emptyDocumentForm, formFromDocument, bankFromSettings, validateDraft, validateForIssue,
   moveInList, newKey, customerRows,
   fetchSettings, updateSettings, listDocuments, getDocumentBundle, saveDraft, issueDocument, convertDocument,
@@ -15,11 +15,11 @@ import { downloadBlob } from "./lib/salesReporting"
  * MARINE INVOICING -- Swahili Marine & Diving (Marine Services Division of
  * GEC Limited): quotations, proforma invoices, final invoices.
  *
- * Access: same three-layer gate as Debt & Credit -- Sidebar nav (owner/admin
- * only), App()'s route gate, the isOwner check below -- with the real
- * boundary in the marine_* RLS policies and SECURITY DEFINER RPCs. Global
- * settings can only be changed by the Owner role (RLS); Admins see them
- * read-only.
+ * Access: STRICTLY Owner-only (not Admin). Three UI layers -- the Sidebar
+ * entry, App()'s route gate and the check below -- all use
+ * canAccessMarine(role); the real boundary is the owner-only marine_* RLS
+ * policies and the Owner check inside every Marine RPC (migration
+ * 20261119120000_smd_marine_invoicing_owner_only.sql).
  */
 
 const NAVY = "#0B2A4A"
@@ -169,7 +169,7 @@ function pdfArgsFromBundle(bundle, settings) {
 }
 
 // ── Page ──────────────────────────────────────────────────────────────
-export default function MarineInvoicingPage({ user, isOwner, role, showToast: rawToast }) {
+export default function MarineInvoicingPage({ user, role, showToast: rawToast }) {
   // App() recreates showToast on every render (it re-renders on a 5s data
   // poll); a stable wrapper keeps the list effects below from refetching.
   const toastRef = useRef(rawToast)
@@ -186,10 +186,11 @@ export default function MarineInvoicingPage({ user, isOwner, role, showToast: ra
     try { setSettings(await fetchSettings()); setSettingsErr("") }
     catch (e) { setSettings({ ...DEFAULT_SETTINGS }); setSettingsErr(e.message) }
   }, [])
-  useEffect(() => { if (isOwner) loadSettings() }, [isOwner, loadSettings])
+  const allowed = canAccessMarine(role)
+  useEffect(() => { if (allowed) loadSettings() }, [allowed, loadSettings])
 
-  // Layer 3 of the access gate (see header comment).
-  if (!isOwner) return null
+  // Layer 3 of the access gate (see header comment). Strictly Owner.
+  if (!allowed) return null
 
   const openEditor = (opts) => { setEditor({ nonce: newKey(), type: "QUOTATION", ...opts }); setTab("create"); setViewId(null) }
   const bump = () => setRefreshKey(k => k + 1)
@@ -228,7 +229,7 @@ export default function MarineInvoicingPage({ user, isOwner, role, showToast: ra
           {tab === "history" && <DocumentHistory key={`h-${refreshKey}`} onView={setViewId} showToast={showToast} />}
           {tab === "catalog" && <CatalogLibrary showToast={showToast} />}
           {tab === "scope" && <ScopeLibrary showToast={showToast} />}
-          {tab === "settings" && <SettingsPanel settings={settings} canEdit={role === "owner"} showToast={showToast} onSaved={loadSettings} />}
+          {tab === "settings" && <SettingsPanel settings={settings} canEdit={canAccessMarine(role)} showToast={showToast} onSaved={loadSettings} />}
         </>
       )}
 
