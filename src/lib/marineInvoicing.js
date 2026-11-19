@@ -22,6 +22,18 @@ export const MARINE_BRAND = Object.freeze({
   logoUrl: "/brand/gec-logo.jpg",
 })
 
+/**
+ * Marine Invoicing is STRICTLY Owner-only (migration
+ * 20261119120000_smd_marine_invoicing_owner_only.sql). Used by the sidebar,
+ * App()'s route gate and the page itself. Deliberately an exact match on the
+ * real stv-pos role slug -- NOT isOwner, which is true for Admin and every
+ * other role at or above admin level. RLS + the RPC role checks remain the
+ * actual security boundary; this only decides what the UI shows.
+ */
+export function canAccessMarine(role) {
+  return role === "owner"
+}
+
 export const DOC_TYPES = Object.freeze({
   QUOTATION: { id: "QUOTATION", label: "Quotation", title: "QUOTATION", prefix: "SMD-QTN", short: "QTN" },
   PROFORMA:  { id: "PROFORMA",  label: "Proforma Invoice", title: "PROFORMA INVOICE", prefix: "SMD-PI", short: "PI" },

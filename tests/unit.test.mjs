@@ -419,8 +419,23 @@ try {
   const React = req("react")
   const ui = await server.ssrLoadModule("/src/MarineInvoicing.jsx")
   const h = React.createElement, noop = () => {}
-  ok("marine UI: page gate renders nothing for non-owners", () => {
+  ok("marine access: strictly Owner-only (Admin and every other role denied)", () => {
+    assert.equal(mi.canAccessMarine("owner"), true)
+    for (const role of ["admin", "developer", "manager", "editor", "moderator", "support", "worker", "viewer", "cashier", "", null, undefined, "OWNER", " owner"]) {
+      assert.equal(mi.canAccessMarine(role), false, String(role))
+    }
+  })
+  ok("marine UI: page renders nothing for Admin, Worker or signed-out users", () => {
+    // isOwner is deliberately passed as true for admin: the page must ignore it.
+    assert.equal(renderToString(h(ui.default, { isOwner: true, role: "admin", showToast: noop })), "")
     assert.equal(renderToString(h(ui.default, { isOwner: false, role: "worker", showToast: noop })), "")
+    assert.equal(renderToString(h(ui.default, { role: null, showToast: noop })), "")
+  })
+  ok("marine UI: sidebar entry and route gate both use canAccessMarine(role)", () => {
+    const app = req("fs").readFileSync(path.join(root, "src/App.jsx"), "utf8")
+    assert.ok(/FEATURES\.marineInvoicing && canAccessMarine\(role\) \? \[\{ id:"marine"/.test(app), "sidebar entry gated")
+    assert.ok(/page === "marine" && FEATURES\.marineInvoicing && canAccessMarine\(role\) &&/.test(app), "route gated")
+    assert.ok(!/page === "marine" && isOwner/.test(app), "old isOwner route gate removed")
   })
   ok("marine UI: page renders tabs for owner", () => {
     const html = renderToString(h(ui.default, { isOwner: true, role: "owner", showToast: noop }))

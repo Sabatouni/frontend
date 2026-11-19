@@ -43,6 +43,7 @@ import {
 import { getWeeklyReportPdfBlobUrl } from "./lib/weeklyReportPdf"
 import OperationsDocumentsPage from "./OperationsDocuments"
 import MarineInvoicingPage from "./MarineInvoicing"
+import { canAccessMarine } from "./lib/marineInvoicing"
 import { FEATURES } from "./config/features"
 import {
   SALE_DESCRIPTION_MAX, saleDescription, saleExtraNote, saleMatchesSearch,
@@ -242,6 +243,7 @@ export default function App() {
         page={page}
         setPage={setPage}
         isOwner={isOwner}
+        role={role}
         displayName={displayName}
         onLogout={() => { logout(); setPage("dashboard") }}
         open={sidebarOpen}
@@ -323,12 +325,13 @@ export default function App() {
           {page === "debtCredit" && isOwner && (
             <DebtCreditPage user={user} isOwner={isOwner} displayName={displayName} showToast={showToast} />
           )}
-          {/* Marine Invoicing (Swahili Marine & Diving): same three-layer
-              gate as Debt & Credit -- ownerNav only, this route gate, the
-              page's own isOwner check -- plus the marine_* RLS policies.
-              Hidden via FEATURES.marineInvoicing until its migration is live. */}
-          {page === "marine" && isOwner && FEATURES.marineInvoicing && (
-            <MarineInvoicingPage user={user} isOwner={isOwner} role={role} showToast={showToast} />
+          {/* Marine Invoicing (Swahili Marine & Diving): STRICTLY Owner-only.
+              Three UI layers -- sidebar entry, this route gate, the page's own
+              check -- all via canAccessMarine(role) (Admin is excluded, unlike
+              isOwner), plus the owner-only marine_* RLS policies and RPC
+              checks in the database. */}
+          {page === "marine" && FEATURES.marineInvoicing && canAccessMarine(role) && (
+            <MarineInvoicingPage user={user} role={role} showToast={showToast} />
           )}
           {page === "reports" && isOwner && (
             <ReportsPage sales={sales} expenses={expenses} services={services} user={user} isOwner={isOwner} displayName={displayName} showToast={showToast} memberNames={memberNames} />
@@ -618,7 +621,7 @@ function LoginPage() {
 }
 
 /* ── SIDEBAR ─────────────────────────────────────────────── */
-function Sidebar({ page, setPage, isOwner, displayName, onLogout, open, onClose }) {
+function Sidebar({ page, setPage, isOwner, role, displayName, onLogout, open, onClose }) {
   const { t, lang, setLang } = useLanguage()
   const ownerNav = [
     { id:"dashboard",  label:t("navDashboard"),  icon:"📊" },
@@ -630,7 +633,8 @@ function Sidebar({ page, setPage, isOwner, displayName, onLogout, open, onClose 
     { id:"invoices",   label:t("navInvoices"),   icon:"📑" },
     { id:"itinerary",  label:t("navItinerary"),  icon:"🧳" },
     { id:"debtCredit", label:"Debt & Credit",    icon:"💳" },
-    ...(FEATURES.marineInvoicing ? [{ id:"marine", label:"Marine Invoicing", icon:"⚓" }] : []),
+    // Strictly Owner-only (not Admin): see canAccessMarine().
+    ...(FEATURES.marineInvoicing && canAccessMarine(role) ? [{ id:"marine", label:"Marine Invoicing", icon:"⚓" }] : []),
     { id:"reports",    label:t("navReports"),    icon:"📈" },
     { id:"users",      label:t("navUsers"),      icon:"👥" },
   ]
