@@ -23,7 +23,7 @@ import { localDateStr, downloadBlob } from "./lib/salesReporting"
  * (operational_documents) -- nothing here is kept only in the browser.
  *
  * Access: rendered for every signed-in POS member. What a member can see and
- * do is decided by RLS + triggers in the database; `isOwner` here only
+ * do is decided by RLS + triggers in the database; `canManage` here only
  * decides which buttons to show.
  */
 
@@ -161,7 +161,7 @@ const TABS = [
   { id: "history", label: "Document History", icon: "🗂️" },
 ]
 
-export default function OperationsDocumentsPage({ user, isOwner, displayName, showToast, initialTab }) {
+export default function OperationsDocumentsPage({ user, canManage, displayName, showToast, initialTab }) {
   const [tab, setTab] = useState(initialTab || DEPARTMENTS.inventory)
   const [form, setForm] = useState(null) // { type, seed }
   const [viewId, setViewId] = useState(null)
@@ -200,21 +200,21 @@ export default function OperationsDocumentsPage({ user, isOwner, displayName, sh
 
       {form ? (
         <DocumentForm
-          type={form.type} seed={form.seed} user={user} isOwner={isOwner} displayName={displayName}
+          type={form.type} seed={form.seed} user={user} canManage={canManage} displayName={displayName}
           showToast={showToast} onCancel={() => setForm(null)} onSaved={onSaved}
         />
       ) : tab === "history" ? (
         <DocumentHistory key={`h-${refreshKey}`} showToast={showToast} onView={setViewId} showDepartment />
       ) : (
         <DepartmentPanel
-          key={`${tab}-${refreshKey}`} department={tab} isOwner={isOwner} user={user} showToast={showToast}
+          key={`${tab}-${refreshKey}`} department={tab} canManage={canManage} user={user} showToast={showToast}
           onNew={(type) => setForm({ type })} onView={setViewId}
         />
       )}
 
       {viewId && (
         <DocumentViewer
-          id={viewId} isOwner={isOwner} showToast={showToast}
+          id={viewId} canManage={canManage} showToast={showToast}
           onClose={() => setViewId(null)}
           onChanged={() => setRefreshKey(k => k + 1)}
           onReuse={(d) => { setViewId(null); setForm({ type: d.doc_type, seed: d }) }}
@@ -224,18 +224,18 @@ export default function OperationsDocumentsPage({ user, isOwner, displayName, sh
   )
 }
 
-function DepartmentPanel({ department, isOwner, user, showToast, onNew, onView }) {
+function DepartmentPanel({ department, canManage, user, showToast, onNew, onView }) {
   const types = DEPARTMENT_DOC_TYPES[department] || []
   return (
     <div>
-      {department === DEPARTMENTS.maintenance && <FleetStatusPanel isOwner={isOwner} showToast={showToast} onViewDoc={onView} />}
+      {department === DEPARTMENTS.maintenance && <FleetStatusPanel canManage={canManage} showToast={showToast} onViewDoc={onView} />}
 
       <div style={{ ...panelS, marginBottom:16 }}>
         <h2 style={fTi}>Generate a new document</h2>
         <div style={{ display:"grid", gap:12, gridTemplateColumns:"repeat(auto-fit, minmax(220px, 1fr))" }}>
           {types.map(type => {
             const meta = DOC_TYPES[type]
-            const locked = meta.adminOnly && !isOwner
+            const locked = meta.adminOnly && !canManage
             return (
               <button key={type} type="button" disabled={locked} onClick={() => onNew(type)}
                 className="stv-card stv-card-hover stv-btn"
@@ -378,7 +378,7 @@ function DocumentHistory({ docTypes, department, showDepartment, showToast, onVi
 // ══════════════════════════════════════════════════════════════════════
 // VIEWER (reopen / approve / reprint)
 // ══════════════════════════════════════════════════════════════════════
-function DocumentViewer({ id, isOwner, showToast, onClose, onChanged, onReuse }) {
+function DocumentViewer({ id, canManage, showToast, onClose, onChanged, onReuse }) {
   const [doc, setDoc] = useState(null)
   const [events, setEvents] = useState([])
   const [error, setError] = useState("")
@@ -410,7 +410,7 @@ function DocumentViewer({ id, isOwner, showToast, onClose, onChanged, onReuse })
   }
 
   const meta = doc ? DOC_TYPES[doc.doc_type] : null
-  const canReuse = doc && ["restock_request", "kitchen_equipment", "dining_equipment", "inventory_checklist"].includes(doc.doc_type) && (!meta.adminOnly || isOwner)
+  const canReuse = doc && ["restock_request", "kitchen_equipment", "dining_equipment", "inventory_checklist"].includes(doc.doc_type) && (!meta.adminOnly || canManage)
 
   return (
     <Modal title={doc ? `${meta?.icon} ${doc.reference_number}` : "Document"} onClose={onClose} width={900} labelId="ops-viewer-title">
@@ -447,7 +447,7 @@ function DocumentViewer({ id, isOwner, showToast, onClose, onChanged, onReuse })
             </div>
           )}
 
-          {isOwner && (doc.status === "PENDING" || (doc.status === "APPROVED" && doc.doc_type === "restock_request")) && (
+          {canManage && (doc.status === "PENDING" || (doc.status === "APPROVED" && doc.doc_type === "restock_request")) && (
             <div style={{ marginTop:16, padding:14, border:`1px solid ${C.border}`, borderRadius:RADIUS.sm, background:"#FCFCFA" }}>
               <div style={{ ...lS, marginBottom:8 }}>Management action</div>
               {doc.status === "PENDING" && (
@@ -794,7 +794,7 @@ function RestockForm({ type, meta, seed, displayName, showToast, onSaved, onCanc
 }
 
 // ── B. Equipment lists ───────────────────────────────────────────────
-function EquipmentForm({ type, meta, seed, isOwner, displayName, showToast, onSaved, onCancel }) {
+function EquipmentForm({ type, meta, seed, canManage, displayName, showToast, onSaved, onCancel }) {
   const template = type === "kitchen_equipment" ? KITCHEN_EQUIPMENT_TEMPLATE : DINING_EQUIPMENT_TEMPLATE
   const fromTemplate = () => template.map(([name, qty]) => ({ key: rk(), name, suggested_qty: qty, actual_qty: "", missing_qty: "", damaged_qty: "", notes: "" }))
   const fromDoc = (d) => (d.payload?.items || []).map(i => ({ key: rk(), name: i.name, suggested_qty: i.suggested_qty ?? "", actual_qty: "", missing_qty: "", damaged_qty: "", notes: "" }))
@@ -822,7 +822,7 @@ function EquipmentForm({ type, meta, seed, isOwner, displayName, showToast, onSa
     return () => { cancelled = true }
   }, [type, seed])
 
-  if (!isOwner) {
+  if (!canManage) {
     return <p style={{ fontSize:13, color:C.textSub }}>Only management (Owner/Admin) can create or update equipment lists.</p>
   }
 
@@ -1327,7 +1327,7 @@ function SafetyInspectionForm({ type, meta, displayName, showToast, onSaved, onC
 // ══════════════════════════════════════════════════════════════════════
 // GO-KART FLEET STATUS
 // ══════════════════════════════════════════════════════════════════════
-function FleetStatusPanel({ isOwner, showToast, onViewDoc }) {
+function FleetStatusPanel({ canManage, showToast, onViewDoc }) {
   const [karts, setKarts] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
@@ -1348,7 +1348,7 @@ function FleetStatusPanel({ isOwner, showToast, onViewDoc }) {
     <div style={{ ...panelS, marginBottom:16 }}>
       <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:10, marginBottom:12 }}>
         <h2 style={{ ...fTi, marginBottom:0 }}>🏎️ Go-Kart Fleet Status</h2>
-        {isOwner && <button type="button" onClick={() => setShowRegister(true)} style={ghostBtn}>+ Register kart</button>}
+        {canManage && <button type="button" onClick={() => setShowRegister(true)} style={ghostBtn}>+ Register kart</button>}
       </div>
 
       {oos.length > 0 && (
@@ -1364,7 +1364,7 @@ function FleetStatusPanel({ isOwner, showToast, onViewDoc }) {
 
       {error && <p role="alert" style={{ color:C.warnStrong, fontSize:12.5 }}>{error}</p>}
       {loading ? <p style={{ fontSize:12.5, color:C.textFaint }}>Loading…</p> : karts.length === 0 ? (
-        <p style={{ fontSize:12.5, color:C.textFaint }}>No karts registered yet. {isOwner ? "Register each kart before damage reports, logbook entries or inspections can be filed for it." : "Management must register karts before damage reports, logbook entries or inspections can be filed."}</p>
+        <p style={{ fontSize:12.5, color:C.textFaint }}>No karts registered yet. {canManage ? "Register each kart before damage reports, logbook entries or inspections can be filed for it." : "Management must register karts before damage reports, logbook entries or inspections can be filed."}</p>
       ) : (
         <div style={{ display:"grid", gap:10, gridTemplateColumns:"repeat(auto-fill, minmax(200px, 1fr))" }}>
           {karts.map(k => {
@@ -1385,7 +1385,7 @@ function FleetStatusPanel({ isOwner, showToast, onViewDoc }) {
         </div>
       )}
 
-      {selected && <KartDetailModal kart={selected} isOwner={isOwner} showToast={showToast} onViewDoc={onViewDoc} onClose={() => setSelected(null)} onChanged={async () => { await load(); }} />}
+      {selected && <KartDetailModal kart={selected} canManage={canManage} showToast={showToast} onViewDoc={onViewDoc} onClose={() => setSelected(null)} onChanged={async () => { await load(); }} />}
       {showRegister && <RegisterKartModal showToast={showToast} onClose={() => setShowRegister(false)} onSaved={() => { setShowRegister(false); load() }} />}
     </div>
   )
@@ -1410,7 +1410,7 @@ function RegisterKartModal({ showToast, onClose, onSaved }) {
   )
 }
 
-function KartDetailModal({ kart, isOwner, showToast, onViewDoc, onClose, onChanged }) {
+function KartDetailModal({ kart, canManage, showToast, onViewDoc, onClose, onChanged }) {
   const [current, setCurrent] = useState(kart)
   const [data, setData] = useState(null)
   const [newStatus, setNewStatus] = useState("")
@@ -1455,7 +1455,7 @@ function KartDetailModal({ kart, isOwner, showToast, onViewDoc, onClose, onChang
         </div>
       )}
 
-      {isOwner ? (
+      {canManage ? (
         <div style={{ border:`1px solid ${C.border}`, borderRadius:RADIUS.sm, padding:12, marginBottom:16, background:"#FCFCFA" }}>
           <div style={{ ...lS, marginBottom:8 }}>Verified status change (management)</div>
           <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:8 }}>

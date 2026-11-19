@@ -13,6 +13,26 @@ import { supabase } from "../api/supabaseClient"
 export const ROLE_LEVELS = { owner: 30, admin: 20, worker: 10 }
 
 /**
+ * EXACT role checks -- the only helpers UI code should use to decide what a
+ * user may see or do. They compare the real stv-pos role slug, never a
+ * numeric level: a level comparison let developer/manager/editor/moderator/
+ * support (database levels 40-70) inherit Owner screens, because the
+ * client-side ROLE_LEVELS above (admin = 20) was compared against database
+ * levels for roles it doesn't list. Unknown or missing roles get nothing.
+ *
+ * The database remains the authorization boundary (RLS + RPC checks use the
+ * matching has_role(...) allowlists); these only mirror it in the UI.
+ */
+export function isOwnerRole(role) {
+  return role === "owner"
+}
+
+/** Owner OR Admin -- only for modules approved as Owner+Admin. */
+export function isOwnerOrAdminRole(role) {
+  return role === "owner" || role === "admin"
+}
+
+/**
  * Fetches every application + role grant the current authenticated user
  * holds, across every application in this Supabase project, in one call.
  * Backed by the `my_permissions()` SQL function (SECURITY DEFINER, scoped

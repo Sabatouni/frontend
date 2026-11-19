@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "../api/supabaseClient";
-import { fetchMyPermissions, ROLE_LEVELS } from "../lib/permissions";
+import { fetchMyPermissions, ROLE_LEVELS, isOwnerRole, isOwnerOrAdminRole } from "../lib/permissions";
 
 // Swahili Tent Village POS. Every permission check in this app is scoped to
 // this slug and this slug only -- a Worker (or Admin, or Owner) here has
@@ -200,7 +200,7 @@ export function AuthProvider({ children }) {
           userId: currentUser.id,
           role: grantRole,
           roleLevel: grantRoleLevel,
-          isOwner: grantRoleLevel !== null && grantRoleLevel >= ROLE_LEVELS.admin,
+          isOwner: isOwnerOrAdminRole(grantRole), // exact roles only -- see lib/permissions.js
           hasAccess: true,
           displayName: currentUser.user_metadata?.name || currentUser.email?.split("@")[0] || null,
         });
@@ -399,7 +399,16 @@ export function AuthProvider({ children }) {
   // calls) is used purely to avoid a loading flash for a returning user.
   const role = permissionsLoaded ? realRole : (hintMatchesUser ? hint.role : null);
   const roleLevel = permissionsLoaded ? realRoleLevel : (hintMatchesUser ? hint.roleLevel : null);
-  const isOwner = permissionsLoaded ? (roleLevel !== null && roleLevel >= ROLE_LEVELS.admin) : (hintMatchesUser ? !!hint.isOwner : false);
+  // Exact-role permissions (see lib/permissions.js). Derived ONLY from the
+  // role slug -- never from a numeric level and never from a cached boolean --
+  // so developer/manager/editor/moderator/support no longer inherit Owner UI.
+  //   isOwnerAccount : exactly "owner"  (Owner-only modules)
+  //   canManage      : "owner" or "admin" (approved Owner+Admin modules)
+  //   isOwner        : DEPRECATED alias of canManage, kept so any unmigrated
+  //                    caller is at least exact; new code must not use it.
+  const isOwnerAccount = isOwnerRole(role);
+  const canManage = isOwnerOrAdminRole(role);
+  const isOwner = canManage;
   const isWorker = role === "worker";
   const hasAccess = permissionsLoaded ? realHasAccess : (hintMatchesUser ? !!hint.hasAccess : false);
 
@@ -420,6 +429,8 @@ export function AuthProvider({ children }) {
       role,
       roleLevel,
       isOwner,
+      isOwnerAccount,
+      canManage,
       isWorker,
       hasAccess,
       permissions,
@@ -437,6 +448,8 @@ export function AuthProvider({ children }) {
       role,
       roleLevel,
       isOwner,
+      isOwnerAccount,
+      canManage,
       isWorker,
       hasAccess,
       permissions,
