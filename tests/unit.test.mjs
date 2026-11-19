@@ -303,6 +303,170 @@ try {
     assert.ok(Object.isFrozen(f.FEATURES))
   })
 
+  // ── Marine Invoicing (Swahili Marine & Diving) ────────────────────
+  const mi = await server.ssrLoadModule("/src/lib/marineInvoicing.js")
+  ok("marine: exact decimal parsing (no float drift)", () => {
+    assert.equal(mi.toCents("0.1"), 10n); assert.equal(mi.toCents("1,000.10"), 100010n)
+    assert.equal(mi.toCents(0.1 + 0.2), 30n); assert.equal(mi.toCents("2.345"), 235n) // half up
+    assert.equal(mi.toCents(""), null); assert.equal(mi.toCents("abc"), null); assert.equal(mi.toCents("."), null)
+  })
+  ok("marine: line amount = round(qty x price, 2), decimal quantities", () => {
+    assert.equal(mi.lineAmount("2.5", "1000.10"), 2500.25)
+    assert.equal(mi.lineAmount("0.333", "3"), 1)       // 0.999 -> 1.00
+    assert.equal(mi.lineAmount("1.005", "1"), 1.01)    // half up like Postgres round()
+    assert.equal(mi.lineAmount("3", "0.1"), 0.3)       // float would give 0.30000000000000004
+  })
+  const lines = [{ quantity: "2.5", unit_price: "1000.10" }, { quantity: "1", unit_price: "999.99" }]
+  ok("marine: totals match the server (same figures as the DB test)", () => {
+    const t = mi.computeMarineTotals({ items: lines, vat_enabled: true, vat_percent: "15", discount_amount: "100" })
+    assert.equal(t.subtotal, 3500.24); assert.equal(t.taxable, 3400.24); assert.equal(t.vat, 510.04); assert.equal(t.totalDue, 3910.28)
+    assert.equal(t.vatOverridden, false); assert.equal(t.totalOverridden, false); assert.equal(t.adjustment, 0)
+  })
+  ok("marine: VAT override, total override and adjustment", () => {
+    const t = mi.computeMarineTotals({ items: lines, vat_enabled: true, vat_percent: 15, vat_amount_override: "500", total_override: "4000", extra_charge_amount: "10" })
+    assert.equal(t.vatCalculated, 526.54); assert.equal(t.vat, 500); assert.equal(t.calculatedTotal, 4010.24)
+    assert.equal(t.totalDue, 4000); assert.equal(t.adjustment, -10.24); assert.ok(t.vatOverridden && t.totalOverridden)
+  })
+  ok("marine: VAT disabled ignores VAT override; default VAT 15%", () => {
+    const t = mi.computeMarineTotals({ items: lines, vat_enabled: false, vat_percent: 15, vat_amount_override: "500" })
+    assert.equal(t.vat, 0); assert.equal(t.totalDue, 3500.24); assert.equal(t.vatOverridden, false)
+    assert.equal(mi.DEFAULT_SETTINGS.default_vat_percent, 15)
+    assert.equal(mi.emptyDocumentForm(mi.DEFAULT_SETTINGS).vat_percent, "15")
+  })
+  ok("marine: recalculates when lines change; manual total stays put", () => {
+    const base = { vat_enabled: true, vat_percent: 15, total_override: "5000" }
+    const a = mi.computeMarineTotals({ ...base, items: [{ quantity: 1, unit_price: 1000 }] })
+    const b = mi.computeMarineTotals({ ...base, items: [{ quantity: 2, unit_price: 1000 }] })
+    assert.equal(a.calculatedTotal, 1150); assert.equal(b.calculatedTotal, 2300)
+    assert.equal(a.totalDue, 5000); assert.equal(b.totalDue, 5000)
+  })
+  ok("marine: oversize discount detected", () => {
+    assert.ok(mi.computeMarineTotals({ items: lines, discount_amount: "99999" }).discountTooLarge)
+    assert.ok(mi.validateDraft({ ...mi.emptyDocumentForm(), discount_amount: "99999" }, [{ description: "x", quantity: "1", unit_price: "10" }]).some(e => /discount/i.test(e)))
+  })
+  ok("marine: large TZS amounts stay exact", () => {
+    const t = mi.computeMarineTotals({ items: [{ quantity: "1250.5", unit_price: "1234567.89" }], vat_enabled: true, vat_percent: 18 })
+    // Expected values computed independently with Python decimal (ROUND_HALF_UP).
+    assert.equal(t.subtotal, 1543827146.45); assert.equal(t.vat, 277888886.36); assert.equal(t.totalDue, 1821716032.81)
+  })
+  ok("marine: customer fields optional; PDF rows skip blanks", () => {
+    const f = mi.emptyDocumentForm()
+    assert.equal(mi.CUSTOMER_FIELDS.length, 11)
+    assert.deepEqual(mi.validateDraft(f, [mi.emptyItem()]), [])
+    assert.deepEqual(mi.customerRows({ customer_name: "Rubani Ltd", tin_number: " ", vrn_number: "40-0012" }), [["Customer / Company Name", "Rubani Ltd"], ["VRN Number", "40-0012"]])
+  })
+  ok("marine: issue validation needs a line and a positive total", () => {
+    const f = mi.emptyDocumentForm()
+    assert.ok(mi.validateForIssue(f, [mi.emptyItem()]).some(e => /at least one/i.test(e)))
+    assert.deepEqual(mi.validateForIssue(f, [{ description: "Diver", quantity: "2", unit_price: "85000" }]), [])
+    assert.ok(mi.validateForIssue({ ...f, total_override: "10" }, [{ description: "Diver", quantity: "2", unit_price: "1" }]).some(e => /reason/i.test(e)))
+    assert.ok(mi.validateDraft(f, [{ description: "x", quantity: "0", unit_price: "1" }]).some(e => /quantity/i.test(e)))
+  })
+  ok("marine: payload drops blank rows, nulls empty fields, keeps order", () => {
+    const form = { ...mi.emptyDocumentForm(), doc_type: "INVOICE", valid_until: "2026-12-01", due_date: "2026-12-15", customer_name: "  Acme  " }
+    const p = mi.buildDraftPayload(form,
+      [mi.emptyItem({ description: "B", quantity: "1", unit_price: "5" }), mi.emptyItem(), mi.emptyItem({ description: "A", quantity: "2.5", unit_price: "1,000" })],
+      [mi.emptyScope({ title: "RUBANI BUOY", description: "Replace\nchain" }), mi.emptyScope()])
+    assert.deepEqual(p.items.map(i => i.description), ["B", "A"]); assert.equal(p.items[1].unit_price, "1000")
+    assert.equal(p.scope.length, 1); assert.equal(p.scope[0].description, "Replace\nchain")
+    assert.equal(p.doc.customer_name, "Acme"); assert.equal(p.doc.taxpayer_name, null)
+    assert.equal(p.doc.valid_until, null); assert.equal(p.doc.due_date, "2026-12-15") // invoice: due date only
+    assert.equal(p.doc.vat_amount_override, null); assert.equal(p.doc.bank_details.account_number, "22910118721")
+  })
+  ok("marine: banking defaults + per-document edits don't touch defaults", () => {
+    const f = mi.emptyDocumentForm(mi.DEFAULT_SETTINGS)
+    assert.deepEqual(f.bank_details, { bank_name: "NMB", account_name: "GOLDEN EMPIRE COMPANY LIMITED", account_number: "22910118721", branch: "Zanzibar (229)", currency: "TZS" })
+    f.bank_details.account_number = "999"
+    assert.equal(mi.DEFAULT_SETTINGS.bank_account_number, "22910118721")
+    assert.equal(mi.emptyDocumentForm(mi.DEFAULT_SETTINGS).bank_details.account_number, "22910118721")
+  })
+  ok("marine: footer defaults keep the original identity", () => {
+    assert.deepEqual(mi.DEFAULT_SETTINGS.contacts.map(c => c.value), ["contact@mygoldenempire.com", "+86 156 91833253"])
+    assert.equal(mi.DEFAULT_SETTINGS.footer_line, "SWAHILI MARINE & DIVING | GEC LIMITED")
+  })
+  ok("marine: permanent header is frozen", () => {
+    assert.ok(Object.isFrozen(mi.MARINE_BRAND))
+    assert.equal(mi.MARINE_BRAND.division, "SWAHILI MARINE & DIVING")
+    assert.equal(mi.MARINE_BRAND.divisionLine, "MARINE SERVICES DIVISION")
+    assert.equal(mi.MARINE_BRAND.parentLine, "A division of GEC LIMITED")
+  })
+  ok("marine: number format + forward-only conversions", () => {
+    assert.equal(mi.documentNumberPattern("QUOTATION", 2026, 1), "SMD-QTN-2026-001")
+    assert.equal(mi.documentNumberPattern("PROFORMA", 2026, 12), "SMD-PI-2026-012")
+    assert.equal(mi.documentNumberPattern("INVOICE", 2027, 1000), "SMD-INV-2027-1000")
+    assert.deepEqual(mi.CONVERSION_TARGETS.QUOTATION, ["PROFORMA", "INVOICE"])
+    assert.deepEqual(mi.CONVERSION_TARGETS.INVOICE, [])
+  })
+  ok("marine: round-trip DB row -> form -> payload", () => {
+    const row = { doc_type: "PROFORMA", document_date: "2026-11-19", vat_enabled: false, vat_percent: 15, discount_amount: 0, extra_charge_amount: 250,
+      bank_details: { bank_name: "NMB", account_number: "1" }, customer_name: "Pungume", currency: "TZS" }
+    const f = mi.formFromDocument(row, [{ description: "Chain", unit: "metres", quantity: 12.5, unit_price: 4000 }], [{ title: "PUNGUME BUOY", description: "Servicing" }])
+    assert.equal(f.form.discount_amount, ""); assert.equal(f.form.extra_charge_amount, "250"); assert.equal(f.form.vat_enabled, false)
+    const p = mi.buildDraftPayload(f.form, f.items, f.scope)
+    assert.equal(p.items[0].quantity, "12.5"); assert.equal(p.doc.bank_details.account_number, "1"); assert.equal(p.scope[0].title, "PUNGUME BUOY")
+  })
+  ok("marine: list reorder + search sanitising", () => {
+    assert.deepEqual(mi.moveInList([1, 2, 3], 0, 2), [2, 3, 1]); assert.deepEqual(mi.moveInList([1, 2], 0, -1), [1, 2])
+    assert.equal(mi.sanitizeSearch("SMD-QTN,(x)*%"), "SMD-QTN  x")
+  })
+  ok("marine: PDF filenames", () => {
+    assert.equal(mi.pdfFilename({ doc_type: "QUOTATION", document_number: "SMD-QTN-2026-001", customer_name: "Rubani Marine Ltd." }), "SMD-QTN-2026-001_Rubani_Marine_Ltd.pdf")
+    assert.equal(mi.pdfFilename({ doc_type: "INVOICE" }), "DRAFT-INV.pdf")
+  })
+  const { createRequire } = await import("node:module")
+  const req = createRequire(path.join(root, "package.json"))
+  const { renderToString } = req("react-dom/server")
+  const React = req("react")
+  const ui = await server.ssrLoadModule("/src/MarineInvoicing.jsx")
+  const h = React.createElement, noop = () => {}
+  ok("marine UI: page gate renders nothing for non-owners", () => {
+    assert.equal(renderToString(h(ui.default, { isOwner: false, role: "worker", showToast: noop })), "")
+  })
+  ok("marine UI: page renders tabs for owner", () => {
+    const html = renderToString(h(ui.default, { isOwner: true, role: "owner", showToast: noop }))
+    for (const label of ["Overview", "Create Document", "Document History", "Services &amp; Materials", "Scope of Work Library", "Invoice Settings"]) assert.ok(html.includes(label), label)
+  })
+  ok("marine UI: editor renders all sections with default banking + 15% VAT", () => {
+    const html = renderToString(h(ui.__testing.DocumentEditor, { initialType: "PROFORMA", settings: mi.DEFAULT_SETTINGS, showToast: noop, onDone: noop, onCancel: noop }))
+    for (const s of ["Customer details", "Scope of work", "Services &amp; materials", "VAT &amp; totals", "Payment &amp; banking details", "22910118721", "SMD-PI-", "TOTAL DUE", "Due date"]) assert.ok(html.includes(s), s)
+    assert.ok(html.includes('value="15"'))
+    assert.ok(!html.includes("Valid until"))
+  })
+  ok("marine UI: totals breakdown flags manual values", () => {
+    const form = { vat_enabled: true, vat_percent: 15, currency: "TZS", total_override_reason: "Rounded" }
+    const t = mi.computeMarineTotals({ ...form, items: lines, vat_amount_override: "500", total_override: "4000" })
+    const html = renderToString(h(ui.__testing.TotalsBreakdown, { form, totals: t }))
+    assert.ok(html.includes("MANUAL") && html.includes("AUTO") && html.includes("Calculated VAT would be") && html.includes("4,000"))
+  })
+  ok("marine UI: settings read-only for admin, editable for owner", () => {
+    const ro = renderToString(h(ui.__testing.SettingsPanel, { settings: mi.DEFAULT_SETTINGS, canEdit: false, showToast: noop, onSaved: noop }))
+    const rw = renderToString(h(ui.__testing.SettingsPanel, { settings: mi.DEFAULT_SETTINGS, canEdit: true, showToast: noop, onSaved: noop }))
+    assert.ok(ro.includes("Only the Owner") && !ro.includes("Save settings"))
+    assert.ok(rw.includes("Save settings") && rw.includes("contact@mygoldenempire.com") && rw.includes("+86 156 91833253"))
+  })
+  ok("marine UI: document table + list views render", () => {
+    const html = renderToString(h(ui.__testing.DocumentTable, { docs: [{ id: "1", doc_type: "QUOTATION", status: "ISSUED", document_number: "SMD-QTN-2026-001", document_date: "2026-11-19", customer_name: "Rubani", total_due: 1150, currency: "TZS" }], loading: false, onView: noop }))
+    assert.ok(html.includes("SMD-QTN-2026-001") && html.includes("Issued") && html.includes("TZS 1,150"))
+    for (const C of ["Overview", "DocumentHistory", "CatalogLibrary", "ScopeLibrary"]) renderToString(h(ui.__testing[C], { showToast: noop, onNew: noop, onView: noop }))
+  })
+  const pdfMod = await server.ssrLoadModule("/src/lib/marinePdf.js").catch(e => ({ __err: e }))
+  ok("marine PDF: module loads", () => { assert.ok(!pdfMod.__err, pdfMod.__err?.message); assert.equal(typeof pdfMod.buildMarinePdf, "function") })
+  ok("marine PDF: logo crop finds artwork on a white (opaque) background", () => {
+    const w = 100, h = 60, d = new Uint8ClampedArray(w * h * 4).fill(255) // opaque white, like the JPEG
+    for (let y = 20; y < 40; y++) for (let x = 30; x < 70; x++) { const i = (y * w + x) * 4; d[i] = 212; d[i + 1] = 167; d[i + 2] = 44 } // gold block
+    assert.deepEqual(pdfMod.nonWhiteBounds(d, w, h, { padRatio: 0 }), { x: 30, y: 20, w: 40, h: 20 })
+    assert.deepEqual(pdfMod.nonWhiteBounds(new Uint8ClampedArray(w * h * 4).fill(255), w, h), { x: 0, y: 0, w, h }) // all white -> untouched
+  })
+  ok("marine: official logo path points at a real file in public/", () => {
+    assert.equal(mi.MARINE_BRAND.logoUrl, "/brand/gec-logo.jpg")
+    const buf = req("fs").readFileSync(path.join(root, "public", mi.MARINE_BRAND.logoUrl))
+    assert.ok(buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF, "file is a JPEG")
+  })
+
+  ok("release flag: Marine Invoicing enabled (migration 20261119090000 must be live)", () => {
+    assert.equal(f.FEATURES.marineInvoicing, true)
+  })
+
   console.log(`\n${pass} passed, ${fail} failed`)
   if (fail) process.exitCode = 1
 } finally { await server.close() }

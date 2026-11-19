@@ -42,6 +42,7 @@ import {
 } from "./lib/weeklyReports"
 import { getWeeklyReportPdfBlobUrl } from "./lib/weeklyReportPdf"
 import OperationsDocumentsPage from "./OperationsDocuments"
+import MarineInvoicingPage from "./MarineInvoicing"
 import { FEATURES } from "./config/features"
 import {
   SALE_DESCRIPTION_MAX, saleDescription, saleExtraNote, saleMatchesSearch,
@@ -97,7 +98,7 @@ async function adminFetch(path, accessToken, opts = {}) {
 
 /* ── ROOT APP ────────────────────────────────────────────── */
 export default function App() {
-  const { user, isOwner, logout, ready, hasAccess, permissionsPending, permissionsError, refresh } = useAuth()
+  const { user, isOwner, role, logout, ready, hasAccess, permissionsPending, permissionsError, refresh } = useAuth()
   const { t, lang } = useLanguage()
 
   const [sales,    setSales]    = useState([])
@@ -321,6 +322,13 @@ export default function App() {
               header comment at the end of this file for the fourth layer). */}
           {page === "debtCredit" && isOwner && (
             <DebtCreditPage user={user} isOwner={isOwner} displayName={displayName} showToast={showToast} />
+          )}
+          {/* Marine Invoicing (Swahili Marine & Diving): same three-layer
+              gate as Debt & Credit -- ownerNav only, this route gate, the
+              page's own isOwner check -- plus the marine_* RLS policies.
+              Hidden via FEATURES.marineInvoicing until its migration is live. */}
+          {page === "marine" && isOwner && FEATURES.marineInvoicing && (
+            <MarineInvoicingPage user={user} isOwner={isOwner} role={role} showToast={showToast} />
           )}
           {page === "reports" && isOwner && (
             <ReportsPage sales={sales} expenses={expenses} services={services} user={user} isOwner={isOwner} displayName={displayName} showToast={showToast} memberNames={memberNames} />
@@ -622,6 +630,7 @@ function Sidebar({ page, setPage, isOwner, displayName, onLogout, open, onClose 
     { id:"invoices",   label:t("navInvoices"),   icon:"📑" },
     { id:"itinerary",  label:t("navItinerary"),  icon:"🧳" },
     { id:"debtCredit", label:"Debt & Credit",    icon:"💳" },
+    ...(FEATURES.marineInvoicing ? [{ id:"marine", label:"Marine Invoicing", icon:"⚓" }] : []),
     { id:"reports",    label:t("navReports"),    icon:"📈" },
     { id:"users",      label:t("navUsers"),      icon:"👥" },
   ]
