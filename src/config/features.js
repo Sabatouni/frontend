@@ -4,7 +4,7 @@
  * operationsDocuments: the Operations Documents centre (restock requests,
  * equipment lists, inventory checklists, go-kart reports). Fully implemented
  * but hidden for this release -- it needs migration
- * 20261112090100_stv_pos_operational_documents.sql, which is not applied yet.
+ * 20261122090000_stv_pos_operational_documents.sql, which is not applied yet.
  * Flip to true only after that migration is live.
  *
  * marineInvoicing: Swahili Marine & Diving quotations / proforma / final

@@ -303,7 +303,7 @@ export default function App() {
           )}
           {/* Operations Documents -- open to workers AND owner/admin. What
               each role may create/see/approve is enforced by RLS + triggers
-              on operational_documents (see migration 20261112090100).
+              on operational_documents (see migration 20261122090000).
               Hidden for this release via FEATURES.operationsDocuments
               (src/config/features.js) until that migration is applied. */}
           {page === "documents" && FEATURES.operationsDocuments && (
