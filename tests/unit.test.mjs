@@ -298,8 +298,8 @@ try {
     assert.deepEqual(brand.visibleBounds(rgba(10, 10, [[0, 0], [9, 9]]), 10, 10, { padRatio: 0.5 }), { x: 0, y: 0, w: 10, h: 10 }) // padding clamped
   })
   const f = await server.ssrLoadModule("/src/config/features.js")
-  ok("release flag: Operations Documents is hidden for this release", () => {
-    assert.equal(f.FEATURES.operationsDocuments, false)
+  ok("release flag: Operations Documents enabled (migration 20261122090000 must be live)", () => {
+    assert.equal(f.FEATURES.operationsDocuments, true)
     assert.ok(Object.isFrozen(f.FEATURES))
   })
 
@@ -478,6 +478,79 @@ try {
     assert.ok(buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF, "file is a JPEG")
   })
 
+  // ── Exact-role permissions (security/exact-role-permissions) ──────
+  const perm = await server.ssrLoadModule("/src/lib/permissions.js")
+  const acc = await server.ssrLoadModule("/src/lib/access.js")
+  const ROLES = ["owner", "admin", "developer", "manager", "editor", "moderator", "support", "worker", "viewer", null, undefined, "", "OWNER", "Owner ", "cashier"]
+  ok("permissions: only the exact 'owner' slug is an Owner", () => {
+    for (const r of ROLES) assert.equal(perm.isOwnerRole(r), r === "owner", String(r))
+  })
+  ok("permissions: only exact 'owner'/'admin' can manage (no level inheritance)", () => {
+    for (const r of ROLES) assert.equal(perm.isOwnerOrAdminRole(r), r === "owner" || r === "admin", String(r))
+  })
+  const expectPages = {
+    owner:     ["dashboard","sales","takeOrders","expenses","inventory","documents","invoices","itinerary","debtCredit","marine","reports","users"],
+    admin:     ["dashboard","sales","takeOrders","expenses","inventory","documents","invoices","itinerary"],
+    developer: ["dashboard","sales","takeOrders","expenses","inventory","documents","invoices"],
+    manager:   ["dashboard","sales","takeOrders","expenses","inventory","documents","invoices"],
+    worker:    ["dashboard","sales","takeOrders","expenses","inventory","documents","invoices"],
+  }
+  ok("access: page matrix for Owner / Admin / Manager / Developer / Worker", () => {
+    const pages = Object.keys(acc.PAGE_ACCESS)
+    for (const [role, allowed] of Object.entries(expectPages)) {
+      assert.deepEqual(pages.filter(pg => acc.canOpenPage(pg, role)), allowed, role)
+    }
+    for (const r of [null, undefined, ""]) assert.deepEqual(pages.filter(pg => acc.canOpenPage(pg, r)), [], "no role")
+    assert.equal(acc.canOpenPage("not-a-page", "owner"), false)
+  })
+  ok("access: sensitive actions (deletes/dashboard Owner-only; management Owner+Admin)", () => {
+    for (const r of ["admin", "developer", "manager", "worker", null]) {
+      for (const a of ["deleteSale", "deleteExpense", "viewOwnerDashboard"]) assert.equal(acc.canDo(a, r), false, `${r} ${a}`)
+    }
+    for (const a of ["deleteSale", "deleteExpense", "viewOwnerDashboard", "editSale", "manageServices", "manageInventory", "settleDrinkWeek", "manageMenu", "manageInvoices"]) {
+      assert.equal(acc.canDo(a, "owner"), true, a)
+    }
+    for (const a of ["editSale", "manageServices", "manageInventory", "settleDrinkWeek", "manageMenu", "manageInvoices"]) {
+      assert.equal(acc.canDo(a, "admin"), true, a)
+      for (const r of ["developer", "manager", "editor", "worker"]) assert.equal(acc.canDo(a, r), false, `${r} ${a}`)
+    }
+  })
+  const appSrc = req("fs").readFileSync(path.join(root, "src/App.jsx"), "utf8")
+  const stripComments = (src) => src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/.*$/gm, "$1")
+  const appCode = stripComments(appSrc)
+  ok("App: no code path uses the ambiguous isOwner flag any more", () => {
+    assert.ok(!/(?<![\w.])isOwner(?![\w])/.test(appCode), "isOwner still read somewhere in App.jsx")
+  })
+  ok("App: every role-gated route uses canOpenPage with its own page id", () => {
+    for (const pg of ["itinerary", "debtCredit", "reports", "users"]) {
+      assert.ok(appCode.includes(`page === "${pg}" && canOpenPage("${pg}", role) &&`), pg)
+    }
+    assert.ok(/page === "marine" && FEATURES\.marineInvoicing && canAccessMarine\(role\) &&/.test(appCode), "Marine gate unchanged")
+    assert.ok(/\]\.filter\(item => canOpenPage\(item\.id, role\)\)/.test(appCode), "sidebar filtered by canOpenPage")
+  })
+  ok("App: Owner dashboard and deletes are Owner-only in button AND handler", () => {
+    assert.ok(/page === "dashboard" && isOwnerAccount\s+&& <OwnerDashboard/.test(appCode))
+    assert.ok(/\{canDelete && \(\s*<button\s+type="button"\s+onClick=\{\(\) => deleteSale\(s\.id\)\}/.test(appCode), "sale delete button")
+    assert.ok(/\{canDelete && \(\s*<button\s+type="button"\s+onClick=\{\(\) => deleteExpense\(e\.id\)\}/.test(appCode), "expense delete button")
+    assert.ok(/const deleteSale = async \(id\) => \{\s*if \(!canDelete\) return/.test(appCode), "sale delete handler")
+    assert.ok(/const deleteExpense = async \(id\) => \{\s*if \(!canDelete\) return/.test(appCode), "expense delete handler")
+    assert.equal((appCode.match(/canDelete=\{isOwnerAccount\}/g) || []).length, 2, "Sales + Expenses receive canDelete=isOwnerAccount")
+  })
+  ok("App: Owner-only pages also refuse to render for non-owners", () => {
+    assert.ok(/function ReportsPage\([^)]*isOwnerAccount[^)]*\)[\s\S]{0,300}if \(!isOwnerAccount\) return null/.test(appCode), "ReportsPage")
+    assert.ok(/function DebtCreditPage\([^)]*isOwnerAccount/.test(appCode) && /if \(!isOwnerAccount\) return null/.test(appCode), "DebtCreditPage")
+    assert.ok(/function UsersPage\(\{ showToast, isOwnerAccount \}\)/.test(appCode) && /useEffect\(\(\) => \{ if \(isOwnerAccount\) loadUsers\(\) \}/.test(appCode), "UsersPage")
+  })
+  ok("AuthContext: permissions derive from the exact role, never from levels or the cached flag", () => {
+    const auth = stripComments(req("fs").readFileSync(path.join(root, "src/context/AuthContext.jsx"), "utf8"))
+    assert.ok(!/>=\s*ROLE_LEVELS\.admin/.test(auth), "level comparison removed")
+    assert.ok(!/hint\.isOwner/.test(auth), "cached boolean no longer trusted")
+    assert.ok(/const isOwnerAccount = isOwnerRole\(role\)/.test(auth) && /const canManage = isOwnerOrAdminRole\(role\)/.test(auth))
+  })
+  ok("OperationsDocuments: migrated to canManage (no isOwner left)", () => {
+    const ops = stripComments(req("fs").readFileSync(path.join(root, "src/OperationsDocuments.jsx"), "utf8"))
+    assert.ok(!/(?<![\w.])isOwner(?![\w])/.test(ops))
+  })
   ok("release flag: Marine Invoicing enabled (migration 20261119090000 must be live)", () => {
     assert.equal(f.FEATURES.marineInvoicing, true)
   })

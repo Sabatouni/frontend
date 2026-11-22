@@ -44,6 +44,7 @@ import { getWeeklyReportPdfBlobUrl } from "./lib/weeklyReportPdf"
 import OperationsDocumentsPage from "./OperationsDocuments"
 import MarineInvoicingPage from "./MarineInvoicing"
 import { canAccessMarine } from "./lib/marineInvoicing"
+import { canOpenPage } from "./lib/access"
 import { FEATURES } from "./config/features"
 import {
   SALE_DESCRIPTION_MAX, saleDescription, saleExtraNote, saleMatchesSearch,
@@ -99,7 +100,9 @@ async function adminFetch(path, accessToken, opts = {}) {
 
 /* ── ROOT APP ────────────────────────────────────────────── */
 export default function App() {
-  const { user, isOwner, role, logout, ready, hasAccess, permissionsPending, permissionsError, refresh } = useAuth()
+  // Exact-role permissions (lib/permissions.js) -- never isOwner / levels:
+  //   isOwnerAccount = exactly "owner"; canManage = exactly "owner" or "admin".
+  const { user, isOwnerAccount, canManage, role, logout, ready, hasAccess, permissionsPending, permissionsError, refresh } = useAuth()
   const { t, lang } = useLanguage()
 
   const [sales,    setSales]    = useState([])
@@ -177,7 +180,7 @@ export default function App() {
   // show who recorded each row. application_members() is gated server-side
   // (it returns nothing to a Worker), so this is never an access boundary.
   useEffect(() => {
-    if (!user || !isOwner) return
+    if (!user || !isOwnerAccount) return
     let cancelled = false
     supabase.rpc("application_members", { p_application_slug: "stv-pos" }).then(({ data, error }) => {
       if (cancelled) return
@@ -185,7 +188,7 @@ export default function App() {
       setMemberNames(Object.fromEntries((data || []).map(m => [m.user_id, m.full_name || m.email])))
     })
     return () => { cancelled = true }
-  }, [user, isOwner])
+  }, [user, isOwnerAccount])
 
   const addService = async (newSvc) => {
     const { error } = await supabase.from("services").insert([{
@@ -242,7 +245,8 @@ export default function App() {
       <Sidebar
         page={page}
         setPage={setPage}
-        isOwner={isOwner}
+        isOwnerAccount={isOwnerAccount}
+        canManage={canManage}
         role={role}
         displayName={displayName}
         onLogout={() => { logout(); setPage("dashboard") }}
@@ -269,61 +273,61 @@ export default function App() {
         </div>
 
         <div style={{ padding:"18px clamp(14px,4vw,28px) 32px" }}>
-          {page === "dashboard" && isOwner  && <OwnerDashboard sales={sales} expenses={expenses} services={services} memberNames={memberNames} />}
-          {page === "dashboard" && !isOwner && <WorkerHome sales={sales} expenses={expenses} displayName={displayName} setPage={setPage} />}
+          {page === "dashboard" && isOwnerAccount  && <OwnerDashboard sales={sales} expenses={expenses} services={services} memberNames={memberNames} />}
+          {page === "dashboard" && !isOwnerAccount && <WorkerHome sales={sales} expenses={expenses} displayName={displayName} setPage={setPage} />}
           {page === "sales"     && (
             <SalesPage
               sales={sales} services={services} fetchAll={fetchAll}
-              user={user} showToast={showToast} isOwner={isOwner} memberNames={memberNames}
+              user={user} showToast={showToast} canManage={canManage} canDelete={isOwnerAccount} memberNames={memberNames}
               onOpenAddService={() => setShowAddService(true)}
             />
           )}
           {page === "expenses"  && (
             <ExpensesPage
               expenses={expenses} fetchAll={fetchAll}
-              user={user} showToast={showToast} isOwner={isOwner} memberNames={memberNames}
+              user={user} showToast={showToast} canManage={canManage} canDelete={isOwnerAccount} memberNames={memberNames}
             />
           )}
           {/* Take Orders -- open to workers AND owner/admin (Sidebar has it
               in both navs, unlike Debt & Credit/Itinerary/Reports/Users
               below, which are owner/admin only). Menu management inside
-              the page is still gated on isOwner, same pattern as the
+              the page is gated on canManage (Owner+Admin), same pattern as the
               "+ Add Service" button on SalesPage. Fully isolated from
               Sales -- see src/lib/takeOrders.js's header comment. */}
           {page === "takeOrders" && (
-            <TakeOrdersPage user={user} isOwner={isOwner} displayName={displayName} showToast={showToast} />
+            <TakeOrdersPage user={user} canManage={canManage} displayName={displayName} showToast={showToast} />
           )}
           {page === "inventory" && (
-            <InventoryPage user={user} isOwner={isOwner} showToast={showToast}
+            <InventoryPage user={user} canManage={canManage} showToast={showToast}
               onOpenDocuments={FEATURES.operationsDocuments ? () => { setDocsTab("Inventory & Stock"); setPage("documents") } : undefined} />
           )}
           {/* Operations Documents -- open to workers AND owner/admin. What
               each role may create/see/approve is enforced by RLS + triggers
-              on operational_documents (see migration 20261112090100).
-              Hidden for this release via FEATURES.operationsDocuments
-              (src/config/features.js) until that migration is applied. */}
+              on operational_documents (see migration 20261122090000).
+              Gated by FEATURES.operationsDocuments (src/config/features.js);
+              that migration must be live before this ships. */}
           {page === "documents" && FEATURES.operationsDocuments && (
-            <OperationsDocumentsPage user={user} isOwner={isOwner} displayName={displayName} showToast={showToast} initialTab={docsTab} />
+            <OperationsDocumentsPage user={user} canManage={canManage} displayName={displayName} showToast={showToast} initialTab={docsTab} />
           )}
           {page === "invoices" && (
-            <InvoicesPage user={user} isOwner={isOwner} displayName={displayName} showToast={showToast} />
+            <InvoicesPage user={user} canManage={canManage} displayName={displayName} showToast={showToast} />
           )}
           {/* Swahili Tent Itinerary -- Owner/Admin only. This is layer 2 of
               this module's defense-in-depth access control (see Sidebar's
-              ownerNav for layer 1, ItinerariesPage's own isOwner check for
+              entry for layer 1, ItinerariesPage's own canManage check for
               layer 3, and the stv_itinerary_* RLS policies for layer 4) --
               a Worker's `page` state can never render this block even if
-              set directly, since `isOwner` here is the same real, RLS-
+              set directly, since `canManage` here is the same real, RLS-
               backed value from AuthContext, not a client-trusted flag. */}
-          {page === "itinerary" && isOwner && (
-            <ItinerariesPage user={user} isOwner={isOwner} displayName={displayName} showToast={showToast} />
+          {page === "itinerary" && canOpenPage("itinerary", role) && (
+            <ItinerariesPage user={user} canManage={canManage} displayName={displayName} showToast={showToast} />
           )}
-          {/* Debt & Credit -- Owner/Admin only, same three-layer defense as
-              the itinerary block above (Sidebar nav, this route gate, the
-              page's own isOwner check, and RLS -- see the module's own
+          {/* Debt & Credit -- OWNER ONLY, same layered defense as the
+              itinerary block above (Sidebar nav, this route gate, the
+              page's own isOwnerAccount check, and RLS -- see the module's own
               header comment at the end of this file for the fourth layer). */}
-          {page === "debtCredit" && isOwner && (
-            <DebtCreditPage user={user} isOwner={isOwner} displayName={displayName} showToast={showToast} />
+          {page === "debtCredit" && canOpenPage("debtCredit", role) && (
+            <DebtCreditPage user={user} isOwnerAccount={isOwnerAccount} displayName={displayName} showToast={showToast} />
           )}
           {/* Marine Invoicing (Swahili Marine & Diving): STRICTLY Owner-only.
               Three UI layers -- sidebar entry, this route gate, the page's own
@@ -333,10 +337,10 @@ export default function App() {
           {page === "marine" && FEATURES.marineInvoicing && canAccessMarine(role) && (
             <MarineInvoicingPage user={user} role={role} showToast={showToast} />
           )}
-          {page === "reports" && isOwner && (
-            <ReportsPage sales={sales} expenses={expenses} services={services} user={user} isOwner={isOwner} displayName={displayName} showToast={showToast} memberNames={memberNames} />
+          {page === "reports" && canOpenPage("reports", role) && (
+            <ReportsPage sales={sales} expenses={expenses} services={services} user={user} isOwnerAccount={isOwnerAccount} displayName={displayName} showToast={showToast} memberNames={memberNames} />
           )}
-          {page === "users" && isOwner && <UsersPage showToast={showToast} />}
+          {page === "users" && canOpenPage("users", role) && <UsersPage showToast={showToast} isOwnerAccount={isOwnerAccount} />}
         </div>
       </main>
 
@@ -621,33 +625,26 @@ function LoginPage() {
 }
 
 /* ── SIDEBAR ─────────────────────────────────────────────── */
-function Sidebar({ page, setPage, isOwner, role, displayName, onLogout, open, onClose }) {
+function Sidebar({ page, setPage, isOwnerAccount, canManage, role, displayName, onLogout, open, onClose }) {
   const { t, lang, setLang } = useLanguage()
-  const ownerNav = [
-    { id:"dashboard",  label:t("navDashboard"),  icon:"📊" },
-    { id:"sales",      label:t("navSales"),      icon:"💰" },
+  // One list; every entry's visibility mirrors its route gate in App() and
+  // the database rules. Exact roles only (lib/permissions.js):
+  //   everyone with stv-pos access | canManage = owner/admin | isOwnerAccount = owner
+  const nav = [
+    { id:"dashboard",  label: isOwnerAccount ? t("navDashboard") : t("navHome"), icon: isOwnerAccount ? "📊" : "🏠" },
+    { id:"sales",      label: canManage ? t("navSales") : t("navRecordSale"),    icon:"💰" },
     { id:"takeOrders", label:"Take Orders",      icon:"🍽️" },
     { id:"expenses",   label:t("navExpenses"),   icon:"🧾" },
     { id:"inventory",  label:t("navInventory"),  icon:"📦" },
     ...(FEATURES.operationsDocuments ? [{ id:"documents", label:"Documents", icon:"🗂️" }] : []),
     { id:"invoices",   label:t("navInvoices"),   icon:"📑" },
-    { id:"itinerary",  label:t("navItinerary"),  icon:"🧳" },
-    { id:"debtCredit", label:"Debt & Credit",    icon:"💳" },
+    { id:"itinerary",  label:t("navItinerary"),  icon:"🧳" },   // Owner+Admin (lib/access.js)
+    { id:"debtCredit", label:"Debt & Credit",    icon:"💳" },   // Owner only
     // Strictly Owner-only (not Admin): see canAccessMarine().
     ...(FEATURES.marineInvoicing && canAccessMarine(role) ? [{ id:"marine", label:"Marine Invoicing", icon:"⚓" }] : []),
-    { id:"reports",    label:t("navReports"),    icon:"📈" },
-    { id:"users",      label:t("navUsers"),      icon:"👥" },
-  ]
-  const workerNav = [
-    { id:"dashboard",  label:t("navHome"),       icon:"🏠" },
-    { id:"sales",      label:t("navRecordSale"), icon:"💰" },
-    { id:"takeOrders", label:"Take Orders",      icon:"🍽️" },
-    { id:"expenses",   label:t("navExpenses"),   icon:"🧾" },
-    { id:"inventory",  label:t("navInventory"),  icon:"📦" },
-    ...(FEATURES.operationsDocuments ? [{ id:"documents", label:"Documents", icon:"🗂️" }] : []),
-    { id:"invoices",   label:t("navInvoices"),   icon:"📑" },
-  ]
-  const nav = isOwner ? ownerNav : workerNav
+    { id:"reports",    label:t("navReports"),    icon:"📈" },   // Owner only
+    { id:"users",      label:t("navUsers"),      icon:"👥" },   // Owner only
+  ].filter(item => canOpenPage(item.id, role))
 
   return (
     <>
@@ -683,7 +680,7 @@ function Sidebar({ page, setPage, isOwner, role, displayName, onLogout, open, on
         />
         {open && (
           <div style={{ fontSize:10, color:C.sidebarText, textAlign:"center", marginTop:2, letterSpacing:0.6, fontWeight:500 }}>
-            {isOwner ? t("ownerDashboardLabel") : t("workerPanelLabel")}
+            {isOwnerAccount ? t("ownerDashboardLabel") : canManage ? "ADMIN PANEL" : t("workerPanelLabel")}
           </div>
         )}
       </div>
@@ -737,7 +734,7 @@ function Sidebar({ page, setPage, isOwner, role, displayName, onLogout, open, on
                 {displayName}
               </div>
               <div style={{ fontSize:10.5, color:C.sidebarText, textTransform:"capitalize" }}>
-                {isOwner ? t("roleOwner") : t("roleWorker")}
+                {isOwnerAccount ? t("roleOwner") : canManage ? t("roleAdmin") : t("roleWorker")}
               </div>
             </div>
           </div>
@@ -1358,7 +1355,7 @@ function WorkerHome({ sales, expenses, displayName, setPage }) {
 }
 
 /* ── SALES PAGE ──────────────────────────────────────────── */
-function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, memberNames = {}, onOpenAddService }) {
+function SalesPage({ sales, services, fetchAll, user, showToast, canManage, canDelete, memberNames = {}, onOpenAddService }) {
   const { t, lang } = useLanguage()
   const [form, setForm] = useState({
     service: services[0]?.name || "",
@@ -1463,6 +1460,7 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, member
   }
 
   const deleteSale = async (id) => {
+    if (!canDelete) return // Owner-only (RLS sales_stvpos_owner_delete enforces it too)
     if (!confirm(t("confirmDeleteSale"))) return
     const { error } = await supabase.from("sales").delete().eq("id", id)
     if (error) { showToast(error.message, "error"); return }
@@ -1515,7 +1513,7 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, member
             ))}
           </div>
 
-          {isOwner && (
+          {canManage && (
             <button
               type="button"
               onClick={onOpenAddService}
@@ -1525,7 +1523,7 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, member
               <span style={{ fontSize:15 }}>＋</span> {t("addNewService")}
             </button>
           )}
-          {!isOwner && <div style={{ marginBottom:16 }} />}
+          {!canManage && <div style={{ marginBottom:16 }} />}
 
           <label style={lS} htmlFor="sale-description">Sales Description</label>
           <textarea
@@ -1664,10 +1662,10 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, member
                       <td style={{ ...tS, color:C.textFaint }}>{saleExtraNote(s) || "—"}</td>
                       {/* A Worker only ever receives their own rows (RLS), so
                           their own name is the correct recorder for each one. */}
-                      <td style={{ ...tS, color:C.textSub }}>{isOwner ? (memberNames[s.user_id] || "—") : displayName}</td>
+                      <td style={{ ...tS, color:C.textSub }}>{canManage ? (memberNames[s.user_id] || "—") : displayName}</td>
                       <td style={tS}>
                         <div style={{ display:"flex", gap:6 }}>
-                          {isOwner && (
+                          {canManage && (
                             <button
                               type="button"
                               onClick={() => setEditingSale(s)}
@@ -1689,7 +1687,7 @@ function SalesPage({ sales, services, fetchAll, user, showToast, isOwner, member
                           >
                             🧾
                           </button>
-                          {isOwner && (
+                          {canDelete && (
                             <button
                               type="button"
                               onClick={() => deleteSale(s.id)}
@@ -1815,7 +1813,7 @@ const CAT_KEYS = {
   Other:         "catOther",
 }
 
-function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner, memberNames = {} }) {
+function ExpensesPage({ expenses, fetchAll, user, showToast, canManage, canDelete, memberNames = {} }) {
   const { t } = useLanguage()
   const [form, setForm] = useState({
     category:EXPENSE_CATS[0], item:"", cost:"", date:todayStr(), time:nowTimeStr(),
@@ -1897,6 +1895,7 @@ function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner, memberName
   }
 
   const deleteExpense = async (id) => {
+    if (!canDelete) return // Owner-only (RLS expenses_stvpos_owner_delete enforces it too)
     if (!confirm(t("confirmDeleteExpense"))) return
     const { error } = await supabase.from("expenses").delete().eq("id", id)
     if (error) { showToast(error.message, "error"); return }
@@ -2013,7 +2012,7 @@ function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner, memberName
               <table className="stv-table" style={{ width:"100%", minWidth:560, borderCollapse:"collapse" }}>
                 <thead>
                   <tr style={{ borderBottom:`1.5px solid ${C.border}` }}>
-                    {[t("colDate"),t("timeLabel"),t("colCategory"),t("colItem"),t("colCost"),...(isOwner ? [t("colRecordedBy")] : []),""].map((h, i) => (
+                    {[t("colDate"),t("timeLabel"),t("colCategory"),t("colItem"),t("colCost"),...(canManage ? [t("colRecordedBy")] : []),""].map((h, i) => (
                       <th key={i} scope="col" style={{ textAlign:"left", padding:"0 0 10px", fontSize:10.5, color:C.textFaint, fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{h}</th>
                     ))}
                   </tr>
@@ -2026,9 +2025,9 @@ function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner, memberName
                       <td style={tS}>{t(CAT_KEYS[e.category] || e.category)}</td>
                       <td style={tS}>{e.item}</td>
                       <td style={{ ...tS, fontWeight:600, color:C.warnStrong }}>{TZS(e.cost)}</td>
-                      {isOwner && <td style={{ ...tS, color:C.textSub }}>{memberNames[e.user_id] || e.created_by || "—"}</td>}
+                      {canManage && <td style={{ ...tS, color:C.textSub }}>{memberNames[e.user_id] || e.created_by || "—"}</td>}
                       <td style={tS}>
-                        {isOwner && (
+                        {canDelete && (
                           <button
                             type="button"
                             onClick={() => deleteExpense(e.id)}
@@ -2042,7 +2041,7 @@ function ExpensesPage({ expenses, fetchAll, user, showToast, isOwner, memberName
                     </tr>
                   ))}
                   {filtered.length === 0 && (
-                    <tr><td colSpan={isOwner ? 7 : 6} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>{t("noExpensesYet")}</td></tr>
+                    <tr><td colSpan={canManage ? 7 : 6} style={{ ...tS, textAlign:"center", color:C.textFaint, paddingTop:24 }}>{t("noExpensesYet")}</td></tr>
                   )}
                 </tbody>
               </table>
@@ -2152,7 +2151,7 @@ function StatusBadge({ status }) {
 }
 
 /* ── INVENTORY DASHBOARD ─────────────────────────────────── */
-function InventoryPage({ user, isOwner, showToast, onOpenDocuments }) {
+function InventoryPage({ user, canManage, showToast, onOpenDocuments }) {
   const { t } = useLanguage()
   const [categories, setCategories] = useState([])
   const [items,      setItems]      = useState([])
@@ -2192,13 +2191,13 @@ function InventoryPage({ user, isOwner, showToast, onOpenDocuments }) {
         {activeCategory.id === "drinks" ? (
           <DrinksCategoryView
             category={activeCategory} items={catItems}
-            user={user} isOwner={isOwner} showToast={showToast}
+            user={user} canManage={canManage} showToast={showToast}
             reloadItems={loadAll}
           />
         ) : (
           <InventoryCategoryView
             category={activeCategory} items={catItems}
-            user={user} isOwner={isOwner} showToast={showToast}
+            user={user} canManage={canManage} showToast={showToast}
             reloadItems={loadAll}
           />
         )}
@@ -2275,7 +2274,7 @@ function InventoryPage({ user, isOwner, showToast, onOpenDocuments }) {
 
 /* ── GENERIC CATEGORY VIEW (Groceries / BnB / Park / Other, and the
    "Stock" tab of Drinks) ─────────────────────────────────── */
-function InventoryCategoryView({ category, items, user, isOwner, showToast, reloadItems, skipTitle }) {
+function InventoryCategoryView({ category, items, user, canManage, showToast, reloadItems, skipTitle }) {
   const { t } = useLanguage()
   const [showAdd,     setShowAdd]     = useState(false)
   const [stockItem,   setStockItem]   = useState(null)
@@ -2288,7 +2287,7 @@ function InventoryCategoryView({ category, items, user, isOwner, showToast, relo
     <div>
       <div style={{ display:"flex", alignItems:"center", justifyContent: skipTitle ? "flex-end" : "space-between", marginBottom:SPACE.lg, flexWrap:"wrap", gap:12 }}>
         {!skipTitle && <h1 style={{ ...pT, marginBottom:0 }}>{catDisplayName(category, t)}</h1>}
-        {isOwner && (
+        {canManage && (
           <button
             type="button"
             onClick={() => setShowAdd(true)}
@@ -2326,7 +2325,7 @@ function InventoryCategoryView({ category, items, user, isOwner, showToast, relo
                           style={{ background:C.accentSoft, color:C.accentStrong, border:"none", padding:"5px 11px", borderRadius:RADIUS.sm, fontSize:11, cursor:"pointer", fontWeight:600 }}>
                           {t("addStock")}
                         </button>
-                        {isOwner && (
+                        {canManage && (
                           <button type="button" onClick={() => setAdjustItem(item)} className="stv-btn stv-btn-secondary"
                             style={{ background:C.surface, color:C.textSub, border:`1px solid ${C.border}`, padding:"5px 11px", borderRadius:RADIUS.sm, fontSize:11, cursor:"pointer", fontWeight:600 }}>
                             {t("adjustStock")}
@@ -2685,7 +2684,7 @@ function InventoryHistoryModal({ item, onClose }) {
    never writes to, inventory_items.quantity. The weekly physical count
    stays the source of truth for what was sold and collected; this is a
    design choice worth confirming with the Owner (see final report). */
-function DrinksCategoryView({ category, items, user, isOwner, showToast, reloadItems }) {
+function DrinksCategoryView({ category, items, user, canManage, showToast, reloadItems }) {
   const { t } = useLanguage()
   const [tab, setTab] = useState("stock") // "stock" | "weekly"
 
@@ -2715,9 +2714,9 @@ function DrinksCategoryView({ category, items, user, isOwner, showToast, reloadI
       </div>
 
       {tab === "stock" ? (
-        <InventoryCategoryView category={category} items={items} user={user} isOwner={isOwner} showToast={showToast} reloadItems={reloadItems} skipTitle />
+        <InventoryCategoryView category={category} items={items} user={user} canManage={canManage} showToast={showToast} reloadItems={reloadItems} skipTitle />
       ) : (
-        <DrinksWeeklyView items={items} user={user} isOwner={isOwner} showToast={showToast} />
+        <DrinksWeeklyView items={items} user={user} canManage={canManage} showToast={showToast} />
       )}
     </div>
   )
@@ -2734,7 +2733,7 @@ function DrinksCategoryView({ category, items, user, isOwner, showToast, reloadI
    update from ever setting status to 'settled' or touching an
    already-settled week (see drink_weeks_stvpos_update_open's with_check),
    so this is enforced at the database level, not just in this UI. */
-function DrinksWeeklyView({ items, user, isOwner, showToast }) {
+function DrinksWeeklyView({ items, user, canManage, showToast }) {
   const { t } = useLanguage()
   const [weeks,      setWeeks]      = useState([])
   const [lines,      setLines]      = useState([])
@@ -2786,7 +2785,7 @@ function DrinksWeeklyView({ items, user, isOwner, showToast }) {
           lines={linesFor(openWeek.id)}
           additionsAll={additions}
           items={items}
-          isOwner={isOwner}
+          canManage={canManage}
           user={user}
           showToast={showToast}
           reload={loadAll}
@@ -2870,7 +2869,7 @@ function DrinksWeeklyView({ items, user, isOwner, showToast }) {
   )
 }
 
-function OpenDrinkWeekPanel({ week, lines, additionsAll, items, isOwner, user, showToast, reload, onAddLine, onAddAddition }) {
+function OpenDrinkWeekPanel({ week, lines, additionsAll, items, canManage, user, showToast, reload, onAddLine, onAddAddition }) {
   const { t } = useLanguage()
   const [closingDrafts, setClosingDrafts] = useState({})
   const [moneyReceived, setMoneyReceived] = useState(week.money_received ?? "")
@@ -3046,7 +3045,7 @@ function OpenDrinkWeekPanel({ week, lines, additionsAll, items, isOwner, user, s
             style={{ background:C.surface, color:C.text, border:`1px solid ${C.border}`, padding:"11px 20px", borderRadius:RADIUS.sm, fontSize:13, fontWeight:600, cursor:"pointer", fontFamily:FONT, opacity: busy ? 0.7 : 1 }}>
             {t("saveBtn")}
           </button>
-          {isOwner && (
+          {canManage && (
             <button type="button" onClick={settleWeek} disabled={busy || !allClosed} className="stv-btn stv-btn-primary"
               title={!allClosed ? t("pendingClosing") : undefined}
               style={{ ...sB, width:"auto", padding:"11px 22px", opacity: (busy || !allClosed) ? 0.6 : 1 }}>
@@ -3489,8 +3488,10 @@ function buildTaxReportWorkbook({ rows, totalSales, totalExpenses, fromDisplay, 
    panel below) stays exactly as it was, and a brand-new "Weekly Manager's
    Report" builder is added alongside it via a simple tab switch. Neither
    area's code reaches into the other's state. */
-function ReportsPage({ sales, expenses, services, user, isOwner, displayName, showToast, memberNames = {} }) {
+function ReportsPage({ sales, expenses, services, user, isOwnerAccount, displayName, showToast, memberNames = {} }) {
   const [reportsTab, setReportsTab] = useState("analytics") // "analytics" | "weekly"
+  // Page-level layer of the Owner-only gate (after hooks, before any render).
+  if (!isOwnerAccount) return null
 
   const tabBtnS = (active) => ({
     padding: "10px 18px",
@@ -3513,7 +3514,7 @@ function ReportsPage({ sales, expenses, services, user, isOwner, displayName, sh
       {reportsTab === "analytics" ? (
         <ReportsAnalyticsPanel sales={sales} expenses={expenses} services={services} showToast={showToast} memberNames={memberNames} displayName={displayName} />
       ) : (
-        <WeeklyReportsPanel sales={sales} expenses={expenses} user={user} isOwner={isOwner} displayName={displayName} showToast={showToast} memberNames={memberNames} />
+        <WeeklyReportsPanel sales={sales} expenses={expenses} user={user} isOwnerAccount={isOwnerAccount} displayName={displayName} showToast={showToast} memberNames={memberNames} />
       )}
     </div>
   )
@@ -3815,7 +3816,7 @@ function ReportsAnalyticsPanel({ sales, expenses, services, showToast, memberNam
 }
 
 /* ── USERS PAGE ──────────────────────────────────────────── */
-function UsersPage({ showToast }) {
+function UsersPage({ showToast, isOwnerAccount }) {
   const { t } = useLanguage()
   const { accessToken } = useAuth()
   const [users,  setUsers]  = useState([])
@@ -3833,7 +3834,9 @@ function UsersPage({ showToast }) {
     }
   }
 
-  useEffect(() => { loadUsers() }, [])
+  // Owner-only: don't even call the admin backend for anyone else (the
+  // backend's requireOwner middleware rejects them independently).
+  useEffect(() => { if (isOwnerAccount) loadUsers() }, [isOwnerAccount])
 
   async function createUser() {
     if (!newUser.email || !newUser.password) { showToast(t("emailAndPasswordRequired"), "error"); return }
@@ -3884,6 +3887,9 @@ function UsersPage({ showToast }) {
       showToast(e.message, "error")
     }
   }
+
+  // Page-level layer of the Owner-only gate (all hooks above run first).
+  if (!isOwnerAccount) return null
 
   return (
     <div>
@@ -4127,7 +4133,7 @@ function InvoicePreviewModal({ invoice, url, onClose, onPrint, onDownload }) {
   )
 }
 
-function InvoicesPage({ user, isOwner, displayName, showToast }) {
+function InvoicesPage({ user, canManage, displayName, showToast }) {
   const { t } = useLanguage()
   const [view, setView] = useState("list") // "list" | "form"
   const [invoices, setInvoices] = useState([])
@@ -4270,7 +4276,7 @@ function InvoicesPage({ user, isOwner, displayName, showToast }) {
   const amountLeft = grandTotal - paidNum
 
   async function handleSave() {
-    if (!isOwner) return
+    if (!canManage) return
     if (!form.customer_name.trim()) { showToast(t("customerNameRequiredError"), "error"); return }
     const validItems = items.filter(it => it.description.trim())
     if (validItems.length === 0) { showToast(t("atLeastOneItemRequired"), "error"); return }
@@ -4526,7 +4532,7 @@ function InvoicesPage({ user, isOwner, displayName, showToast }) {
           <h1 style={{ ...pT, marginBottom:4 }}>{t("invoicesTitle")}</h1>
           <p style={{ margin:0, color:C.textFaint, fontSize:13 }}>{t("invoicesSubtitle")}</p>
         </div>
-        {isOwner && (
+        {canManage && (
           <button
             type="button"
             onClick={startNew}
@@ -4588,7 +4594,7 @@ function InvoicesPage({ user, isOwner, displayName, showToast }) {
                       >
                         ⭳
                       </button>
-                      {isOwner && (
+                      {canManage && (
                         <>
                           <button
                             type="button"
@@ -4644,7 +4650,7 @@ function InvoicesPage({ user, isOwner, displayName, showToast }) {
 /* ══════════════════════════════════════════════════════════════════════
    SWAHILI TENT ITINERARY -- guest-facing Experience Proposal / Itinerary
    generator. Owner/Admin only (enforced by App()'s route gate above AND
-   the RLS policies on every stv_itinerary_* table -- see the isOwner check
+   the RLS policies on every stv_itinerary_* table -- see the canManage check
    at the top of ItinerariesPage below for a third, redundant layer).
 
    Entirely new, additive code. Does not read from or write to
@@ -6601,14 +6607,14 @@ class ItinerarySectionErrorBoundary extends Component {
 
 /* ── TOP-LEVEL PAGE: list / create / editor / media / library router ──
    This is the component referenced by App()'s route gate
-   (`{page === "itinerary" && isOwner && <ItinerariesPage .../>}`). The
-   `isOwner` check below is a third, redundant layer on top of that route
+   (`{page === "itinerary" && canManage && <ItinerariesPage .../>}`). The
+   `canManage` check below (exact Owner/Admin) is a third, redundant layer on top of that route
    gate and the Sidebar nav entry -- see the header comment at the top of
    this file. Every table this page touches (stv_itineraries and friends)
    also has its own RLS policy requiring has_minimum_role('stv-pos','admin'),
    so a Worker who somehow reached this component still gets nothing back
    from Supabase. */
-function ItinerariesPage({ user, isOwner, displayName, showToast }) {
+function ItinerariesPage({ user, canManage, displayName, showToast }) {
   const { t } = useLanguage()
   const [view, setView] = useState("list") // list | newBooking | newStandalone | editor | media | library
   const [itineraries, setItineraries] = useState([])
@@ -6656,10 +6662,10 @@ function ItinerariesPage({ user, isOwner, displayName, showToast }) {
   // Third, redundant access-control layer (see header comment) -- placed
   // after every hook above so this early return never changes the hook
   // count/order between renders, satisfying the Rules of Hooks even in the
-  // hypothetical case where `isOwner` flips while this component is
+  // hypothetical case where `canManage` flips while this component is
   // mounted. Layers 1 (nav) and 2 (route gate) already keep a non-owner
   // from reaching this component at all.
-  if (!isOwner) return null
+  if (!canManage) return null
 
   async function reloadMedia() {
     const { data, error } = await supabase.from("stv_itinerary_media").select("*").order("sort_order").order("created_at", { ascending:false })
@@ -6886,8 +6892,8 @@ function ItinerariesPage({ user, isOwner, displayName, showToast }) {
    suppliers who deliver now and get paid later, a family member who
    borrows business cash and returns it. Owner/Admin only, gated the same
    three-layer way as the itinerary module above: Sidebar nav (ownerNav
-   only), App()'s route gate (`page === "debtCredit" && isOwner`), this
-   page's own `isOwner` check below, and the debt_credit_* RLS policies
+   only), App()'s route gate (`page === "debtCredit" && canManage`), this
+   page's own `canManage` check below, and the debt_credit_* RLS policies
    (admin-only ALL + admin-only SELECT -- the STRICTEST pattern already in
    this app, matching invoices, not the looser sales/expenses shape).
 
@@ -7560,7 +7566,7 @@ function DebtCreditPersonDetail({ personId, user, displayName, showToast, onBack
    established pattern for a multi-view owner-only module), just with two
    direction tabs plus a History/Archived tab instead of itinerary's
    list/editor/media/library views. */
-function DebtCreditPage({ user, isOwner, displayName, showToast }) {
+function DebtCreditPage({ user, isOwnerAccount, displayName, showToast }) {
   const { t } = useLanguage()
   const [direction, setDirection] = useState("RECEIVABLE")
   const [view, setView] = useState("list") // list | person | archived
@@ -7596,7 +7602,7 @@ function DebtCreditPage({ user, isOwner, displayName, showToast }) {
 
   // Rules of Hooks: every hook above runs unconditionally on every render,
   // so this gate is placed after all of them, same as ItinerariesPage.
-  if (!isOwner) return null
+  if (!isOwnerAccount) return null
 
   if (loadErr) {
     return (
@@ -7763,8 +7769,8 @@ function DebtCreditPage({ user, isOwner, displayName, showToast }) {
 
    Access: every stv-pos user (worker included) can take orders -- Sidebar
    has this nav entry in both ownerNav and workerNav, and the route above
-   renders this page with no isOwner gate, matching Sales/Expenses. Menu
-   management is owner/admin only, enforced here (isOwner check before
+   renders this page with no role gate, matching Sales/Expenses. Menu
+   management is owner/admin only, enforced here (canManage check before
    opening MenuManagerModal) AND at the database layer
    (order_menu_items_admin_all RLS policy) -- the RLS policy is the real
    boundary; this is just so a worker never even sees the button. */
@@ -7774,7 +7780,7 @@ const ORDER_TABS = [
   { id:"history", label:"Order History" },
 ]
 
-function TakeOrdersPage({ user, isOwner, displayName, showToast }) {
+function TakeOrdersPage({ user, canManage, displayName, showToast }) {
   const [tab, setTab] = useState("open")
   const [openOrders, setOpenOrders] = useState([])
   const [loading, setLoading] = useState(true)
@@ -7827,7 +7833,7 @@ function TakeOrdersPage({ user, isOwner, displayName, showToast }) {
           <p style={{ margin:0, color:C.textFaint, fontSize:13 }}>Walk-in and restaurant order taking</p>
         </div>
         <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
-          {isOwner && (
+          {canManage && (
             <button type="button" onClick={() => setShowMenuManager(true)} className="stv-btn stv-btn-secondary"
               style={{ padding:"11px 18px", borderRadius:RADIUS.sm, border:`1px solid ${C.border}`, background:C.surface, color:C.text, fontWeight:600, fontSize:13.5, cursor:"pointer", fontFamily:FONT }}>
               Manage Menu
@@ -8452,11 +8458,10 @@ function MenuManagerModal({ onClose, showToast }) {
    `sales`/`expenses` (already-fetched, in-memory, from the app's top-level
    fetchAll()) to build a one-time snapshot when a report is created or
    explicitly re-populated; after that a report is just a row in
-   weekly_reports like any other saved document. Owner/admin only, same
-   three-layer gate as Debt & Credit: Sidebar nav (unchanged -- "Reports"
-   already owner-only), the route gate at `page === "reports" && isOwner`
-   (unchanged), and RLS (`weekly_reports_admin_all`, workers get zero
-   access, not even SELECT). */
+   weekly_reports like any other saved document. OWNER ONLY, same layered
+   gate as Debt & Credit: Sidebar nav ("Reports" owner-only), the route gate
+   at `page === "reports" && isOwnerAccount`, ReportsPage's own check, and
+   RLS (`weekly_reports_owner_all`; Admins and workers get zero access). */
 
 const WR_AMBER = { bg: "#FBF3D9", border: "#E7D48A", text: "#7A5E10" }
 
@@ -8581,7 +8586,7 @@ const WR_COMPLIANCE_STATUSES = ["Compliant", "Pending", "Overdue", "N/A"]
 const WR_ACTION_STATUSES = ["Pending", "In Progress", "Completed", "Delayed"]
 
 /* ── Weekly Reports: list/history + entry point for the editor ────────── */
-function WeeklyReportsPanel({ sales, expenses, user, isOwner, displayName, showToast, memberNames = {} }) {
+function WeeklyReportsPanel({ sales, expenses, user, isOwnerAccount, displayName, showToast, memberNames = {} }) {
   const [view, setView] = useState("history") // "history" | "editor"
   const [reports, setReports] = useState([])
   const [loading, setLoading] = useState(true)

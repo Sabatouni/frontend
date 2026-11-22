@@ -2,10 +2,11 @@
  * Release feature flags.
  *
  * operationsDocuments: the Operations Documents centre (restock requests,
- * equipment lists, inventory checklists, go-kart reports). Fully implemented
- * but hidden for this release -- it needs migration
- * 20261112090100_stv_pos_operational_documents.sql, which is not applied yet.
- * Flip to true only after that migration is live.
+ * equipment lists, inventory checklists, go-kart reports). Enabled with the
+ * release that applies migration
+ * 20261122090000_stv_pos_operational_documents.sql -- that migration must be
+ * live BEFORE this code is deployed, otherwise the page loads but every
+ * request fails (tables missing).
  *
  * marineInvoicing: Swahili Marine & Diving quotations / proforma / final
  * invoices (Owner/Admin only -- enforced by the sidebar, the route gate in
@@ -15,6 +16,6 @@
  * before this code is deployed.
  */
 export const FEATURES = Object.freeze({
-  operationsDocuments: false,
+  operationsDocuments: true,
   marineInvoicing: true,
 })

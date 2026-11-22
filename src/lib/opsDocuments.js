@@ -10,7 +10,7 @@ import { supabase } from "../api/supabaseClient"
  *   swahili_tent_village_gokart_report_and_logbook.pdf
  *
  * Persistence is the `operational_documents` table (see migration
- * 20261112090100). Documents are immutable once saved; reference numbers,
+ * 20261122090000). Documents are immutable once saved; reference numbers,
  * author, status and reviewer stamps are assigned by the database.
  */
 

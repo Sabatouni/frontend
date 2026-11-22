@@ -40,38 +40,106 @@ async function getStvPosRole(userId) {
   return data?.roles?.slug || null;
 }
 
-// AUTH MIDDLEWARE -- requires an ADMIN or OWNER role on stv-pos specifically.
-// A Worker, or an Owner/Admin of a *different* application (stv-web,
-// numa-web, ulphoria-web, alie-web), gets 403 here.
-async function requireAdmin(req, res, next) {
-  try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith("Bearer ")) {
-      return res.status(401).json({ error: "Missing token" });
+// ── AUTH MIDDLEWARE ─────────────────────────────────────────────
+// Verifies the Supabase JWT, then looks up the caller's REAL stv-pos role
+// and allows only the EXACT roles listed (no level comparison). A Worker,
+// any other role, or an Owner/Admin of a *different* application gets 403.
+function requireRole(allowedRoles, label) {
+  return async function (req, res, next) {
+    try {
+      const authHeader = req.headers.authorization;
+      if (!authHeader?.startsWith("Bearer ")) {
+        return res.status(401).json({ error: "Missing token" });
+      }
+      const token = authHeader.split(" ")[1];
+      const { data, error } = await supabase.auth.getUser(token);
+      if (error || !data?.user) {
+        return res.status(401).json({ error: "Invalid token" });
+      }
+      const role = await getStvPosRole(data.user.id);
+      if (!role || !allowedRoles.includes(role)) {
+        return res.status(403).json({ error: `Not authorized — ${label} only` });
+      }
+      req.user = data.user;
+      req.stvPosRole = role;
+      next();
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
     }
+  };
+}
 
-    const token = authHeader.split(" ")[1];
-    const { data, error } = await supabase.auth.getUser(token);
+// User and role management is STRICTLY Owner-only: an Admin can no longer
+// list, create, promote (including to Owner), demote, ban, delete or reset
+// the password of anyone.
+const requireOwner = requireRole(["owner"], "stv-pos Owner");
+// Itinerary tools stay Owner+Admin (approved access model for that module).
+const requireOwnerOrAdmin = requireRole(["owner", "admin"], "stv-pos Owner/Admin");
 
-    if (error || !data?.user) {
-      return res.status(401).json({ error: "Invalid token" });
-    }
+// ── TARGET PROTECTION ──────────────────────────────────────────
+// Even an Owner must not (a) lock themselves out, (b) remove the last
+// active Owner, or (c) delete / ban / reset an account that also holds roles
+// in OTHER applications (stv-web, platform-admin, numa-web, ...) -- deleting
+// an auth account affects every app sharing it, so those are managed from
+// the platform admin, not the POS.
+async function getActiveGrants(userId) {
+  const { data, error } = await supabase
+    .from("user_application_roles")
+    .select("roles!inner(slug), applications!inner(slug)")
+    .eq("user_id", userId)
+    .is("revoked_at", null);
+  if (error) throw error;
+  return (data || []).map((g) => ({ app: g.applications.slug, role: g.roles.slug }));
+}
 
-    const role = await getStvPosRole(data.user.id);
-    if (!role || !["admin", "owner"].includes(role)) {
-      return res.status(403).json({ error: "Not authorized — stv-pos owner/admin only" });
-    }
+async function countActiveOwners() {
+  const { data, error } = await supabase
+    .from("user_application_roles")
+    .select("user_id, roles!inner(slug), applications!inner(slug)")
+    .eq("applications.slug", APP_SLUG)
+    .eq("roles.slug", "owner")
+    .is("revoked_at", null);
+  if (error) throw error;
+  return new Set((data || []).map((g) => g.user_id)).size;
+}
 
-    req.user = data.user;
-    req.stvPosRole = role;
-    next();
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
+/**
+ * Returns an error message if `action` on `targetId` is not allowed, else null.
+ * action: "delete" | "ban" | "revoke" | "change-role" | "reset-password"
+ */
+async function protectTarget(req, targetId, action, newRole) {
+  if (!targetId) return "A target user is required";
+  const selfAction = targetId === req.user.id;
+  if (selfAction && ["delete", "ban", "revoke"].includes(action)) {
+    return "You cannot do this to your own account";
   }
+  if (selfAction && action === "change-role" && newRole !== "owner") {
+    return "You cannot change your own role";
+  }
+  const grants = await getActiveGrants(targetId);
+  const posRole = grants.find((g) => g.app === APP_SLUG)?.role || null;
+  const otherApps = grants.filter((g) => g.app !== APP_SLUG).map((g) => `${g.app}:${g.role}`);
+  if (otherApps.length && ["delete", "ban", "reset-password"].includes(action)) {
+    return `This account also has access to other applications (${otherApps.join(", ")}). Manage it from the platform admin instead.`;
+  }
+  const removesOwner = posRole === "owner" && (
+    ["delete", "ban", "revoke"].includes(action) || (action === "change-role" && newRole !== "owner")
+  );
+  if (removesOwner && (await countActiveOwners()) <= 1) {
+    return "This is the last active Owner. Make another account Owner first.";
+  }
+  return null;
+}
+
+async function userIdByEmail(email) {
+  const { data, error } = await supabase
+    .from("profiles").select("id").ilike("email", String(email || "").trim()).maybeSingle();
+  if (error) throw error;
+  return data?.id || null;
 }
 
 // ── GET all users (with their current stv-pos role, if any) ─────
-app.get("/admin/users", requireAdmin, async (req, res) => {
+app.get("/admin/users", requireOwner, async (req, res) => {
   const { data, error } = await supabase.auth.admin.listUsers();
   if (error) return res.status(400).json({ error: error.message });
 
@@ -88,7 +156,7 @@ app.get("/admin/users", requireAdmin, async (req, res) => {
 });
 
 // ── CREATE user + grant their initial stv-pos role ───────────────
-app.post("/admin/users", requireAdmin, async (req, res) => {
+app.post("/admin/users", requireOwner, async (req, res) => {
   const { email, password, role = "worker", name } = req.body;
 
   if (!email || !password) {
@@ -145,12 +213,16 @@ app.post("/admin/users", requireAdmin, async (req, res) => {
 
 // ── CHANGE role (grant_application_role replaces any existing active
 //    grant for this app atomically -- no separate revoke step needed) ──
-app.patch("/admin/role", requireAdmin, async (req, res) => {
+app.patch("/admin/role", requireOwner, async (req, res) => {
   const { userId, role } = req.body;
   const roleSlug = String(role || "").toLowerCase();
   if (!userId || !VALID_ROLES.includes(roleSlug)) {
     return res.status(400).json({ error: `userId is required and role must be one of: ${VALID_ROLES.join(", ")}` });
   }
+  try {
+    const denied = await protectTarget(req, userId, "change-role", roleSlug);
+    if (denied) return res.status(403).json({ error: denied });
+  } catch (err) { return res.status(500).json({ error: err.message }); }
 
   const { error } = await supabase.rpc("grant_application_role", {
     p_user_id: userId,
@@ -163,8 +235,12 @@ app.patch("/admin/role", requireAdmin, async (req, res) => {
 });
 
 // ── REVOKE all stv-pos access (distinct from a role change) ──────
-app.delete("/admin/role/:userId", requireAdmin, async (req, res) => {
+app.delete("/admin/role/:userId", requireOwner, async (req, res) => {
   const { userId } = req.params;
+  try {
+    const denied = await protectTarget(req, userId, "revoke");
+    if (denied) return res.status(403).json({ error: denied });
+  } catch (err) { return res.status(500).json({ error: err.message }); }
   const { error } = await supabase.rpc("revoke_application_role", {
     p_user_id: userId,
     p_application_slug: APP_SLUG,
@@ -174,8 +250,14 @@ app.delete("/admin/role/:userId", requireAdmin, async (req, res) => {
 });
 
 // ── ENABLE / DISABLE user ──────────────────────────────────────
-app.patch("/admin/active", requireAdmin, async (req, res) => {
+app.patch("/admin/active", requireOwner, async (req, res) => {
   const { userId, active } = req.body;
+  if (!active) {
+    try {
+      const denied = await protectTarget(req, userId, "ban");
+      if (denied) return res.status(403).json({ error: denied });
+    } catch (err) { return res.status(500).json({ error: err.message }); }
+  }
 
   const { data, error } = await supabase.auth.admin.updateUserById(userId, {
     ban_duration: active ? "none" : "876000h",
@@ -186,8 +268,14 @@ app.patch("/admin/active", requireAdmin, async (req, res) => {
 });
 
 // ── RESET password ─────────────────────────────────────────────
-app.post("/admin/reset-password", requireAdmin, async (req, res) => {
+app.post("/admin/reset-password", requireOwner, async (req, res) => {
   const { email } = req.body;
+  try {
+    const targetId = await userIdByEmail(email);
+    if (!targetId) return res.status(404).json({ error: "No account with that email" });
+    const denied = await protectTarget(req, targetId, "reset-password");
+    if (denied) return res.status(403).json({ error: denied });
+  } catch (err) { return res.status(500).json({ error: err.message }); }
 
   const { data, error } = await supabase.auth.resetPasswordForEmail(email);
   if (error) return res.status(400).json({ error: error.message });
@@ -195,8 +283,12 @@ app.post("/admin/reset-password", requireAdmin, async (req, res) => {
 });
 
 // ── DELETE user ────────────────────────────────────────────────
-app.delete("/admin/users/:id", requireAdmin, async (req, res) => {
+app.delete("/admin/users/:id", requireOwner, async (req, res) => {
   const { id } = req.params;
+  try {
+    const denied = await protectTarget(req, id, "delete");
+    if (denied) return res.status(403).json({ error: denied });
+  } catch (err) { return res.status(500).json({ error: err.message }); }
 
   const { error } = await supabase.auth.admin.deleteUser(id);
   if (error) return res.status(400).json({ error: error.message });
@@ -212,7 +304,7 @@ app.delete("/admin/users/:id", requireAdmin, async (req, res) => {
 // any fact that isn't present in that payload -- a missing field is simply
 // left out of the paragraph, never guessed at. This route never touches
 // the database and never sees anything beyond what the request body
-// carries; it is gated by the same requireAdmin middleware (stv-pos
+// carries; it is gated by requireOwnerOrAdmin (stv-pos
 // Owner/Admin only) as every other route in this file.
 //
 // Provider is selected from whichever key is configured in *this server's*
@@ -281,7 +373,7 @@ async function callOpenAI(facts) {
   return json?.choices?.[0]?.message?.content || "";
 }
 
-app.post("/admin/itinerary/personalize", requireAdmin, async (req, res) => {
+app.post("/admin/itinerary/personalize", requireOwnerOrAdmin, async (req, res) => {
   const {
     guestName, guestType, occasion, tentName, checkIn, checkOut,
     adults, children, preferences, experiences,
