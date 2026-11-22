@@ -304,8 +304,8 @@ export default function App() {
           {/* Operations Documents -- open to workers AND owner/admin. What
               each role may create/see/approve is enforced by RLS + triggers
               on operational_documents (see migration 20261122090000).
-              Hidden for this release via FEATURES.operationsDocuments
-              (src/config/features.js) until that migration is applied. */}
+              Gated by FEATURES.operationsDocuments (src/config/features.js);
+              that migration must be live before this ships. */}
           {page === "documents" && FEATURES.operationsDocuments && (
             <OperationsDocumentsPage user={user} canManage={canManage} displayName={displayName} showToast={showToast} initialTab={docsTab} />
           )}

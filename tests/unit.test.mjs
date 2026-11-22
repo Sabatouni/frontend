@@ -298,8 +298,8 @@ try {
     assert.deepEqual(brand.visibleBounds(rgba(10, 10, [[0, 0], [9, 9]]), 10, 10, { padRatio: 0.5 }), { x: 0, y: 0, w: 10, h: 10 }) // padding clamped
   })
   const f = await server.ssrLoadModule("/src/config/features.js")
-  ok("release flag: Operations Documents is hidden for this release", () => {
-    assert.equal(f.FEATURES.operationsDocuments, false)
+  ok("release flag: Operations Documents enabled (migration 20261122090000 must be live)", () => {
+    assert.equal(f.FEATURES.operationsDocuments, true)
     assert.ok(Object.isFrozen(f.FEATURES))
   })
 
